@@ -31,6 +31,11 @@ DEFAULT_STATE = {
     "cycle": 0,
     "status": "planning",
     "mood": "",
+    "avatar": {
+        "name": "",
+        "creature": "",
+        "description": ""
+    },
     "active_strategies": [],
     "total_earned": 0.00,
     "total_spent": 0.00,

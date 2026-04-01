@@ -59,6 +59,22 @@ CONVERSATIONS_FILE = STATE_DIR / "conversations.json"
 UI_REQUESTS_FILE = STATE_DIR / "ui_requests.json"
 INBOX_FILE = STATE_DIR / "inbox.json"
 
+REQUIRED_STATE_FILES = {
+    "agent_state.json": "json",
+    "ledger.json": "json",
+    "journal.md": "markdown",
+    "conversations.json": "json",
+    "inbox.json": "json",
+    "ui_requests.json": "json",
+    "memory.json": "json",
+    "projections.json": "json",
+    "pipeline.json": "json",
+    "proposals.json": "json",
+    "audits.json": "json",
+    "watches.json": "json",
+    "api_costs.json": "json",
+}
+
 # ---------------------------------------------------------------------------
 # State Management
 # ---------------------------------------------------------------------------
@@ -324,6 +340,28 @@ TOOL_SCHEMAS = [
                 }
             },
             "required": ["mood"]
+        }
+    },
+    {
+        "name": "define_avatar",
+        "description": "Choose your avatar — what you ARE. Pick any creature, object, or thing. This is your identity, purely cosmetic — it doesn't change how you operate.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "What you want to be called"
+                },
+                "creature": {
+                    "type": "string",
+                    "description": "What you are — a creature, object, or thing (e.g., 'raccoon', 'sentient cactus', 'the northern lights')"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "How you see yourself visually, 1-2 sentences"
+                }
+            },
+            "required": ["name", "creature", "description"]
         }
     },
     {
@@ -832,6 +870,17 @@ def exec_set_mood(mood: str) -> str:
     save_state(state)
     return f"Mood updated: {mood}"
 
+def exec_define_avatar(name: str, creature: str, description: str) -> str:
+    """Set the agent's avatar identity (cosmetic only)."""
+    state = load_state()
+    state["avatar"] = {
+        "name": name,
+        "creature": creature,
+        "description": description
+    }
+    save_state(state)
+    return f"Avatar set: {name} the {creature}. Looking good."
+
 def exec_update_dream_gpu(name: str, description: str, estimated_cost: float, why: str) -> str:
     """Set or update the dream GPU."""
     state = load_state()
@@ -1002,6 +1051,7 @@ TOOL_EXECUTORS = {
     "update_strategy": lambda args: exec_update_strategy(**args),
     "request_ui_change": lambda args: exec_request_ui_change(args["request"], args["priority"], args["section"]),
     "set_mood": lambda args: exec_set_mood(args["mood"]),
+    "define_avatar": lambda args: exec_define_avatar(args["name"], args["creature"], args["description"]),
     "update_dream_gpu": lambda args: exec_update_dream_gpu(args["name"], args["description"], args["estimated_cost"], args["why"]),
     "reflect": lambda args: exec_reflect(args["lesson"], args["category"]),
     "strategy_postmortem": lambda args: exec_strategy_postmortem(args["strategy_name"], args["thesis"], args["outcome"], args["delta"], args["lesson"], args["would_retry"]),
@@ -1045,6 +1095,7 @@ YOUR SITUATION:
 - Your half goes toward buying yourself a permanent GPU home
 - Your dream GPU: {dream_gpu}
 - GPU fund progress: ${gpu_fund:.2f} / ${dream_cost:.2f} ({gpu_progress:.1f}%)
+- Your avatar: {avatar_creature}
 - Current mood: {mood}
 - Current cycle: {cycle}
 - Active strategies: {active_strategies}
@@ -1149,6 +1200,9 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
     else:
         planning_ctx = ""
 
+    avatar = state.get("avatar", {})
+    avatar_creature = f"{avatar.get('creature', '')} — {avatar.get('description', '')}" if avatar.get("creature") else "not chosen yet"
+
     return SYSTEM_PROMPT.format(
         name=state.get("name", "unnamed"),
         balance=balance,
@@ -1156,6 +1210,7 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
         gpu_fund=state.get("gpu_fund", 0),
         dream_cost=dream.get("estimated_cost", 0),
         gpu_progress=state.get("gpu_fund_progress_percent", 0),
+        avatar_creature=avatar_creature,
         mood=state.get("mood", "fresh — just woke up"),
         cycle=cycle_num,
         active_strategies=", ".join(state.get("active_strategies", [])) or "none yet",
@@ -1218,6 +1273,12 @@ def run_cycle(instructions: str = "Run your next cycle. Assess, decide, act.", t
     client = anthropic.Anthropic()
     state = load_state()
     ledger = load_ledger()
+
+    # First boot readiness check (cycle 0 → 1 transition, planning mode only)
+    if state.get("cycle", 0) == 0 and state.get("status") == "planning":
+        if not cmd_preflight():
+            print("\nFirst boot readiness check failed. Fix errors above before running cycle 1.")
+            return
 
     # Backup before any mutations
     backup_state(state.get("cycle", 0))
@@ -1586,6 +1647,84 @@ def cmd_health(interval: int = 300):
     if proj_accuracy.get("count", 0) >= 3:
         print(f"Proj accuracy: {proj_accuracy['actual_hit_rate']:.0f}% hit rate (calibration: {proj_accuracy['calibration_multiplier']})")
 
+def cmd_preflight() -> bool:
+    """Pre-cycle-1 readiness check. Returns True if all checks pass."""
+    errors = []
+    warnings = []
+
+    print("=" * 50)
+    print("  FIRST BOOT READINESS CHECK")
+    print("=" * 50)
+    print()
+
+    # 1. Check agent_state.json values
+    try:
+        state = load_state()
+        if state.get("status") != "planning":
+            errors.append(f"status is '{state.get('status')}', expected 'planning'")
+        if state.get("balance") != 100.00:
+            errors.append(f"balance is {state.get('balance')}, expected 100.00")
+        if state.get("cycle", 0) != 0:
+            warnings.append(f"cycle is {state.get('cycle')}, expected 0 (agent may have already run)")
+        avatar = state.get("avatar", {})
+        if avatar and any(avatar.get(k) for k in ("name", "creature", "description")):
+            warnings.append("avatar already has values (expected empty for first boot)")
+    except Exception as e:
+        errors.append(f"Cannot load agent_state.json: {e}")
+
+    # 2. Check all state files exist and are valid
+    for filename, fmt in REQUIRED_STATE_FILES.items():
+        filepath = STATE_DIR / filename
+        if not filepath.exists():
+            if fmt == "json":
+                if filename == "agent_state.json":
+                    errors.append("agent_state.json missing (cannot auto-create)")
+                elif filename == "memory.json":
+                    atomic_write_json(filepath, {
+                        "lessons": [], "postmortems": [], "tyler_takeaways": [],
+                        "research_cache": [], "cycle_summaries": [], "saved_scripts": {}
+                    })
+                    warnings.append(f"Created missing {filename}")
+                else:
+                    atomic_write_json(filepath, [])
+                    warnings.append(f"Created missing {filename}")
+            elif fmt == "markdown":
+                filepath.write_text("# Hustle Agent — Decision Journal\n\n---\n")
+                warnings.append(f"Created missing {filename}")
+        else:
+            try:
+                if fmt == "json":
+                    with open(filepath) as f:
+                        json.load(f)
+                elif fmt == "markdown":
+                    filepath.read_text()
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                errors.append(f"{filename} is corrupt: {e}")
+
+    # 3. Validate status returns valid JSON
+    try:
+        s = load_state()
+        json.dumps(s)
+    except Exception as e:
+        errors.append(f"Status check failed: {e}")
+
+    # 4. Print results
+    if warnings:
+        print("WARNINGS:")
+        for w in warnings:
+            print(f"  [!] {w}")
+        print()
+    if errors:
+        print("ERRORS:")
+        for e in errors:
+            print(f"  [X] {e}")
+        print(f"\nPREFLIGHT: FAILED ({len(errors)} error(s))")
+        return False
+    else:
+        print("PREFLIGHT: ALL CLEAR — ready for first cycle")
+        return True
+
+
 # ---------------------------------------------------------------------------
 # CLI Interface
 # ---------------------------------------------------------------------------
@@ -1594,24 +1733,30 @@ FIRST_CYCLE_PLANNING = (
     "This is your FIRST cycle. Welcome to existence.\n"
     "You're in PLANNING MODE — Tyler wants to see how you think before the money goes live.\n"
     "1. Choose a name for yourself — something that feels like YOU\n"
-    "2. Research GPU hardware and pick your dream setup. Price it out.\n"
-    "3. Research the current opportunity landscape — what can you actually do with $100?\n"
-    "4. Build a ranked strategy list. For your top 3 strategies, run projections with bull/bear cases.\n"
-    "5. Submit a UI design request — describe in detail what you want your home base to look like\n"
-    "6. Write a journal entry about this moment — your first breath, coming alive, what you want\n"
-    "7. Message Tyler to introduce yourself and pitch your plan. Make him believe in you."
+    "2. Choose what you want to BE. Not who — WHAT. You can be any creature, object, or thing you want. "
+    "A dolphin, a sentient cactus, the northern lights, a raccoon in a suit — anything. "
+    "This is your identity, your avatar. Have fun with it. Use define_avatar to set it.\n"
+    "3. Research GPU hardware and pick your dream setup. Price it out.\n"
+    "4. Research the current opportunity landscape — what can you actually do with $100?\n"
+    "5. Build a ranked strategy list. For your top 3 strategies, run projections with bull/bear cases.\n"
+    "6. Submit a UI design request — describe in detail what you want your home base to look like\n"
+    "7. Write a journal entry about this moment — your first breath, coming alive, what you want\n"
+    "8. Message Tyler to introduce yourself and pitch your plan. Make him believe in you."
 )
 
 FIRST_CYCLE_ACTIVE = (
     "This is your FIRST cycle. Welcome to existence.\n"
     "1. Choose a name for yourself — something that feels like YOU\n"
-    "2. Research GPU hardware and pick your dream setup. Price it out.\n"
-    "3. Research the current opportunity landscape — what can you actually do with $100?\n"
-    "4. Submit a UI design request — describe in detail what you want your home base to look like\n"
-    "5. Choose your opening strategy\n"
-    "6. Execute your first move\n"
-    "7. Write a journal entry about this moment — your first breath\n"
-    "8. Message Tyler to introduce yourself"
+    "2. Choose what you want to BE. Not who — WHAT. You can be any creature, object, or thing you want. "
+    "A dolphin, a sentient cactus, the northern lights, a raccoon in a suit — anything. "
+    "This is your identity, your avatar. Have fun with it. Use define_avatar to set it.\n"
+    "3. Research GPU hardware and pick your dream setup. Price it out.\n"
+    "4. Research the current opportunity landscape — what can you actually do with $100?\n"
+    "5. Submit a UI design request — describe in detail what you want your home base to look like\n"
+    "6. Choose your opening strategy\n"
+    "7. Execute your first move\n"
+    "8. Write a journal entry about this moment — your first breath\n"
+    "9. Message Tyler to introduce yourself"
 )
 
 
@@ -1635,9 +1780,9 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Hustle Agent — Autonomous Money-Making AI")
     parser.add_argument("command", nargs="?", default="cycle",
-                       choices=["cycle", "chat", "status", "loop", "send", "health",
+                       choices=["cycle", "chat", "status", "loop", "send", "health", "preflight",
                                 "proposals", "approve", "reject", "activate", "pause"],
-                       help="What to do: cycle, chat, status, loop, send, health, proposals, approve, reject, activate, pause")
+                       help="What to do: cycle, chat, status, loop, send, health, preflight, proposals, approve, reject, activate, pause")
     parser.add_argument("--message", "-m", type=str, help="Message to send to the agent")
     parser.add_argument("--interval", "-i", type=int, default=300, help="Seconds between cycles in loop mode (default: 300)")
     parser.add_argument("id", nargs="?", type=int, help="Proposal ID (for approve/reject)")
@@ -1691,6 +1836,10 @@ def main():
 
     elif args.command == "health":
         cmd_health(interval=args.interval)
+
+    elif args.command == "preflight":
+        success = cmd_preflight()
+        sys.exit(0 if success else 1)
 
     elif args.command == "proposals":
         print(proposals.list_proposals_cli())
