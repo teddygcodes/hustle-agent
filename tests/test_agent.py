@@ -357,6 +357,13 @@ class TestToolExecutors:
         state = engine.load_state()
         assert state["mood"] == "excited and hopeful"
 
+    def test_define_avatar(self, active_state):
+        engine.exec_define_avatar("Chip", "beaver", "A determined beaver building dams of profit")
+        state = engine.load_state()
+        assert state["avatar"]["name"] == "Chip"
+        assert state["avatar"]["creature"] == "beaver"
+        assert state["avatar"]["description"] == "A determined beaver building dams of profit"
+
     def test_update_dream_gpu(self, active_state):
         engine.exec_update_dream_gpu("RTX 6090", "Next gen beast", 3000.0, "Maximum compute")
         state = engine.load_state()
@@ -1243,3 +1250,70 @@ class TestLedgerMath:
         state = engine.load_state()
         # net_profit = 40, roi = (40/100)*100 = 40%
         assert state["roi_percent"] == pytest.approx(40.0)
+
+
+class TestPreflight:
+
+    def test_preflight_passes_clean_state(self, isolated_fs, capsys):
+        # Seed all required files that isolated_fs doesn't create
+        state_dir = isolated_fs / "state"
+        for f in ["memory.json", "projections.json", "pipeline.json",
+                   "proposals.json", "audits.json", "watches.json", "api_costs.json"]:
+            if not (state_dir / f).exists():
+                if f == "memory.json":
+                    (state_dir / f).write_text('{"lessons":[],"postmortems":[],"tyler_takeaways":[],"research_cache":[],"cycle_summaries":[],"saved_scripts":{}}')
+                else:
+                    (state_dir / f).write_text("[]")
+        result = engine.cmd_preflight()
+        assert result is True
+        captured = capsys.readouterr()
+        assert "ALL CLEAR" in captured.out
+
+    def test_preflight_fails_wrong_status(self, isolated_fs, capsys):
+        state_dir = isolated_fs / "state"
+        for f in ["memory.json", "projections.json", "pipeline.json",
+                   "proposals.json", "audits.json", "watches.json", "api_costs.json"]:
+            if not (state_dir / f).exists():
+                (state_dir / f).write_text("[]")
+        state = engine.load_state()
+        state["status"] = "active"
+        engine.save_state(state)
+        result = engine.cmd_preflight()
+        assert result is False
+        captured = capsys.readouterr()
+        assert "status" in captured.out
+
+    def test_preflight_fails_wrong_balance(self, isolated_fs, capsys):
+        state_dir = isolated_fs / "state"
+        for f in ["memory.json", "projections.json", "pipeline.json",
+                   "proposals.json", "audits.json", "watches.json", "api_costs.json"]:
+            if not (state_dir / f).exists():
+                (state_dir / f).write_text("[]")
+        state = engine.load_state()
+        state["balance"] = 50.0
+        engine.save_state(state)
+        result = engine.cmd_preflight()
+        assert result is False
+        captured = capsys.readouterr()
+        assert "balance" in captured.out
+
+    def test_preflight_creates_missing_files(self, isolated_fs, capsys):
+        memory_path = isolated_fs / "state" / "memory.json"
+        # memory.json shouldn't exist yet in isolated_fs
+        if memory_path.exists():
+            memory_path.unlink()
+        result = engine.cmd_preflight()
+        assert result is True
+        assert memory_path.exists()
+
+    def test_preflight_detects_corrupt_json(self, isolated_fs, capsys):
+        state_dir = isolated_fs / "state"
+        for f in ["memory.json", "projections.json", "pipeline.json",
+                   "proposals.json", "audits.json", "watches.json", "api_costs.json"]:
+            if not (state_dir / f).exists():
+                (state_dir / f).write_text("[]")
+        (state_dir / "ledger.json").write_text("{bad json")
+        result = engine.cmd_preflight()
+        assert result is False
+        captured = capsys.readouterr()
+        assert "corrupt" in captured.out

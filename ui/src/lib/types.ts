@@ -17,6 +17,12 @@ export interface Strategy {
   updated_at: string;
 }
 
+export interface Avatar {
+  name: string;
+  creature: string;
+  description: string;
+}
+
 export interface AgentState {
   name: string;
   balance: number;
@@ -24,6 +30,7 @@ export interface AgentState {
   cycle: number;
   status: string;
   mood: string;
+  avatar: Avatar;
   active_strategies: string[];
   total_earned: number;
   total_spent: number;

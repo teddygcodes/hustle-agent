@@ -27,8 +27,14 @@ export default function CommandCenter() {
       <div className="flex items-center gap-3 mb-6">
         <h2 className="text-2xl font-bold text-zinc-100">{state.name || 'Unnamed Agent'}</h2>
         <StatusBadge status={state.status || 'offline'} />
+        {state.avatar?.creature && (
+          <span className="text-sm text-zinc-400">the {state.avatar.creature}</span>
+        )}
         {state.mood && <span className="text-sm text-zinc-500">{state.mood}</span>}
       </div>
+      {state.avatar?.description && (
+        <p className="text-xs text-zinc-500 -mt-4 mb-6">{state.avatar.description}</p>
+      )}
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">

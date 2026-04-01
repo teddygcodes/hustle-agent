@@ -40,6 +40,9 @@ export function Sidebar() {
           <h1 className="text-sm font-semibold text-zinc-100 truncate">{name}</h1>
         </div>
         {mood && <p className="text-xs text-zinc-500 truncate ml-4">{mood}</p>}
+        {state?.avatar?.creature && (
+          <p className="text-xs text-zinc-600 truncate ml-4">the {state.avatar.creature}</p>
+        )}
       </div>
 
       <nav className="flex-1 overflow-y-auto py-2">
