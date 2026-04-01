@@ -112,7 +112,11 @@ hustle-agent/
 │   ├── install.sh         # systemd installation
 │   └── setup_vps.sh       # One-shot Ubuntu VPS bootstrap
 ├── config/                # API keys (you provide these)
-├── ui/                    # React app (built by Claude Code per agent's design requests)
+├── ui/                    # React dashboard (Vite + React + TypeScript + Tailwind)
+│   ├── server/index.ts    # Express API — reads state files, serves JSON endpoints
+│   ├── src/pages/         # 10 pages: CommandCenter, Finances, Strategies, etc.
+│   ├── src/components/    # Sidebar, charts, status badges, shared UI
+│   └── src/lib/           # Types, polling hook, utils
 ├── tools/                 # Scripts the agent creates and reuses
 └── output/                # Deliverables the agent produces
 ```
@@ -247,4 +251,27 @@ A manual test checklist (`tests/MANUAL_TEST_CHECKLIST.md`) provides an 11-phase 
 
 ## The UI
 
-The agent describes what it wants its home to look like via `request_ui_change`. Open Claude Code in this directory and tell it to check `state/ui_requests.json` and build what the agent asked for. The UI reads from state files — it's a window into the agent's world.
+A React dashboard lives in `ui/` — the agent's home base. It reads all state files in real-time so Tyler can watch cycles unfold.
+
+```bash
+cd ui && npm install && npm run dev
+```
+
+This starts both the Express API server (port 3001) and Vite dev server (port 5173). The API reads from `../state/` and serves JSON endpoints. The frontend polls every 5 seconds.
+
+### Pages
+
+| Page | What it shows |
+|------|--------------|
+| **Command Center** | Balance, P&L, 50/50 split, risk posture, burn rate, activity feed |
+| **Finances** | Full transaction ledger (sortable/filterable), balance chart, daily P&L, strategy breakdown, operational costs |
+| **Strategies** | Card per strategy with status, ROI, confidence, notes |
+| **Projections** | Pending/resolved projections, verdict badges, accuracy stats |
+| **Pipeline** | Kanban board — lead through closed_won/lost to recurring |
+| **The Dream** | GPU fund progress bar, dream GPU details, estimated completion date |
+| **Journal** | Parsed diary entries from journal.md, searchable |
+| **Chat** | Conversation history + input field to message the agent (writes to inbox.json) |
+| **Proposals** | Approve/reject improvement proposals directly from the UI |
+| **Health** | Burn rate, survival estimate, risk posture, watches, audit results |
+
+The agent can also submit UI design requests via `request_ui_change` — those show up in the Proposals page. This is the functional foundation; the agent's personality will shape future iterations.
