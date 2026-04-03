@@ -32,7 +32,7 @@ python agent/engine.py cycle
 python agent/engine.py chat -m "What's your plan?"
 
 # Drop a message without triggering a cycle (async inbox)
-python agent/engine.py send -m "Check polymarket for new opportunities"
+python agent/engine.py send -m "Check kalshi for new opportunities"
 
 # Check its state
 python agent/engine.py status

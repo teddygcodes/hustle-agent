@@ -1,1 +1,2 @@
 anthropic>=0.40.0
+kalshi-python>=2.0.0

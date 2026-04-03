@@ -22,12 +22,12 @@ Before starting: ensure `state/agent_state.json` has a fresh default state (bala
 
 ## Phase 2: Conversation Memory
 
-- [ ] 5. Run `python agent/engine.py send -m "I think Polymarket is the best play. What do you think?"`
+- [ ] 5. Run `python agent/engine.py send -m "I think Kalshi is the best play. What do you think?"`
 - [ ] 6. Run `python agent/engine.py cycle` — verify:
     - [ ] Agent responds to Tyler's message (check `conversations.json`)
     - [ ] Tyler takeaways extracted (check `state/memory.json` `"tyler_takeaways"`)
-    - [ ] Takeaway references Tyler's Polymarket preference
-- [ ] 7. Run another cycle WITHOUT messaging — verify tyler_context in logs still references the Polymarket conversation
+    - [ ] Takeaway references Tyler's Kalshi preference
+- [ ] 7. Run another cycle WITHOUT messaging — verify tyler_context in logs still references the Kalshi conversation
 
 ## Phase 3: Projection System
 

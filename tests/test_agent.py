@@ -117,28 +117,28 @@ class TestStateManagement:
 class TestRecordTransaction:
 
     def test_expense_decreases_balance(self, active_state):
-        result = engine.exec_record_transaction("expense", 10.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 10.0, "test", "kalshi", "test")
         state = engine.load_state()
         assert state["balance"] == pytest.approx(90.0)
         assert "Recorded" in result
 
     def test_income_increases_balance(self, active_state):
-        result = engine.exec_record_transaction("income", 20.0, "earnings", "polymarket", "won bet")
+        result = engine.exec_record_transaction("income", 20.0, "earnings", "kalshi", "won bet")
         state = engine.load_state()
         assert state["balance"] == pytest.approx(120.0)
 
     def test_investment_decreases_balance(self, active_state):
-        result = engine.exec_record_transaction("investment", 15.0, "bet", "polymarket", "investing")
+        result = engine.exec_record_transaction("investment", 15.0, "bet", "kalshi", "investing")
         state = engine.load_state()
         assert state["balance"] == pytest.approx(85.0)
 
     def test_return_increases_balance(self, active_state):
-        result = engine.exec_record_transaction("return", 25.0, "payout", "polymarket", "return")
+        result = engine.exec_record_transaction("return", 25.0, "payout", "kalshi", "return")
         state = engine.load_state()
         assert state["balance"] == pytest.approx(125.0)
 
     def test_25_cap_blocks_overspend(self, active_state):
-        result = engine.exec_record_transaction("expense", 30.0, "too much", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 30.0, "too much", "kalshi", "test")
         assert "BLOCKED" in result
         assert "$25" in result
         state = engine.load_state()
@@ -146,11 +146,11 @@ class TestRecordTransaction:
 
     def test_planning_mode_blocks_expense(self, isolated_fs):
         # Default state is planning mode
-        result = engine.exec_record_transaction("expense", 5.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 5.0, "test", "kalshi", "test")
         assert "PLANNING MODE" in result
 
     def test_planning_mode_blocks_investment(self, isolated_fs):
-        result = engine.exec_record_transaction("investment", 5.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("investment", 5.0, "test", "kalshi", "test")
         assert "PLANNING MODE" in result
 
     def test_insufficient_balance_blocks(self, active_state):
@@ -158,11 +158,11 @@ class TestRecordTransaction:
         state = engine.load_state()
         state["balance"] = 12.0
         engine.save_state(state)
-        result = engine.exec_record_transaction("expense", 15.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 15.0, "test", "kalshi", "test")
         assert "BLOCKED" in result
 
     def test_profit_split_50_50(self, active_state):
-        engine.exec_record_transaction("income", 50.0, "big win", "polymarket", "profit")
+        engine.exec_record_transaction("income", 50.0, "big win", "kalshi", "profit")
         state = engine.load_state()
         # total_earned=50, total_spent=0, net_profit=50
         assert state["net_profit"] == pytest.approx(50.0)
@@ -170,7 +170,7 @@ class TestRecordTransaction:
         assert state["gpu_fund"] == pytest.approx(25.0)
 
     def test_profit_split_negative_zeroes(self, active_state):
-        engine.exec_record_transaction("expense", 20.0, "loss", "polymarket", "test")
+        engine.exec_record_transaction("expense", 20.0, "loss", "kalshi", "test")
         state = engine.load_state()
         # total_earned=0, total_spent=20, net_profit=-20
         assert state["net_profit"] < 0
@@ -178,29 +178,29 @@ class TestRecordTransaction:
         assert state["gpu_fund"] == 0
 
     def test_gpu_fund_progress_percent(self, active_state):
-        engine.exec_record_transaction("income", 100.0, "big win", "polymarket", "profit")
+        engine.exec_record_transaction("income", 100.0, "big win", "kalshi", "profit")
         state = engine.load_state()
         # gpu_fund = net_profit/2 = 50, dream_cost = 2000
         expected = (50.0 / 2000.0) * 100
         assert state["gpu_fund_progress_percent"] == pytest.approx(expected)
 
     def test_roi_percent(self, active_state):
-        engine.exec_record_transaction("expense", 10.0, "invest", "polymarket", "test")
-        engine.exec_record_transaction("income", 30.0, "return", "polymarket", "profit")
+        engine.exec_record_transaction("expense", 10.0, "invest", "kalshi", "test")
+        engine.exec_record_transaction("income", 30.0, "return", "kalshi", "profit")
         state = engine.load_state()
         # net_profit = 30-10 = 20, roi = (20/100)*100 = 20.0
         assert state["roi_percent"] == pytest.approx(20.0)
 
     def test_projection_warning_over_5(self, active_state):
-        result = engine.exec_record_transaction("expense", 6.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 6.0, "test", "kalshi", "test")
         assert "WARNING" in result or "projection" in result.lower()
 
     def test_projection_warning_under_5_no_warning(self, active_state):
-        result = engine.exec_record_transaction("expense", 4.0, "test", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", 4.0, "test", "kalshi", "test")
         assert "WARNING" not in result
 
     def test_negative_amount_blocked(self, active_state):
-        result = engine.exec_record_transaction("expense", -50.0, "exploit", "polymarket", "test")
+        result = engine.exec_record_transaction("expense", -50.0, "exploit", "kalshi", "test")
         assert "BLOCKED" in result
 
 
@@ -229,12 +229,12 @@ class TestRiskManagement:
         assert risk.get_risk_posture(69.99) == "preservation"
 
     def test_preservation_blocks_large_spend(self):
-        result = risk.check_portfolio_risk(60.0, [], "polymarket", 3.0)
+        result = risk.check_portfolio_risk(60.0, [], "kalshi", 3.0)
         assert result["allowed"] is False
         assert "PRESERVATION" in result["reason"]
 
     def test_preservation_allows_small_spend(self):
-        result = risk.check_portfolio_risk(60.0, [], "polymarket", 1.50)
+        result = risk.check_portfolio_risk(60.0, [], "kalshi", 1.50)
         assert result["allowed"] is True
 
     def test_daily_limit_blocks(self):
@@ -242,7 +242,7 @@ class TestRiskManagement:
         ledger = [
             make_txn("expense", 28.0, timestamp=f"{today}T10:00:00+00:00"),
         ]
-        result = risk.check_portfolio_risk(90.0, ledger, "polymarket", 3.0)
+        result = risk.check_portfolio_risk(90.0, ledger, "kalshi", 3.0)
         assert result["allowed"] is False
         assert "DAILY" in result["reason"]
 
@@ -257,7 +257,7 @@ class TestRiskManagement:
         assert "CONCENTRATION" in result["reason"]
 
     def test_all_clear_passes(self):
-        result = risk.check_portfolio_risk(100.0, [], "polymarket", 5.0)
+        result = risk.check_portfolio_risk(100.0, [], "kalshi", 5.0)
         assert result["allowed"] is True
         assert result["reason"] == "OK"
 
@@ -276,11 +276,11 @@ class TestToolExecutors:
 
     def test_web_research_returns_and_caches(self, isolated_fs, mock_anthropic):
         mock_anthropic.messages.create.return_value = make_api_response(
-            [make_text_block("Polymarket has $500M volume")],
+            [make_text_block("Kalshi has $500M volume")],
             input_tokens=100, output_tokens=50,
         )
-        result = engine.exec_web_research("polymarket volume", "testing")
-        assert "Polymarket" in result or "500M" in result
+        result = engine.exec_web_research("kalshi volume", "testing")
+        assert "Kalshi" in result or "500M" in result
         # Check cached in memory
         mem = memory.load_memory()
         assert len(mem["research_cache"]) == 1
@@ -340,10 +340,10 @@ class TestToolExecutors:
         assert "content_play" in names
 
     def test_update_strategy_existing(self, active_state):
-        engine.exec_update_strategy("polymarket", "active", "Prediction markets")
-        engine.exec_update_strategy("polymarket", "paused", "Prediction markets paused")
+        engine.exec_update_strategy("kalshi", "active", "Prediction markets")
+        engine.exec_update_strategy("kalshi", "paused", "Prediction markets paused")
         state = engine.load_state()
-        strat = next(s for s in state["strategies"] if s["name"] == "polymarket")
+        strat = next(s for s in state["strategies"] if s["name"] == "kalshi")
         assert strat["status"] == "paused"
 
     def test_request_ui_change(self, active_state):
@@ -428,11 +428,11 @@ class TestToolExecutors:
 
     def test_set_watch(self, isolated_fs):
         future = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
-        result = engine.exec_set_watch("Check polymarket", "resolve bet", future)
+        result = engine.exec_set_watch("Check kalshi", "resolve bet", future)
         assert "Watch" in result
         w = watches._load()
         assert len(w) == 1
-        assert w[0]["condition"] == "Check polymarket"
+        assert w[0]["condition"] == "Check kalshi"
 
 
 # ===================================================================
@@ -444,7 +444,7 @@ class TestProjections:
     def test_compute_verdict_strong_buy(self):
         verdict = projections._compute_verdict(
             roi_percent=200, confidence=90, time_days=2,
-            strategy_type="polymarket", operational_overhead=0.01,
+            strategy_type="kalshi", operational_overhead=0.01,
             capital_velocity_cost=0.1,
         )
         assert verdict == "strong_buy"
@@ -460,7 +460,7 @@ class TestProjections:
     def test_create_projection_stores(self, isolated_fs):
         proj = projections.create_projection(
             action="Buy prediction shares",
-            cost=10.0, strategy_type="polymarket",
+            cost=10.0, strategy_type="kalshi",
             expected_return=20.0, estimated_days=3,
             confidence=75, assumptions=["market moves"],
             risks=["could lose"], comparables="similar bet won",
@@ -475,7 +475,7 @@ class TestProjections:
 
     def test_create_projection_calibration(self, isolated_fs):
         proj = projections.create_projection(
-            action="test", cost=10.0, strategy_type="polymarket",
+            action="test", cost=10.0, strategy_type="kalshi",
             expected_return=20.0, estimated_days=3, confidence=80,
             assumptions=[], risks=[], comparables="", bull_case="good",
             bear_case="bad", research_summary="test",
@@ -486,7 +486,7 @@ class TestProjections:
 
     def test_resolve_projection_hit(self, isolated_fs):
         proj = projections.create_projection(
-            action="test", cost=10.0, strategy_type="polymarket",
+            action="test", cost=10.0, strategy_type="kalshi",
             expected_return=20.0, estimated_days=3, confidence=70,
             assumptions=[], risks=[], comparables="", bull_case="good",
             bear_case="bad", research_summary="test",
@@ -498,7 +498,7 @@ class TestProjections:
 
     def test_resolve_projection_miss(self, isolated_fs):
         proj = projections.create_projection(
-            action="test", cost=10.0, strategy_type="polymarket",
+            action="test", cost=10.0, strategy_type="kalshi",
             expected_return=20.0, estimated_days=3, confidence=70,
             assumptions=[], risks=[], comparables="", bull_case="good",
             bear_case="bad", research_summary="test",
@@ -550,15 +550,15 @@ class TestProjections:
 class TestPipeline:
 
     def test_upsert_new_item(self, isolated_fs):
-        result = pipeline.upsert_pipeline_item("Deal A", "lead", "polymarket", "New lead")
+        result = pipeline.upsert_pipeline_item("Deal A", "lead", "kalshi", "New lead")
         assert "added" in result
         items = pipeline._load()
         assert len(items) == 1
         assert items[0]["history"][0]["from"] == "new"
 
     def test_upsert_update_item(self, isolated_fs):
-        pipeline.upsert_pipeline_item("Deal A", "lead", "polymarket", "New lead")
-        result = pipeline.upsert_pipeline_item("Deal A", "outreach_sent", "polymarket", "Sent email")
+        pipeline.upsert_pipeline_item("Deal A", "lead", "kalshi", "New lead")
+        result = pipeline.upsert_pipeline_item("Deal A", "outreach_sent", "kalshi", "Sent email")
         assert "updated" in result
         items = pipeline._load()
         assert items[0]["stage"] == "outreach_sent"
@@ -719,16 +719,16 @@ class TestMemory:
         assert mem["tyler_takeaways"][0]["takeaway"] == "Takeaway 5"
 
     def test_tyler_context_grouped(self, isolated_fs):
-        memory.add_tyler_takeaway("Use polymarket", "preference", 1)
+        memory.add_tyler_takeaway("Use kalshi", "preference", 1)
         memory.add_tyler_takeaway("Go for it", "decision", 2)
         memory.add_tyler_takeaway("Good research", "feedback", 3)
         ctx = memory.get_tyler_context()
         assert "preference" in ctx.lower() or "Preferences" in ctx
-        assert "polymarket" in ctx.lower()
+        assert "kalshi" in ctx.lower()
 
     def test_research_save_and_search(self, isolated_fs):
-        memory.save_research("polymarket volume", "Volume is $500M daily")
-        result = memory.search_past_research("polymarket")
+        memory.save_research("kalshi volume", "Volume is $500M daily")
+        result = memory.search_past_research("kalshi")
         assert "500M" in result
 
     def test_research_cap_30(self, isolated_fs):
@@ -791,7 +791,7 @@ class TestAuditSystem:
         # Create an expensive operation (high cost per dollar earned)
         ledger = [
             make_txn("expense", 5.0, strategy="operations"),
-            make_txn("income", 2.0, strategy="polymarket"),
+            make_txn("income", 2.0, strategy="kalshi"),
         ]
         cost_data = [{"cost": 5.0, "cycle": 1}]
         result = audit.run_self_audit(state, ledger, [], cost_data, [])
@@ -1121,7 +1121,7 @@ class TestFullCycleSimulation:
         assert "how's it going" in tyler_msgs[0]["message"].lower()
 
     def test_cycle_inbox_drained(self, isolated_fs, mock_anthropic):
-        engine.atomic_push_inbox("Check polymarket odds")
+        engine.atomic_push_inbox("Check kalshi odds")
         engine.atomic_push_inbox("Update me on progress")
 
         state = engine.load_state()
@@ -1200,7 +1200,7 @@ class TestSystemPrompt:
 
     def test_prompt_format_safe(self, active_state):
         # Inject braces into tyler context to test escaping
-        memory.add_tyler_takeaway("Use {polymarket} API", "preference", 1)
+        memory.add_tyler_takeaway("Use {kalshi} API", "preference", 1)
         state = engine.load_state()
         ledger = engine.load_ledger()
         # Should not raise KeyError from .format()

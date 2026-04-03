@@ -22,21 +22,21 @@ from tests.conftest import make_action, make_resolved_projection
 class TestPriors:
     def test_seed_priors_creates_file(self, isolated_fs):
         result = instincts.seed_priors()
-        assert "polymarket" in result
+        assert "kalshi" in result
         assert "service" in result
-        assert result["polymarket"]["source"] == "default"
-        assert result["polymarket"]["validated"] is False
+        assert result["kalshi"]["source"] == "default"
+        assert result["kalshi"]["validated"] is False
 
     def test_seed_priors_does_not_overwrite(self, isolated_fs):
         instincts.seed_priors()
-        instincts.update_priors_from_research("polymarket", 0.60, 0.12, "my research")
+        instincts.update_priors_from_research("kalshi", 0.60, 0.12, "my research")
         priors = instincts.seed_priors()  # should not overwrite
-        assert priors["polymarket"]["win_rate"] == 0.60
-        assert priors["polymarket"]["validated"] is True
+        assert priors["kalshi"]["win_rate"] == 0.60
+        assert priors["kalshi"]["validated"] is True
 
     def test_update_priors_from_research(self, isolated_fs):
         instincts.seed_priors()
-        result = instincts.update_priors_from_research("polymarket", 0.55, 0.10, "actual data")
+        result = instincts.update_priors_from_research("kalshi", 0.55, 0.10, "actual data")
         assert result["win_rate"] == 0.55
         assert result["avg_roi"] == 0.10
         assert result["source"] == "research"
@@ -60,8 +60,8 @@ class TestPriors:
 
     def test_normalize_category(self):
         assert instincts.normalize_category("product_sale") == "product"
-        assert instincts.normalize_category("polymarket") == "polymarket"
-        assert instincts.normalize_category("POLYMARKET") == "polymarket"
+        assert instincts.normalize_category("kalshi") == "kalshi"
+        assert instincts.normalize_category("KALSHI") == "kalshi"
         assert instincts.normalize_category("unknown_thing") == "other"
 
 
@@ -90,14 +90,14 @@ class TestBlending:
 class TestActionTracking:
     def test_create_action(self, isolated_fs):
         action = instincts.create_action(
-            category="polymarket", subcategory="test bet",
+            category="kalshi", subcategory="test bet",
             cost=5.0, expected_return=10.0, time_horizon_days=3.0,
             confidence=70, balance=100.0, risk_posture="aggressive",
             projection_id="proj123",
         )
         assert action["action_id"]
         assert action["projection_id"] == "proj123"
-        assert action["category"] == "polymarket"
+        assert action["category"] == "kalshi"
         assert action["status"] == "pending"
         assert action["conditions"]["confidence_at_decision"] == 70
         assert action["conditions"]["capital_percentage"] == 5.0
@@ -122,7 +122,7 @@ class TestActionTracking:
 
     def test_resolve_action_auto_status(self, isolated_fs):
         instincts.create_action(
-            category="polymarket", subcategory="bet",
+            category="kalshi", subcategory="bet",
             cost=5.0, expected_return=10.0, time_horizon_days=1.0,
             confidence=60, balance=100.0, risk_posture="normal",
             projection_id="proj789",
@@ -133,7 +133,7 @@ class TestActionTracking:
 
     def test_resolve_action_loss(self, isolated_fs):
         instincts.create_action(
-            category="polymarket", subcategory="bet",
+            category="kalshi", subcategory="bet",
             cost=5.0, expected_return=10.0, time_horizon_days=1.0,
             confidence=60, balance=100.0, risk_posture="normal",
             projection_id="projloss",
@@ -161,14 +161,14 @@ class TestInstinctComputation:
 
     def test_category_win_rate(self, isolated_fs):
         actions = [
-            make_action(category="polymarket", status="won"),
-            make_action(category="polymarket", status="won"),
-            make_action(category="polymarket", status="lost", actual_return=2.0),
+            make_action(category="kalshi", status="won"),
+            make_action(category="kalshi", status="won"),
+            make_action(category="kalshi", status="lost", actual_return=2.0),
         ]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
-        assert data["category_scores"]["polymarket"]["win_rate"] == pytest.approx(2/3, abs=0.01)
-        assert data["category_scores"]["polymarket"]["sample_size"] == 3
+        assert data["category_scores"]["kalshi"]["win_rate"] == pytest.approx(2/3, abs=0.01)
+        assert data["category_scores"]["kalshi"]["sample_size"] == 3
 
     def test_category_roi(self, isolated_fs):
         actions = [
@@ -208,32 +208,32 @@ class TestInstinctComputation:
     def test_cross_patterns(self, isolated_fs):
         # Need at least 3 resolved and 2+ in a cell
         actions = [
-            make_action(category="polymarket", time_horizon_days=0.5, status="won"),
-            make_action(category="polymarket", time_horizon_days=0.5, status="won"),
-            make_action(category="polymarket", time_horizon_days=14.0, status="lost", actual_return=2.0),
-            make_action(category="polymarket", time_horizon_days=14.0, status="lost", actual_return=1.0),
+            make_action(category="kalshi", time_horizon_days=0.5, status="won"),
+            make_action(category="kalshi", time_horizon_days=0.5, status="won"),
+            make_action(category="kalshi", time_horizon_days=14.0, status="lost", actual_return=2.0),
+            make_action(category="kalshi", time_horizon_days=14.0, status="lost", actual_return=1.0),
         ]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
         patterns = data["cross_patterns"]
         assert len(patterns) > 0
-        # Should find polymarket+short with high win rate
-        short_pattern = [p for p in patterns if "short" in p["key"] and "polymarket" in p["key"]]
+        # Should find kalshi+short with high win rate
+        short_pattern = [p for p in patterns if "short" in p["key"] and "kalshi" in p["key"]]
         if short_pattern:
             assert short_pattern[0]["win_rate"] == 1.0
 
     def test_calibration_per_category(self, isolated_fs):
         # Agent says 80% confidence but wins only 50% → multiplier < 1.0
         actions = [
-            make_action(category="polymarket", confidence=80, status="won"),
-            make_action(category="polymarket", confidence=80, status="lost", actual_return=2.0),
-            make_action(category="polymarket", confidence=80, status="won"),
-            make_action(category="polymarket", confidence=80, status="lost", actual_return=2.0),
-            make_action(category="polymarket", confidence=80, status="won"),
+            make_action(category="kalshi", confidence=80, status="won"),
+            make_action(category="kalshi", confidence=80, status="lost", actual_return=2.0),
+            make_action(category="kalshi", confidence=80, status="won"),
+            make_action(category="kalshi", confidence=80, status="lost", actual_return=2.0),
+            make_action(category="kalshi", confidence=80, status="won"),
         ]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
-        cal = data["calibration"]["per_category"].get("polymarket")
+        cal = data["calibration"]["per_category"].get("kalshi")
         assert cal is not None
         # 60% win rate / 80% confidence = 0.75, fully earned (5 actions)
         assert cal == pytest.approx(0.75, abs=0.05)
@@ -264,13 +264,13 @@ class TestInstinctComputation:
 
 class TestExplorationMode:
     def test_explore_under_5_actions(self, isolated_fs):
-        actions = [make_action(category="polymarket", status="won") for _ in range(4)]
+        actions = [make_action(category="kalshi", status="won") for _ in range(4)]
         instincts.save_actions(actions)
         assert instincts.get_exploration_mode() == "explore"
 
     def test_explore_under_3_categories(self, isolated_fs):
         actions = (
-            [make_action(category="polymarket", status="won") for _ in range(6)]
+            [make_action(category="kalshi", status="won") for _ in range(6)]
             + [make_action(category="service", status="won") for _ in range(6)]
         )
         instincts.save_actions(actions)
@@ -278,7 +278,7 @@ class TestExplorationMode:
 
     def test_exploit_mode_threshold(self, isolated_fs):
         actions = (
-            [make_action(category="polymarket", status="won") for _ in range(5)]
+            [make_action(category="kalshi", status="won") for _ in range(5)]
             + [make_action(category="service", status="won") for _ in range(5)]
             + [make_action(category="content", status="won") for _ in range(5)]
         )
@@ -301,13 +301,13 @@ class TestExplorationMode:
 
     def test_exploration_progress(self, isolated_fs):
         actions = (
-            [make_action(category="polymarket", status="won") for _ in range(3)]
+            [make_action(category="kalshi", status="won") for _ in range(3)]
             + [make_action(category="service", status="won") for _ in range(5)]
         )
         instincts.save_actions(actions)
         progress = instincts.get_exploration_progress()
         assert progress["mode"] == "explore"
-        assert progress["categories"]["polymarket"] == 3
+        assert progress["categories"]["kalshi"] == 3
         assert progress["categories"]["service"] == 5
         assert progress["categories_ready"] == 1
 
@@ -319,7 +319,7 @@ class TestExplorationMode:
 class TestProjectionAdjustments:
     def test_adjustments_with_no_data(self, isolated_fs):
         instincts.seed_priors()
-        adj = instincts.get_adjustments_for_action("polymarket", {
+        adj = instincts.get_adjustments_for_action("kalshi", {
             "time_horizon_days": 5,
             "confidence_at_decision": 70,
         })
@@ -330,14 +330,14 @@ class TestProjectionAdjustments:
     def test_adjustments_with_earned_data(self, isolated_fs):
         instincts.seed_priors()
         actions = [
-            make_action(category="polymarket", confidence=80, status="won"),
-            make_action(category="polymarket", confidence=80, status="won"),
-            make_action(category="polymarket", confidence=80, status="lost", actual_return=2.0),
+            make_action(category="kalshi", confidence=80, status="won"),
+            make_action(category="kalshi", confidence=80, status="won"),
+            make_action(category="kalshi", confidence=80, status="lost", actual_return=2.0),
         ]
         instincts.save_actions(actions)
         instincts.recompute_instincts()
 
-        adj = instincts.get_adjustments_for_action("polymarket", {
+        adj = instincts.get_adjustments_for_action("kalshi", {
             "confidence_at_decision": 80,
         })
         assert adj["data_source"] == "blend"
@@ -347,10 +347,10 @@ class TestProjectionAdjustments:
 
     def test_exploration_note_shown(self, isolated_fs):
         instincts.seed_priors()
-        actions = [make_action(category="polymarket", status="won")]
+        actions = [make_action(category="kalshi", status="won")]
         instincts.save_actions(actions)
 
-        adj = instincts.get_adjustments_for_action("polymarket", {})
+        adj = instincts.get_adjustments_for_action("kalshi", {})
         assert "Exploratory bet" in adj["exploration_note"] or "data point" in adj["exploration_note"]
 
 
@@ -365,7 +365,7 @@ class TestSystemPromptContext:
 
     def test_explore_context(self, isolated_fs):
         instincts.seed_priors()
-        actions = [make_action(category="polymarket", status="won")]
+        actions = [make_action(category="kalshi", status="won")]
         instincts.save_actions(actions)
         instincts.recompute_instincts()
 
@@ -376,7 +376,7 @@ class TestSystemPromptContext:
     def test_exploit_context(self, isolated_fs):
         instincts.seed_priors()
         actions = (
-            [make_action(category="polymarket", status="won") for _ in range(5)]
+            [make_action(category="kalshi", status="won") for _ in range(5)]
             + [make_action(category="service", status="won") for _ in range(5)]
             + [make_action(category="content", status="won") for _ in range(5)]
         )
@@ -408,11 +408,11 @@ class TestAuditIntegration:
             "exploration_mode": "exploit",
             "calibration": {
                 "overall": 0.9,
-                "per_category": {"polymarket": 0.5},  # diverges from audit
+                "per_category": {"kalshi": 0.5},  # diverges from audit
             },
         })
         recs = audit._audit_instincts_crosscheck({"calibration_multiplier": 0.9}, cycle=30)
-        assert any("polymarket" in r for r in recs)
+        assert any("kalshi" in r for r in recs)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +428,7 @@ class TestEngineIntegration:
         output = engine.exec_run_projection(
             action="Test bet on event",
             cost=5.0,
-            strategy_type="polymarket",
+            strategy_type="kalshi",
             expected_return=10.0,
             estimated_days_to_return=3.0,
             confidence=70,
@@ -442,7 +442,7 @@ class TestEngineIntegration:
         actions = instincts.load_actions()
         assert len(actions) == 1
         assert actions[0]["status"] == "pending"
-        assert actions[0]["category"] == "polymarket"
+        assert actions[0]["category"] == "kalshi"
         assert actions[0]["cost"] == 5.0
 
     def test_resolve_projection_resolves_action(self, isolated_fs):
@@ -452,7 +452,7 @@ class TestEngineIntegration:
         engine.exec_run_projection(
             action="Resolve test bet",
             cost=5.0,
-            strategy_type="polymarket",
+            strategy_type="kalshi",
             expected_return=10.0,
             estimated_days_to_return=3.0,
             confidence=70,
@@ -485,7 +485,7 @@ class TestEngineIntegration:
         # Create a projection directly (no linked action)
         from agent import projections
         proj = projections.create_projection(
-            action="orphan test", cost=5.0, strategy_type="polymarket",
+            action="orphan test", cost=5.0, strategy_type="kalshi",
             expected_return=10.0, estimated_days=3.0, confidence=70,
             assumptions=["a"], risks=["r"], comparables="",
             bull_case="up", bear_case="down", research_summary="test",
@@ -504,14 +504,14 @@ class TestEngineIntegration:
     def test_update_prior_updates_priors(self, isolated_fs):
         """exec_update_prior should update priors.json with validated data."""
         instincts.seed_priors()
-        result = engine.exec_update_prior("polymarket", 0.60, 0.15, "real research")
+        result = engine.exec_update_prior("kalshi", 0.60, 0.15, "real research")
         assert "Prior updated" in result
-        assert "polymarket" in result
+        assert "kalshi" in result
 
         # Verify the file was actually updated
         priors = instincts.load_priors()
-        assert priors["polymarket"]["win_rate"] == 0.60
-        assert priors["polymarket"]["validated"] is True
+        assert priors["kalshi"]["win_rate"] == 0.60
+        assert priors["kalshi"]["validated"] is True
 
     def test_update_prior_uses_normalized_category(self, isolated_fs):
         """exec_update_prior should normalize 'product_sale' → 'product'."""
@@ -536,16 +536,16 @@ class TestEdgeCases:
         """100% loss rate should produce valid calibration clamped at 0.3."""
         instincts.seed_priors()
         actions = [
-            make_action(category="polymarket", status="lost", confidence=80,
+            make_action(category="kalshi", status="lost", confidence=80,
                         actual_return=0.0, cost=5.0)
             for _ in range(5)
         ]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
-        cat = data["category_scores"]["polymarket"]
+        cat = data["category_scores"]["kalshi"]
         assert cat["win_rate"] == 0.0
         # Calibration: 0% win / 80% conf = 0.0, clamped to 0.3
-        cal = data["calibration"]["per_category"].get("polymarket")
+        cal = data["calibration"]["per_category"].get("kalshi")
         assert cal is not None
         assert cal == pytest.approx(0.3, abs=0.05)
 
@@ -569,10 +569,10 @@ class TestEdgeCases:
     def test_single_action(self, isolated_fs):
         """Blend math at n=1 should weight prior heavily."""
         instincts.seed_priors()
-        actions = [make_action(category="polymarket", status="won", confidence=70)]
+        actions = [make_action(category="kalshi", status="won", confidence=70)]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
-        cat = data["category_scores"]["polymarket"]
+        cat = data["category_scores"]["kalshi"]
         assert cat["sample_size"] == 1
         # With n=1, blend = 80% prior + 20% earned. Prior win_rate=0.52, earned=1.0
         # Blended ≈ 0.52*0.8 + 1.0*0.2 = 0.616
@@ -583,7 +583,7 @@ class TestEdgeCases:
         """Actions with confidence=0 should not cause division by zero in calibration."""
         instincts.seed_priors()
         actions = [
-            make_action(category="polymarket", status="won", confidence=0)
+            make_action(category="kalshi", status="won", confidence=0)
             for _ in range(5)
         ]
         self._seed_actions(isolated_fs, actions)
@@ -608,19 +608,19 @@ class TestEdgeCases:
         """actual_time_days=0 (instant) should be included in avg_return_time, not dropped."""
         instincts.seed_priors()
         actions = [
-            make_action(category="polymarket", status="won", actual_time_days=0),
-            make_action(category="polymarket", status="won", actual_time_days=4.0),
+            make_action(category="kalshi", status="won", actual_time_days=0),
+            make_action(category="kalshi", status="won", actual_time_days=4.0),
         ]
         self._seed_actions(isolated_fs, actions)
         data = instincts.recompute_instincts()
-        cat = data["category_scores"]["polymarket"]
+        cat = data["category_scores"]["kalshi"]
         # avg of [0, 4] = 2.0, not just [4] = 4.0
         assert cat["avg_return_time_days"] == pytest.approx(2.0, abs=0.1)
 
     def test_negative_time_clamped(self, isolated_fs):
         """Negative actual_time_days should be clamped to 0 by resolve_action."""
         instincts.create_action(
-            category="polymarket", subcategory="test",
+            category="kalshi", subcategory="test",
             cost=5.0, expected_return=10.0, time_horizon_days=3.0,
             confidence=70, balance=100.0, risk_posture="aggressive",
             projection_id="neg_time",
