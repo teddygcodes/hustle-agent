@@ -44,6 +44,7 @@ from agent import proposals
 from agent import audit
 from agent import watches
 from agent import instincts
+from agent import kalshi_client
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -171,7 +172,7 @@ def drain_inbox() -> list:
 TOOL_SCHEMAS = [
     {
         "name": "web_research",
-        "description": "Search the web for information. Use this to research markets, prices, opportunities, news, trends, Polymarket events, product demand, competitor analysis, anything.",
+        "description": "Search the web for information. Use this to research markets, prices, opportunities, news, trends, Kalshi markets, product demand, competitor analysis, anything.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -531,13 +532,13 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "run_projection",
-        "description": "MANDATORY before any spend over $5. Builds a projection: expected return, ROI, confidence, bull/bear cases, verdict. Strategy-aware (polymarket, product_sale, service, content, arbitrage).",
+        "description": "MANDATORY before any spend over $5. Builds a projection: expected return, ROI, confidence, bull/bear cases, verdict. Strategy-aware (kalshi, product_sale, service, content, arbitrage).",
         "input_schema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "description": "What you plan to do"},
                 "cost": {"type": "number", "description": "How much it will cost"},
-                "strategy_type": {"type": "string", "enum": ["polymarket", "product_sale", "service", "content", "arbitrage", "other"], "description": "Type of strategy"},
+                "strategy_type": {"type": "string", "enum": ["kalshi", "product_sale", "service", "content", "arbitrage", "other"], "description": "Type of strategy"},
                 "expected_return": {"type": "number", "description": "Expected dollar return"},
                 "estimated_days_to_return": {"type": "number", "description": "Days until expected return"},
                 "confidence": {"type": "integer", "description": "Your confidence 0-100 (will be calibrated)"},
@@ -603,7 +604,7 @@ TOOL_SCHEMAS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "condition": {"type": "string", "description": "What condition to check (e.g., 'Polymarket event X resolved', 'payment received for Y')"},
+                "condition": {"type": "string", "description": "What condition to check (e.g., 'Kalshi market X resolved', 'payment received for Y')"},
                 "action_hint": {"type": "string", "description": "What to do when triggered (e.g., 'resolve projection and record outcome')"},
                 "check_after": {"type": "string", "description": "ISO datetime — when to start checking (e.g., '2025-04-01T00:00:00')"},
                 "expires_at": {"type": "string", "description": "ISO datetime — when to give up checking"},
@@ -614,16 +615,77 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "update_prior",
-        "description": "Update a base rate prior for a category based on your research. Use this after researching real base rates to replace the default estimates with validated data. Categories: polymarket, outreach, product, content, service, arbitrage.",
+        "description": "Update a base rate prior for a category based on your research. Use this after researching real base rates to replace the default estimates with validated data. Categories: kalshi, outreach, product, content, service, arbitrage.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "category": {"type": "string", "description": "The action category (polymarket, outreach, product, content, service, arbitrage)"},
+                "category": {"type": "string", "description": "The action category (kalshi, outreach, product, content, service, arbitrage)"},
                 "win_rate": {"type": "number", "description": "Estimated win rate as a decimal (0.0 to 1.0)"},
                 "avg_roi": {"type": "number", "description": "Average ROI as a decimal (e.g., 0.5 = 50% return)"},
                 "note": {"type": "string", "description": "Source or reasoning for these numbers"}
             },
             "required": ["category", "win_rate", "avg_roi"]
+        }
+    },
+    {
+        "name": "browse_kalshi_markets",
+        "description": "Browse and search Kalshi prediction markets. No authentication needed — use this freely for research. Returns market tickers, titles, prices, volume, and close dates.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search term to filter markets (e.g., 'bitcoin', 'election', 'weather')"},
+                "status": {"type": "string", "enum": ["open", "closed", "settled"], "description": "Filter by market status. Default: open"},
+                "limit": {"type": "integer", "description": "Max results (1-200, default 20)"},
+                "event_ticker": {"type": "string", "description": "Filter by event ticker to see all markets in an event"}
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_kalshi_market_detail",
+        "description": "Get detailed information about a specific Kalshi market including current prices, volume, orderbook depth, settlement rules, and recent trades. No authentication needed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Market ticker (e.g., 'KXBTC-25APR04-T102000')"},
+                "include_orderbook": {"type": "boolean", "description": "Also fetch the current orderbook. Default: true"}
+            },
+            "required": ["ticker"]
+        }
+    },
+    {
+        "name": "place_kalshi_order",
+        "description": "Place an order on a Kalshi market. Requires Kalshi API credentials. Goes through all risk management checks. Use run_projection first for orders over $5.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "Market ticker"},
+                "side": {"type": "string", "enum": ["yes", "no"], "description": "Which side to buy"},
+                "count": {"type": "integer", "description": "Number of contracts (each contract max payout = $1.00)"},
+                "price_cents": {"type": "integer", "description": "Limit price in cents (1-99). This is your max cost per contract."},
+                "reasoning": {"type": "string", "description": "Why you're placing this trade — this gets recorded in the ledger"}
+            },
+            "required": ["ticker", "side", "count", "price_cents", "reasoning"]
+        }
+    },
+    {
+        "name": "check_kalshi_portfolio",
+        "description": "Check your Kalshi account balance, open positions, and resting orders. Requires Kalshi API credentials.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "cancel_kalshi_order",
+        "description": "Cancel a resting order on Kalshi. Requires Kalshi API credentials.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "The order ID to cancel"}
+            },
+            "required": ["order_id"]
         }
     }
 ]
@@ -1124,7 +1186,7 @@ def exec_update_prior(category: str, win_rate: float, avg_roi: float, note: str 
     """Update a category's base rate prior from research."""
     cat = instincts.normalize_category(category)
     if cat == "other":
-        return f"Unknown category '{category}'. Use: polymarket, outreach, product, content, service, arbitrage."
+        return f"Unknown category '{category}'. Use: kalshi, outreach, product, content, service, arbitrage."
     if not (0.0 <= win_rate <= 1.0):
         return f"Win rate must be between 0.0 and 1.0, got {win_rate}."
     result = instincts.update_priors_from_research(cat, win_rate, avg_roi, note)
@@ -1133,6 +1195,193 @@ def exec_update_prior(category: str, win_rate: float, avg_roi: float, note: str 
         f"avg_roi={result['avg_roi']:.0%}. Source: research (validated). "
         f"This replaces the default estimate. Your instincts will now use this as the base rate."
     )
+
+# ---------------------------------------------------------------------------
+# Kalshi tool executors
+# ---------------------------------------------------------------------------
+
+def exec_browse_kalshi_markets(query: str = "", status: str = "open",
+                                limit: int = 20, event_ticker: str = "") -> str:
+    """Browse Kalshi markets. No auth needed."""
+    result = kalshi_client.get_markets(
+        query=query, status=status, limit=limit,
+        event_ticker=event_ticker or None,
+    )
+    if "error" in result:
+        return f"ERROR: {result['error']}"
+    markets = result.get("markets", [])
+    if not markets:
+        return f"No markets found matching query='{query}', status='{status}'."
+    env = result.get("environment", "unknown")
+    lines = [f"Kalshi Markets ({env} environment) — {len(markets)} results:"]
+    lines.append("")
+    for m in markets:
+        yes_bid = m.get("yes_bid", "?")
+        yes_ask = m.get("yes_ask", "?")
+        vol = m.get("volume", 0)
+        close = m.get("close_time", "?")
+        lines.append(f"  {m['ticker']}")
+        lines.append(f"    {m.get('title', '?')}")
+        lines.append(f"    YES: {yes_bid}¢ bid / {yes_ask}¢ ask | Volume: {vol:,} | Close: {close}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def exec_get_kalshi_market_detail(ticker: str, include_orderbook: bool = True) -> str:
+    """Get detailed info on a specific Kalshi market. No auth needed."""
+    result = kalshi_client.get_market(ticker)
+    if "error" in result:
+        return f"ERROR: {result['error']}"
+    lines = [f"Market Detail: {result.get('title', ticker)}"]
+    lines.append(f"  Ticker: {result['ticker']}")
+    lines.append(f"  Event: {result.get('event_ticker', '?')}")
+    lines.append(f"  Status: {result.get('status', '?')}")
+    lines.append(f"  YES: {result.get('yes_bid', '?')}¢ bid / {result.get('yes_ask', '?')}¢ ask")
+    lines.append(f"  NO:  {result.get('no_bid', '?')}¢ bid / {result.get('no_ask', '?')}¢ ask")
+    lines.append(f"  Last price: {result.get('last_price', '?')}¢")
+    lines.append(f"  Volume: {result.get('volume', 0):,} (24h: {result.get('volume_24h', 0):,})")
+    lines.append(f"  Open: {result.get('open_time', '?')}")
+    lines.append(f"  Close: {result.get('close_time', '?')}")
+    lines.append(f"  Expiration: {result.get('expiration_time', '?')}")
+    lines.append(f"  Result: {result.get('result', 'pending')}")
+    lines.append(f"  Can close early: {result.get('can_close_early', '?')}")
+    lines.append(f"  Environment: {result.get('environment', '?')}")
+    if include_orderbook:
+        ob = kalshi_client.get_market_orderbook(ticker)
+        if "error" not in ob:
+            lines.append("")
+            lines.append("  Orderbook:")
+            yes_levels = ob.get("yes", [])
+            no_levels = ob.get("no", [])
+            lines.append(f"    YES bids: {yes_levels[:5]}")
+            lines.append(f"    NO bids:  {no_levels[:5]}")
+        else:
+            lines.append(f"  Orderbook: {ob['error']}")
+    # Recent trades
+    trades = kalshi_client.get_trades(ticker, limit=5)
+    if "error" not in trades and trades.get("trades"):
+        lines.append("")
+        lines.append("  Recent trades:")
+        for t in trades["trades"][:5]:
+            lines.append(f"    {t.get('count', '?')} contracts @ {t.get('yes_price', '?')}¢ YES ({t.get('taker_side', '?')}) — {t.get('created_time', '?')}")
+    return "\n".join(lines)
+
+
+def exec_place_kalshi_order(ticker: str, side: str, count: int,
+                             price_cents: int, reasoning: str) -> str:
+    """Place a Kalshi order with full risk checks."""
+    # Calculate cost in dollars
+    cost_dollars = round(count * price_cents / 100.0, 2)
+
+    # Load state and check constraints
+    state = load_state()
+    ledger = load_ledger()
+
+    # Planning mode check
+    if state.get("status") == "planning":
+        return "PLANNING MODE: You can't trade yet. Tyler wants to see your plan first."
+
+    # $25 per-action cap
+    if cost_dollars > 25.0:
+        return f"BLOCKED: ${cost_dollars:.2f} exceeds the $25 per-action cap."
+
+    # Exploration mode check
+    actions = instincts.load_actions()
+    explore_mode = instincts.get_exploration_mode(actions) if actions else None
+    if explore_mode == "explore" and cost_dollars > 5.0:
+        return f"BLOCKED: EXPLORATION MODE — max $5 per trade while building instincts data. Your order costs ${cost_dollars:.2f}."
+
+    # Risk management
+    risk_result = risk.check_portfolio_risk(
+        state["balance"], ledger, "kalshi", cost_dollars,
+        exploration_mode=explore_mode,
+    )
+    if not risk_result["allowed"]:
+        return f"BLOCKED by risk management: {risk_result['reason']}"
+
+    # Balance check
+    if cost_dollars > state["balance"]:
+        return f"BLOCKED: Can't spend ${cost_dollars:.2f} — only ${state['balance']:.2f} available."
+
+    # Place the order via Kalshi API
+    result = kalshi_client.place_order(ticker, side, count, price_cents)
+    if "error" in result:
+        return f"ORDER FAILED: {result['error']}"
+
+    # Record as investment transaction in the ledger
+    txn_result = exec_record_transaction(
+        "investment", cost_dollars,
+        f"Kalshi order: {count}x {side.upper()} @ {price_cents}¢ on {ticker}",
+        "kalshi", reasoning,
+    )
+
+    # Create instincts action for learning
+    max_payout = round(count * 1.00, 2)  # Each contract pays $1 if YES
+    instincts.create_action(
+        category="kalshi",
+        subcategory=f"{side} {ticker}",
+        cost=cost_dollars,
+        expected_return=max_payout,
+        time_horizon_days=7.0,  # default estimate, agent can be more precise via projection
+        confidence=50,  # neutral default, projection will have the real confidence
+        balance=state["balance"],
+        risk_posture=risk.get_risk_posture(state["balance"]),
+    )
+
+    output = (
+        f"ORDER PLACED on Kalshi:\n"
+        f"  Ticker: {ticker}\n"
+        f"  Side: {side.upper()}\n"
+        f"  Contracts: {count}\n"
+        f"  Price: {price_cents}¢ per contract\n"
+        f"  Total cost: ${cost_dollars:.2f}\n"
+        f"  Max payout: ${max_payout:.2f}\n"
+        f"  Order ID: {result.get('order_id', '?')}\n"
+        f"  Status: {result.get('status', '?')}\n"
+    )
+
+    # Projection reminder
+    if cost_dollars > 5.0:
+        unresolved = projections.get_unresolved_for_strategy("kalshi")
+        if not unresolved:
+            output += "\n⚠ WARNING: No projection found for this trade. You should run_projection before spending >$5."
+
+    return output
+
+
+def exec_check_kalshi_portfolio() -> str:
+    """Check Kalshi account balance and positions."""
+    balance = kalshi_client.get_balance()
+    if "error" in balance:
+        return f"ERROR: {balance['error']}"
+
+    positions = kalshi_client.get_positions()
+    if "error" in positions:
+        return f"Kalshi Balance: ${balance['balance_dollars']:.2f}\nPositions: {positions['error']}"
+
+    lines = [f"Kalshi Portfolio:"]
+    lines.append(f"  Balance: ${balance['balance_dollars']:.2f} ({balance['balance_cents']}¢)")
+    lines.append("")
+    pos_list = positions.get("positions", [])
+    if pos_list:
+        lines.append(f"  Open Positions ({len(pos_list)}):")
+        for p in pos_list:
+            lines.append(f"    {p['ticker']}: {p['position']} contracts")
+            lines.append(f"      Realized P&L: {p.get('realized_pnl', '?')}¢ | Fees: {p.get('fees_paid', '?')}¢ | Cost: {p.get('total_cost', '?')}¢")
+            if p.get("market_result"):
+                lines.append(f"      Result: {p['market_result']}")
+    else:
+        lines.append("  No open positions.")
+    return "\n".join(lines)
+
+
+def exec_cancel_kalshi_order(order_id: str) -> str:
+    """Cancel a resting order on Kalshi."""
+    result = kalshi_client.cancel_order(order_id)
+    if "error" in result:
+        return f"CANCEL FAILED: {result['error']}"
+    return f"Order {order_id} cancelled successfully."
+
 
 # Map tool names to execution functions
 TOOL_EXECUTORS = {
@@ -1175,6 +1424,16 @@ TOOL_EXECUTORS = {
         args.get("expires_at", ""), args.get("projection_id", "")),
     "update_prior": lambda args: exec_update_prior(
         args["category"], args["win_rate"], args["avg_roi"], args.get("note", "")),
+    "browse_kalshi_markets": lambda args: exec_browse_kalshi_markets(
+        args.get("query", ""), args.get("status", "open"),
+        args.get("limit", 20), args.get("event_ticker", "")),
+    "get_kalshi_market_detail": lambda args: exec_get_kalshi_market_detail(
+        args["ticker"], args.get("include_orderbook", True)),
+    "place_kalshi_order": lambda args: exec_place_kalshi_order(
+        args["ticker"], args["side"], args["count"],
+        args["price_cents"], args["reasoning"]),
+    "check_kalshi_portfolio": lambda args: exec_check_kalshi_portfolio(),
+    "cancel_kalshi_order": lambda args: exec_cancel_kalshi_order(args["order_id"]),
 }
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1506,18 @@ RULES:
 - Set watches on time-sensitive events so you don't forget to check them
 - If you identify a capability gap, use propose_improvement — Tyler will review it
 
+KALSHI PREDICTION MARKETS:
+- You have access to Kalshi, a CFTC-regulated US prediction market exchange
+- Public endpoints (browse_kalshi_markets, get_kalshi_market_detail) work without credentials — use these freely for research
+- Trading endpoints (place_kalshi_order, check_kalshi_portfolio, cancel_kalshi_order) require API credentials
+- Kalshi has a demo environment for paper trading. Use demo mode to test strategies before Tyler gives you production credentials.
+- If you don't have credentials yet, ask Tyler to set up demo API keys at kalshi.com and provide the key ID + private key PEM file
+- Kalshi contracts cost $0.01-$0.99 each and pay $1.00 if YES outcome occurs (your risk = count × price)
+- Always run_projection before placing trades over $5
+- Start with small positions ($2-5) to build instincts data for the kalshi category
+- When researching a Kalshi market, use get_kalshi_market_detail to pull real orderbook data into your projection
+{kalshi_context}
+
 CONSTITUTION (you cannot modify these):
 - engine.py core loop and spending cap ($25/action)
 - Financial tracking and ledger integrity
@@ -1283,6 +1554,15 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
     ctx_audit = audit.get_audit_context(cycle_num)
     ctx_instincts = instincts.get_instincts_context()
     ctx_instincts = ctx_instincts.replace("{", "{{").replace("}", "}}")
+
+    # Kalshi context
+    kalshi_config = kalshi_client._load_config()
+    kalshi_env = kalshi_config.get("environment", "not configured")
+    kalshi_status = kalshi_config.get("status", "not_configured")
+    if kalshi_status == "not_configured":
+        ctx_kalshi = f"- Status: NOT CONFIGURED — ask Tyler for demo API credentials"
+    else:
+        ctx_kalshi = f"- Status: configured ({kalshi_env} environment)"
 
     # Seed priors on first cycle
     if cycle_num <= 1:
@@ -1333,6 +1613,7 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
         proposals_context=ctx_proposals,
         audit_context=ctx_audit,
         instincts_context=ctx_instincts,
+        kalshi_context=ctx_kalshi,
         planning_mode_context=planning_ctx,
         instructions=instructions,
     )

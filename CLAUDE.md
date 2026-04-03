@@ -57,6 +57,11 @@ The agent can:
 - `request_ui_change` — Describe what it wants the UI to look like
 - `set_mood` — Update its emotional state
 - `update_dream_gpu` — Set/update its dream GPU target
+- `browse_kalshi_markets` — Browse/search Kalshi prediction markets (no auth needed)
+- `get_kalshi_market_detail` — Deep dive on a specific Kalshi market with orderbook (no auth needed)
+- `place_kalshi_order` — Place a trade on Kalshi (auth required, risk-checked)
+- `check_kalshi_portfolio` — Check Kalshi balance and positions (auth required)
+- `cancel_kalshi_order` — Cancel a resting Kalshi order (auth required)
 
 ### State Files
 

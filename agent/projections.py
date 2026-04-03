@@ -16,7 +16,7 @@ PROJECTIONS_FILE = STATE_DIR / "projections.json"
 
 # Strategy-type weights for verdict calculation
 STRATEGY_WEIGHTS = {
-    "polymarket": {"time_weight": 0.3, "data_weight": 0.4, "confidence_weight": 0.3},
+    "kalshi": {"time_weight": 0.3, "data_weight": 0.4, "confidence_weight": 0.3},
     "product_sale": {"time_weight": 0.2, "data_weight": 0.3, "confidence_weight": 0.5},
     "service": {"time_weight": 0.2, "data_weight": 0.2, "confidence_weight": 0.6},
     "content": {"time_weight": 0.1, "data_weight": 0.3, "confidence_weight": 0.6},

@@ -28,7 +28,7 @@ PRIORS_FILE = STATE_DIR / "priors.json"
 # ---------------------------------------------------------------------------
 
 CATEGORY_MAP = {
-    "polymarket": "polymarket",
+    "kalshi": "kalshi",
     "product_sale": "product",
     "product": "product",
     "service": "service",
@@ -37,7 +37,7 @@ CATEGORY_MAP = {
     "outreach": "outreach",
 }
 
-ALL_CATEGORIES = ["polymarket", "outreach", "product", "content", "service", "arbitrage", "other"]
+ALL_CATEGORIES = ["kalshi", "outreach", "product", "content", "service", "arbitrage", "other"]
 
 
 def normalize_category(strategy_type: str) -> str:
@@ -49,10 +49,10 @@ def normalize_category(strategy_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 DEFAULT_PRIORS = {
-    "polymarket": {
+    "kalshi": {
         "win_rate": 0.52, "avg_roi": 0.08,
         "source": "default", "validated": False, "research_date": None,
-        "note": "Prediction markets avg ~52% for informed bettors"
+        "note": "Kalshi prediction markets avg ~52% for informed bettors"
     },
     "outreach": {
         "win_rate": 0.10, "avg_roi": 2.0,

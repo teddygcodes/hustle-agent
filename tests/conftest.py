@@ -18,7 +18,7 @@ import pytest
 # Set dummy API key BEFORE any agent imports
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts
+from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts, kalshi_client
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ def make_api_response(content_blocks: list, input_tokens: int = 500,
 # ---------------------------------------------------------------------------
 
 def make_txn(type_: str = "expense", amount: float = 5.0,
-             strategy: str = "polymarket", description: str = "test txn",
+             strategy: str = "kalshi", description: str = "test txn",
              reasoning: str = "testing", timestamp: str = None,
              balance_after: float = 95.0):
     """Build a ledger transaction entry."""
@@ -107,7 +107,7 @@ def make_txn(type_: str = "expense", amount: float = 5.0,
     }
 
 
-def make_action(category: str = "polymarket", cost: float = 5.0,
+def make_action(category: str = "kalshi", cost: float = 5.0,
                 expected_return: float = 10.0, status: str = "won",
                 actual_return: float = 12.0, actual_time_days: float = 3.0,
                 confidence: int = 70, time_horizon_days: float = 5.0,
@@ -152,7 +152,7 @@ def make_resolved_projection(hit: bool = True, confidence_raw: int = 70,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "action": "test projection",
         "cost": cost,
-        "strategy_type": "polymarket",
+        "strategy_type": "kalshi",
         "expected_return": expected_return,
         "expected_profit": round(expected_profit, 2),
         "roi_percent": round((expected_profit / cost * 100) if cost > 0 else 0, 1),
@@ -268,6 +268,12 @@ def isolated_fs(tmp_path, monkeypatch):
     # logger-specific paths
     monkeypatch.setattr(logger, "LOG_DIR", logs_dir)
     monkeypatch.setattr(logger, "EVENTS_FILE", logs_dir / "events.jsonl")
+
+    # kalshi_client paths
+    monkeypatch.setattr(kalshi_client, "BASE_DIR", tmp_path)
+    monkeypatch.setattr(kalshi_client, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(kalshi_client, "CONFIG_FILE", config_dir / "kalshi.json")
+    kalshi_client.reset_clients()
 
     return tmp_path
 
