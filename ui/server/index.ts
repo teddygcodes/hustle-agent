@@ -7,6 +7,7 @@ const app = express();
 const PORT = 3001;
 const STATE_DIR = path.resolve(import.meta.dirname, '../../state');
 const LOGS_DIR = path.resolve(import.meta.dirname, '../../logs');
+const REPORTS_DIR = path.join(STATE_DIR, 'reports');
 
 app.use(cors());
 app.use(express.json());
@@ -65,6 +66,28 @@ app.get('/api/memory', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'me
 app.get('/api/actions', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'actions.json'), [])));
 app.get('/api/instincts', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'instincts.json'), {})));
 app.get('/api/priors', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'priors.json'), {})));
+
+// Reports endpoints
+app.get('/api/reports', (_req, res) => {
+  try {
+    if (!fs.existsSync(REPORTS_DIR)) return res.json([]);
+    const files = fs.readdirSync(REPORTS_DIR)
+      .filter(f => f.startsWith('rpt_') && f.endsWith('.json'));
+    const reports = files.map(f => {
+      try { return JSON.parse(fs.readFileSync(path.join(REPORTS_DIR, f), 'utf-8')); }
+      catch { return null; }
+    }).filter(Boolean);
+    reports.sort((a: { timestamp: string }, b: { timestamp: string }) =>
+      new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    res.json(reports);
+  } catch { res.json([]); }
+});
+
+app.get('/api/reports/:id', (req, res) => {
+  const filePath = path.join(REPORTS_DIR, `${req.params.id}.json`);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'not found' });
+  res.json(readJson(filePath, {}));
+});
 
 // POST: send message to agent inbox
 app.post('/api/inbox', (req, res) => {

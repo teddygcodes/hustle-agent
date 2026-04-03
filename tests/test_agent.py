@@ -19,10 +19,10 @@ import pytest
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger
+from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, reports
 from tests.conftest import (
     make_text_block, make_tool_use_block, make_api_response,
-    make_txn, make_resolved_projection, DEFAULT_STATE,
+    make_txn, make_resolved_projection, make_data_backing, make_report, DEFAULT_STATE,
 )
 
 
@@ -1317,3 +1317,241 @@ class TestPreflight:
         assert result is False
         captured = capsys.readouterr()
         assert "corrupt" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Data Backing Tests
+# ---------------------------------------------------------------------------
+
+class TestDataBacking:
+    """Tests for quantitative data backing on Kalshi trades."""
+
+    def test_projection_stores_data_backing(self, isolated_fs):
+        """Projection should store data_backing when provided."""
+        db = make_data_backing()
+        proj = projections.create_projection(
+            action="Buy YES on weather market",
+            cost=5.0, strategy_type="kalshi",
+            expected_return=14.0, estimated_days=1,
+            confidence=72, assumptions=["NWS forecast accurate"],
+            risks=["Model error"], comparables="",
+            bull_case="Temp exceeds 90", bear_case="Coastal breeze",
+            research_summary="NWS data supports",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+            data_backing=db,
+        )
+        assert proj["data_backing"] is not None
+        assert proj["data_backing"]["source"] == "National Weather Service API"
+        assert proj["data_backing"]["source_probability"] == 0.72
+        assert proj["data_backing"]["edge"] == 0.37
+
+    def test_projection_without_data_backing(self, isolated_fs):
+        """Projection should have None data_backing when not provided."""
+        proj = projections.create_projection(
+            action="Buy some product", cost=5.0, strategy_type="product_sale",
+            expected_return=15.0, estimated_days=7,
+            confidence=60, assumptions=["demand exists"],
+            risks=["no sales"], comparables="",
+            bull_case="sells out", bear_case="no interest",
+            research_summary="test",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+        )
+        assert proj["data_backing"] is None
+
+    def test_kalshi_order_blocked_without_projection(self, active_state):
+        """Kalshi order should be BLOCKED when no projection_id provided."""
+        result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", "")
+        assert "BLOCKED" in result
+        assert "projection_id" in result.lower() or "projection" in result.lower()
+
+    def test_kalshi_order_blocked_nonexistent_projection(self, active_state):
+        """Kalshi order should be BLOCKED when projection_id doesn't exist."""
+        result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", "fake1234")
+        assert "BLOCKED" in result
+        assert "not found" in result.lower()
+
+    def test_kalshi_order_blocked_without_data_backing(self, active_state):
+        """Kalshi order should be BLOCKED when projection has no data_backing."""
+        # Create projection without data_backing
+        proj = projections.create_projection(
+            action="Buy YES on test market", cost=5.0, strategy_type="kalshi",
+            expected_return=14.0, estimated_days=1,
+            confidence=72, assumptions=["test"], risks=["test"],
+            comparables="", bull_case="good", bear_case="bad",
+            research_summary="test",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+        )
+        result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", proj["id"])
+        assert "BLOCKED" in result
+        assert "data_backing" in result.lower()
+
+    def test_kalshi_order_blocked_low_edge(self, active_state):
+        """Kalshi order should be BLOCKED when edge < 0.10."""
+        db = make_data_backing(source_probability=0.38, market_price=0.35, edge=0.03)
+        proj = projections.create_projection(
+            action="Buy YES on test market", cost=5.0, strategy_type="kalshi",
+            expected_return=14.0, estimated_days=1,
+            confidence=55, assumptions=["test"], risks=["test"],
+            comparables="", bull_case="good", bear_case="bad",
+            research_summary="test",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+            data_backing=db,
+        )
+        result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", proj["id"])
+        assert "BLOCKED" in result
+        assert "0.10" in result
+
+    @patch.object(engine, "kalshi_client")
+    def test_kalshi_order_succeeds_with_valid_backing(self, mock_kc, active_state):
+        """Kalshi order should succeed with valid projection + data_backing + edge >= 0.10."""
+        mock_kc.place_order.return_value = {"order_id": "ord_123", "status": "resting"}
+
+        db = make_data_backing(source_probability=0.72, market_price=0.35, edge=0.37)
+        proj = projections.create_projection(
+            action="Buy YES on weather market", cost=1.75, strategy_type="kalshi",
+            expected_return=5.0, estimated_days=1,
+            confidence=72, assumptions=["NWS accurate"], risks=["model error"],
+            comparables="", bull_case="temp exceeds 90", bear_case="breeze",
+            research_summary="NWS forecast",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+            data_backing=db,
+        )
+        result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", proj["id"])
+        assert "ORDER PLACED" in result
+        assert "ord_123" in result
+        assert "0.37" in result  # edge displayed
+        mock_kc.place_order.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Reports Tests
+# ---------------------------------------------------------------------------
+
+class TestReports:
+    """Tests for the transaction report system."""
+
+    def test_create_report_basic(self, isolated_fs):
+        """Report should be created as a standalone JSON file."""
+        txn = make_txn()
+        report = reports.create_report(transaction=txn, reasoning="test reasoning")
+        assert report["report_id"] == "rpt_1"
+        assert report["type"] == "expense"
+        assert report["summary"]["amount"] == 5.0
+        assert report["data_backing"] is None
+        assert report["projection"] is None
+        assert report["resolution"] is None
+        # Verify file exists
+        filepath = reports.REPORTS_DIR / "rpt_1.json"
+        assert filepath.exists()
+
+    def test_create_report_with_projection(self, isolated_fs):
+        """Report should embed a projection snapshot."""
+        txn = make_txn(type_="investment")
+        proj = make_resolved_projection()
+        proj["status"] = "pending"  # Not yet resolved
+        report = reports.create_report(transaction=txn, projection=proj, reasoning="test")
+        assert report["projection"] is not None
+        assert report["projection"]["projection_id"] == "test1234"
+        assert report["linked_ids"]["projection_id"] == "test1234"
+
+    def test_create_report_with_data_backing(self, isolated_fs):
+        """Report should store data_backing when provided."""
+        txn = make_txn(type_="investment")
+        db = make_data_backing()
+        report = reports.create_report(transaction=txn, data_backing=db, reasoning="test")
+        assert report["data_backing"] is not None
+        assert report["data_backing"]["source"] == "National Weather Service API"
+        assert report["data_backing"]["edge"] == 0.37
+
+    def test_resolve_report(self, isolated_fs):
+        """Resolving a report should fill in the resolution section."""
+        txn = make_txn(type_="investment")
+        proj = make_resolved_projection()
+        proj["status"] = "pending"
+        report = reports.create_report(
+            transaction=txn, projection=proj, reasoning="test"
+        )
+        assert report["resolution"] is None
+
+        # Resolve it
+        resolved = reports.resolve_report("test1234", {
+            "actual_outcome": "Contract resolved YES",
+            "actual_return": 10.0,
+            "actual_profit": 5.0,
+            "profit_delta": 2.0,
+            "notes": "Resolved on time",
+        })
+        assert resolved is not None
+        assert resolved["resolution"]["actual_return"] == 10.0
+        assert resolved["resolution"]["actual_profit_loss"] == 5.0
+        assert resolved["summary"]["outcome"] == "won"
+
+    def test_resolve_report_no_match(self, isolated_fs):
+        """Resolving with unknown projection_id should return None."""
+        result = reports.resolve_report("nonexistent", {"actual_outcome": "test"})
+        assert result is None
+
+    def test_get_recent_reports(self, isolated_fs):
+        """Should return reports sorted newest first with limit."""
+        for i in range(5):
+            txn = make_txn()
+            txn["id"] = i + 1
+            reports.create_report(transaction=txn, reasoning=f"test {i}")
+
+        recent = reports.get_recent_reports(limit=3)
+        assert len(recent) == 3
+        # Should be newest first
+        assert recent[0]["report_id"] == "rpt_5"
+
+    def test_get_report_by_id(self, isolated_fs):
+        """Should load a single report by ID."""
+        txn = make_txn()
+        created = reports.create_report(transaction=txn, reasoning="test")
+        fetched = reports.get_report(created["report_id"])
+        assert fetched is not None
+        assert fetched["report_id"] == created["report_id"]
+
+    def test_get_report_not_found(self, isolated_fs):
+        """Should return None for nonexistent report."""
+        result = reports.get_report("rpt_nonexistent")
+        assert result is None
+
+    def test_record_transaction_creates_report(self, active_state):
+        """exec_record_transaction should create a report as a side effect."""
+        engine.exec_record_transaction("expense", 5.0, "API costs", "operational", "cost tracking")
+        recent = reports.get_recent_reports(limit=1)
+        assert len(recent) == 1
+        assert recent[0]["type"] == "expense"
+        assert recent[0]["summary"]["amount"] == 5.0
+
+    def test_resolve_projection_updates_report(self, active_state):
+        """Resolving a projection should update the linked report's resolution."""
+        # Create a projection
+        proj = projections.create_projection(
+            action="Test trade", cost=5.0, strategy_type="kalshi",
+            expected_return=10.0, estimated_days=3,
+            confidence=70, assumptions=["test"], risks=["test"],
+            comparables="", bull_case="good", bear_case="bad",
+            research_summary="test",
+            current_balance=100.0, operational_cost_per_cycle=0.01,
+        )
+
+        # Create a transaction with projection_id (simulates what Kalshi order does)
+        engine.exec_record_transaction(
+            "investment", 5.0, "Test Kalshi trade", "kalshi", "testing",
+            projection_id=proj["id"],
+        )
+
+        # Verify report exists with projection linked
+        recent = reports.get_recent_reports(limit=1)
+        assert len(recent) == 1
+        assert recent[0]["linked_ids"]["projection_id"] == proj["id"]
+
+        # Resolve the projection
+        engine.exec_resolve_projection(proj["id"], "Contract won", 10.0, 2.0)
+
+        # Verify report was updated
+        updated = reports.get_report(recent[0]["report_id"])
+        assert updated["resolution"] is not None
+        assert updated["resolution"]["actual_return"] == 10.0
+        assert updated["summary"]["outcome"] == "won"

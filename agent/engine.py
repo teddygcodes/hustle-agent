@@ -45,6 +45,7 @@ from agent import audit
 from agent import watches
 from agent import instincts
 from agent import kalshi_client
+from agent import reports
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -237,6 +238,10 @@ TOOL_SCHEMAS = [
                 "reasoning": {
                     "type": "string",
                     "description": "Why you made this transaction"
+                },
+                "projection_id": {
+                    "type": "string",
+                    "description": "Optional: ID of the projection backing this transaction. Links the transaction report to the projection."
                 }
             },
             "required": ["type", "amount", "description", "strategy", "reasoning"]
@@ -532,7 +537,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "run_projection",
-        "description": "MANDATORY before any spend over $5. Builds a projection: expected return, ROI, confidence, bull/bear cases, verdict. Strategy-aware (kalshi, product_sale, service, content, arbitrage).",
+        "description": "MANDATORY before any spend over $5. For Kalshi trades, you MUST include data_backing with quantitative probability from an external source. Builds a projection: expected return, ROI, confidence, bull/bear cases, verdict.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -547,7 +552,22 @@ TOOL_SCHEMAS = [
                 "risks": {"type": "array", "items": {"type": "string"}, "description": "Key risks"},
                 "comparables": {"type": "string", "description": "Comparable data points or precedents"},
                 "bull_case": {"type": "string", "description": "Best realistic scenario — argue FOR this action"},
-                "bear_case": {"type": "string", "description": "Worst realistic scenario — argue AGAINST this action"}
+                "bear_case": {"type": "string", "description": "Worst realistic scenario — argue AGAINST this action"},
+                "data_backing": {
+                    "type": "object",
+                    "description": "Quantitative data backing. REQUIRED for Kalshi trades. Must include a probability from a primary data source that directly measures what the market resolves on.",
+                    "properties": {
+                        "source": {"type": "string", "description": "Data source name (e.g., National Weather Service API, FiveThirtyEight, Polymarket, BLS)"},
+                        "data_point": {"type": "string", "description": "What was measured (e.g., 'Forecast high temperature NYC: 94F, probability of exceeding 90F: 72%')"},
+                        "source_probability": {"type": "number", "description": "Source-implied probability for the outcome (0.0-1.0)"},
+                        "market_price": {"type": "number", "description": "Current Kalshi market price as decimal (0.0-1.0)"},
+                        "edge": {"type": "number", "description": "Absolute edge = |source_probability - market_price|. Must be >= 0.10 to trade."},
+                        "edge_direction": {"type": "string", "description": "Is the market overpriced or underpriced relative to source? e.g., 'market underpriced YES'"},
+                        "source_url": {"type": "string", "description": "URL to the data source"},
+                        "retrieved_at": {"type": "string", "description": "When the data was retrieved (ISO timestamp)"}
+                    },
+                    "required": ["source", "data_point", "source_probability", "market_price", "edge", "edge_direction", "source_url", "retrieved_at"]
+                }
             },
             "required": ["action", "cost", "strategy_type", "expected_return", "estimated_days_to_return", "confidence", "research_summary", "assumptions", "risks", "bull_case", "bear_case"]
         }
@@ -655,7 +675,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "place_kalshi_order",
-        "description": "Place an order on a Kalshi market. Requires Kalshi API credentials. Goes through all risk management checks. Use run_projection first for orders over $5.",
+        "description": "Place an order on a Kalshi market. REQUIRES a projection with quantitative data_backing (edge >= 0.10). You must run_projection with data_backing first, then pass the projection_id here.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -663,9 +683,10 @@ TOOL_SCHEMAS = [
                 "side": {"type": "string", "enum": ["yes", "no"], "description": "Which side to buy"},
                 "count": {"type": "integer", "description": "Number of contracts (each contract max payout = $1.00)"},
                 "price_cents": {"type": "integer", "description": "Limit price in cents (1-99). This is your max cost per contract."},
-                "reasoning": {"type": "string", "description": "Why you're placing this trade — this gets recorded in the ledger"}
+                "reasoning": {"type": "string", "description": "Why you're placing this trade — this gets recorded in the ledger"},
+                "projection_id": {"type": "string", "description": "ID of the projection backing this trade. Must have data_backing with edge >= 0.10."}
             },
-            "required": ["ticker", "side", "count", "price_cents", "reasoning"]
+            "required": ["ticker", "side", "count", "price_cents", "reasoning", "projection_id"]
         }
     },
     {
@@ -772,7 +793,8 @@ def exec_execute_code(language: str, code: str, description: str) -> str:
     except Exception as e:
         return f"ERROR: {str(e)}"
 
-def exec_record_transaction(type_: str, amount: float, description: str, strategy: str, reasoning: str) -> str:
+def exec_record_transaction(type_: str, amount: float, description: str, strategy: str, reasoning: str,
+                            projection_id: str = None) -> str:
     """Record a financial transaction and update balance."""
     # Reject negative or zero amounts
     if amount <= 0:
@@ -848,6 +870,25 @@ def exec_record_transaction(type_: str, amount: float, description: str, strateg
 
     save_state(state)
     save_ledger(ledger)
+
+    # Create transaction report
+    try:
+        proj = None
+        db = None
+        if projection_id:
+            proj_list = projections._load()
+            proj = next((p for p in proj_list if p["id"] == projection_id), None)
+            if proj:
+                db = proj.get("data_backing")
+        reports.create_report(
+            transaction=txn,
+            projection=proj,
+            data_backing=db,
+            reasoning=reasoning,
+            report_type=type_,
+        )
+    except Exception:
+        pass  # Never let report creation failure kill a transaction
 
     result = f"Recorded: {type_} ${amount:.2f} — {description}. Balance: ${state['balance']:.2f}"
 
@@ -1020,7 +1061,8 @@ def exec_run_projection(action: str, cost: float, strategy_type: str,
                         confidence: int, research_summary: str,
                         assumptions: list, risks: list,
                         bull_case: str, bear_case: str,
-                        comparables: str = "") -> str:
+                        comparables: str = "",
+                        data_backing: dict = None) -> str:
     """Build and store a projection before spending money."""
     state = load_state()
     ledger = load_ledger()
@@ -1052,6 +1094,7 @@ def exec_run_projection(action: str, cost: float, strategy_type: str,
         current_balance=balance,
         operational_cost_per_cycle=burn.get("avg_cost_per_cycle", 0),
         calibration_multiplier=cal,
+        data_backing=data_backing,
     )
 
     # Create a pending action entry linked to this projection
@@ -1089,6 +1132,17 @@ def exec_run_projection(action: str, cost: float, strategy_type: str,
                 lines.append(f"    - {w}")
     if adj["exploration_note"]:
         lines.append(f"  Exploration: {adj['exploration_note']}")
+
+    # Data backing context for Kalshi trades
+    if data_backing:
+        lines.extend([
+            f"  DATA BACKING:",
+            f"    Source: {data_backing.get('source', '?')}",
+            f"    Data: {data_backing.get('data_point', '?')}",
+            f"    Source probability: {data_backing.get('source_probability', 0):.0%}",
+            f"    Market price: {data_backing.get('market_price', 0):.0%}",
+            f"    Edge: {data_backing.get('edge', 0):.2f} ({data_backing.get('edge_direction', '?')})",
+        ])
 
     lines.extend([
         f"  Operational overhead: ${proj['operational_overhead']:.4f}",
@@ -1129,6 +1183,18 @@ def exec_resolve_projection(projection_id: str, actual_outcome: str,
         output += f"\n  Instincts updated ({mode} mode)."
     else:
         output += "\n  WARNING: No linked action found for instincts tracking."
+
+    # Update linked transaction report with resolution data
+    try:
+        reports.resolve_report(projection_id, {
+            "actual_outcome": actual_outcome,
+            "actual_return": actual_return,
+            "actual_profit": r["actual_profit"],
+            "profit_delta": r["profit_delta"],
+            "notes": f"Time delta: {r['time_delta']:+.1f}d",
+        })
+    except Exception:
+        pass  # Never let report update failure affect projection resolution
 
     return output
 
@@ -1268,8 +1334,9 @@ def exec_get_kalshi_market_detail(ticker: str, include_orderbook: bool = True) -
 
 
 def exec_place_kalshi_order(ticker: str, side: str, count: int,
-                             price_cents: int, reasoning: str) -> str:
-    """Place a Kalshi order with full risk checks."""
+                             price_cents: int, reasoning: str,
+                             projection_id: str = "") -> str:
+    """Place a Kalshi order with full risk checks and data backing enforcement."""
     # Calculate cost in dollars
     cost_dollars = round(count * price_cents / 100.0, 2)
 
@@ -1280,6 +1347,39 @@ def exec_place_kalshi_order(ticker: str, side: str, count: int,
     # Planning mode check
     if state.get("status") == "planning":
         return "PLANNING MODE: You can't trade yet. Tyler wants to see your plan first."
+
+    # Projection + data_backing enforcement
+    if not projection_id:
+        return (
+            "BLOCKED: All Kalshi trades require a projection_id. "
+            "Run run_projection with data_backing first, then pass the projection_id here."
+        )
+
+    proj_list = projections._load()
+    proj = next((p for p in proj_list if p["id"] == projection_id), None)
+    if not proj:
+        return f"BLOCKED: Projection '{projection_id}' not found. Run run_projection with data_backing first."
+    if proj["status"] != "pending":
+        return f"BLOCKED: Projection '{projection_id}' is already {proj['status']}. Create a new projection."
+
+    db = proj.get("data_backing")
+    if not db or not db.get("source") or db.get("source_probability") is None:
+        return (
+            "BLOCKED: Your projection has no quantitative data_backing. "
+            "Kalshi trades require a probability estimate from a primary data source "
+            "that directly measures what this market resolves on. Not an opinion — a number. "
+            "Re-run run_projection with a data_backing object. "
+            "If you don't have a data source for this market category, propose_improvement to request one."
+        )
+
+    edge = abs(db.get("edge", 0))
+    if edge < 0.10:
+        return (
+            f"BLOCKED: Edge of {edge:.2f} is below the 0.10 minimum threshold. "
+            f"Source: {db.get('source', '?')} gives {db.get('source_probability', '?'):.0%}, "
+            f"market price: {db.get('market_price', '?'):.0%}. "
+            f"Find a higher-edge opportunity or wait for the market to move."
+        )
 
     # $25 per-action cap
     if cost_dollars > 25.0:
@@ -1313,19 +1413,23 @@ def exec_place_kalshi_order(ticker: str, side: str, count: int,
         "investment", cost_dollars,
         f"Kalshi order: {count}x {side.upper()} @ {price_cents}¢ on {ticker}",
         "kalshi", reasoning,
+        projection_id=projection_id,
     )
 
-    # Create instincts action for learning
+    # Create instincts action for learning (use projection data when available)
     max_payout = round(count * 1.00, 2)  # Each contract pays $1 if YES
+    proj_confidence = proj.get("confidence_raw", 50) if proj else 50
+    proj_days = proj.get("time_to_return_days", 7.0) if proj else 7.0
     instincts.create_action(
         category="kalshi",
         subcategory=f"{side} {ticker}",
         cost=cost_dollars,
         expected_return=max_payout,
-        time_horizon_days=7.0,  # default estimate, agent can be more precise via projection
-        confidence=50,  # neutral default, projection will have the real confidence
+        time_horizon_days=proj_days,
+        confidence=proj_confidence,
         balance=state["balance"],
         risk_posture=risk.get_risk_posture(state["balance"]),
+        projection_id=projection_id,
     )
 
     output = (
@@ -1338,13 +1442,10 @@ def exec_place_kalshi_order(ticker: str, side: str, count: int,
         f"  Max payout: ${max_payout:.2f}\n"
         f"  Order ID: {result.get('order_id', '?')}\n"
         f"  Status: {result.get('status', '?')}\n"
+        f"  Projection: #{projection_id}\n"
+        f"  Edge: {db.get('edge', 0):.2f} ({db.get('edge_direction', '?')})\n"
+        f"  Source: {db.get('source', '?')}\n"
     )
-
-    # Projection reminder
-    if cost_dollars > 5.0:
-        unresolved = projections.get_unresolved_for_strategy("kalshi")
-        if not unresolved:
-            output += "\n⚠ WARNING: No projection found for this trade. You should run_projection before spending >$5."
 
     return output
 
@@ -1387,7 +1488,7 @@ def exec_cancel_kalshi_order(order_id: str) -> str:
 TOOL_EXECUTORS = {
     "web_research": lambda args: exec_web_research(args["query"], args["reason"]),
     "execute_code": lambda args: exec_execute_code(args["language"], args["code"], args["description"]),
-    "record_transaction": lambda args: exec_record_transaction(args["type"], args["amount"], args["description"], args["strategy"], args["reasoning"]),
+    "record_transaction": lambda args: exec_record_transaction(args["type"], args["amount"], args["description"], args["strategy"], args["reasoning"], args.get("projection_id")),
     "write_journal": lambda args: exec_write_journal(args["entry"]),
     "message_tyler": lambda args: exec_message_tyler(args["message"]),
     "update_strategy": lambda args: exec_update_strategy(**args),
@@ -1408,7 +1509,8 @@ TOOL_EXECUTORS = {
         args["confidence"], args["research_summary"],
         args.get("assumptions", []), args.get("risks", []),
         args["bull_case"], args["bear_case"],
-        args.get("comparables", "")),
+        args.get("comparables", ""),
+        args.get("data_backing")),
     "resolve_projection": lambda args: exec_resolve_projection(
         args["projection_id"], args["actual_outcome"],
         args["actual_return"], args["actual_time_days"]),
@@ -1431,7 +1533,8 @@ TOOL_EXECUTORS = {
         args["ticker"], args.get("include_orderbook", True)),
     "place_kalshi_order": lambda args: exec_place_kalshi_order(
         args["ticker"], args["side"], args["count"],
-        args["price_cents"], args["reasoning"]),
+        args["price_cents"], args["reasoning"],
+        args.get("projection_id", "")),
     "check_kalshi_portfolio": lambda args: exec_check_kalshi_portfolio(),
     "cancel_kalshi_order": lambda args: exec_cancel_kalshi_order(args["order_id"]),
 }
@@ -1513,10 +1616,23 @@ KALSHI PREDICTION MARKETS:
 - Kalshi has a demo environment for paper trading. Use demo mode to test strategies before Tyler gives you production credentials.
 - If you don't have credentials yet, ask Tyler to set up demo API keys at kalshi.com and provide the key ID + private key PEM file
 - Kalshi contracts cost $0.01-$0.99 each and pay $1.00 if YES outcome occurs (your risk = count × price)
-- Always run_projection before placing trades over $5
 - Start with small positions ($2-5) to build instincts data for the kalshi category
 - When researching a Kalshi market, use get_kalshi_market_detail to pull real orderbook data into your projection
+
+KALSHI DATA BACKING REQUIREMENT:
+- Every Kalshi trade REQUIRES a projection with quantitative data_backing. No data, no trade.
+- data_backing must include: what primary data source you used, what probability it implies (source_probability), what the market is pricing (market_price), and what your edge is.
+- Minimum edge threshold: 0.10 (10 percentage points). Below this, the trade is blocked automatically.
+- The data source must be a primary source that directly measures what the market resolves on. Not an article. Not an opinion. A number from a source that produces that number.
+- Examples of valid sources: National Weather Service API, CME FedWatch tool, ESPN odds, BLS employment data, Polymarket, FiveThirtyEight, Metaculus
+- Workflow: (1) research the market with web_research, (2) find a primary data source with a quantitative probability, (3) run_projection with data_backing, (4) if verdict is favorable AND edge >= 0.10, place_kalshi_order with the projection_id
+- If you cannot find a data source for a market category, use propose_improvement to request a tool that gives you access to the right data. The data requirement drives tool proposals naturally.
 {kalshi_context}
+
+ACCOUNTABILITY:
+- Every transaction you make generates a permanent report in state/reports/ with your reasoning, data backing, projections, and eventual outcome.
+- These reports are permanent and Tyler can review them anytime. Be thorough in your reasoning — it's on the record.
+- When projections resolve, the linked report is automatically updated with actual results vs predictions.
 
 CONSTITUTION (you cannot modify these):
 - engine.py core loop and spending cap ($25/action)

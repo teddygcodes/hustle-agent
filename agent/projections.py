@@ -92,6 +92,7 @@ def create_projection(
     current_balance: float,
     operational_cost_per_cycle: float,
     calibration_multiplier: float = 1.0,
+    data_backing: dict = None,
 ) -> dict:
     """Create and store a projection. Returns the full projection."""
     expected_profit = expected_return - cost
@@ -134,6 +135,7 @@ def create_projection(
         "research_summary": research_summary,
         "operational_overhead": round(operational_overhead, 4),
         "capital_velocity_cost": round(capital_velocity_cost, 4),
+        "data_backing": data_backing,
         "verdict": verdict,
         "status": "pending",
         "resolution": None,
