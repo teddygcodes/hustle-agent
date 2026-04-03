@@ -10,6 +10,7 @@ import Journal from './pages/Journal';
 import Chat from './pages/Chat';
 import Proposals from './pages/Proposals';
 import Health from './pages/Health';
+import Instincts from './pages/Instincts';
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
           <Route path="chat" element={<Chat />} />
           <Route path="proposals" element={<Proposals />} />
           <Route path="health" element={<Health />} />
+          <Route path="instincts" element={<Instincts />} />
         </Route>
       </Routes>
     </BrowserRouter>

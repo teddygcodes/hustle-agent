@@ -7,6 +7,7 @@ helper factories so no real API calls or state mutations occur.
 
 import json
 import os
+import uuid
 import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ import pytest
 # Set dummy API key BEFORE any agent imports
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger
+from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +107,39 @@ def make_txn(type_: str = "expense", amount: float = 5.0,
     }
 
 
+def make_action(category: str = "polymarket", cost: float = 5.0,
+                expected_return: float = 10.0, status: str = "won",
+                actual_return: float = 12.0, actual_time_days: float = 3.0,
+                confidence: int = 70, time_horizon_days: float = 5.0,
+                balance: float = 100.0, risk_posture: str = "aggressive",
+                time_of_day: str = "morning", day_of_week: str = "weekday",
+                projection_id: str = None):
+    """Build an action entry for testing instincts."""
+    return {
+        "action_id": str(uuid.uuid4())[:8],
+        "projection_id": projection_id or str(uuid.uuid4())[:8],
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "category": category,
+        "subcategory": "test action",
+        "cost": cost,
+        "conditions": {
+            "time_horizon_days": time_horizon_days,
+            "market_odds": None,
+            "confidence_at_decision": confidence,
+            "capital_percentage": round((cost / balance * 100) if balance > 0 else 0, 1),
+            "time_of_day": time_of_day,
+            "day_of_week": day_of_week,
+            "risk_posture_at_time": risk_posture,
+            "balance_at_time": balance,
+        },
+        "expected_return": expected_return,
+        "status": status,
+        "actual_return": actual_return if status != "pending" else None,
+        "actual_time_days": actual_time_days if status != "pending" else None,
+        "resolved_at": datetime.datetime.now(datetime.timezone.utc).isoformat() if status != "pending" else None,
+    }
+
+
 def make_resolved_projection(hit: bool = True, confidence_raw: int = 70,
                               cost: float = 10.0, expected_return: float = 20.0,
                               actual_return: float = 25.0,
@@ -177,10 +211,11 @@ def isolated_fs(tmp_path, monkeypatch):
     (state_dir / "inbox.json").write_text("[]")
     (state_dir / "ui_requests.json").write_text("[]")
     (state_dir / "journal.md").write_text("# Hustle Agent — Decision Journal\n\n---\n")
+    (state_dir / "actions.json").write_text("[]")
 
     # Monkeypatch every module's path constants
     modules_with_base = [engine, risk, projections, memory, costs, audit,
-                         watches, pipeline, proposals, logger]
+                         watches, pipeline, proposals, logger, instincts]
     for mod in modules_with_base:
         monkeypatch.setattr(mod, "BASE_DIR", tmp_path)
         if hasattr(mod, "STATE_DIR"):
@@ -218,6 +253,17 @@ def isolated_fs(tmp_path, monkeypatch):
 
     # proposals-specific paths
     monkeypatch.setattr(proposals, "PROPOSALS_FILE", state_dir / "proposals.json")
+
+    # instincts-specific paths
+    monkeypatch.setattr(instincts, "ACTIONS_FILE", state_dir / "actions.json")
+    monkeypatch.setattr(instincts, "INSTINCTS_FILE", state_dir / "instincts.json")
+    monkeypatch.setattr(instincts, "PRIORS_FILE", state_dir / "priors.json")
+
+    # engine actions path
+    monkeypatch.setattr(engine, "ACTIONS_FILE", state_dir / "actions.json")
+
+    # audit instincts path
+    monkeypatch.setattr(audit, "INSTINCTS_FILE", state_dir / "instincts.json")
 
     # logger-specific paths
     monkeypatch.setattr(logger, "LOG_DIR", logs_dir)

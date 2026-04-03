@@ -62,6 +62,9 @@ app.get('/api/audits', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'au
 app.get('/api/costs', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'api_costs.json'))));
 app.get('/api/events', (_req, res) => res.json(readJsonl(path.join(LOGS_DIR, 'events.jsonl'))));
 app.get('/api/memory', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'memory.json'), {})));
+app.get('/api/actions', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'actions.json'), [])));
+app.get('/api/instincts', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'instincts.json'), {})));
+app.get('/api/priors', (_req, res) => res.json(readJson(path.join(STATE_DIR, 'priors.json'), {})));
 
 // POST: send message to agent inbox
 app.post('/api/inbox', (req, res) => {

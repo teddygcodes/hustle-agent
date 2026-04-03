@@ -52,9 +52,18 @@ def _get_daily_spend(ledger: list) -> float:
 
 
 def check_portfolio_risk(balance: float, ledger: list,
-                         proposed_strategy: str, proposed_amount: float) -> dict:
+                         proposed_strategy: str, proposed_amount: float,
+                         exploration_mode: str = None) -> dict:
     """Check if a proposed spend passes all risk controls."""
     posture = get_risk_posture(balance)
+
+    # Exploration mode cap: $5/action when still exploring
+    if exploration_mode == "explore" and proposed_amount > 5.0:
+        return {
+            "allowed": False,
+            "reason": f"EXPLORATION MODE: Max $5.00 per action while building instincts. Proposed: ${proposed_amount:.2f}. Keep bets small and diverse.",
+            "risk_posture": posture,
+        }
 
     # Drawdown check
     if posture == "preservation" and proposed_amount > 2.0:

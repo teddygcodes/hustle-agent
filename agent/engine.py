@@ -43,6 +43,7 @@ from agent import pipeline
 from agent import proposals
 from agent import audit
 from agent import watches
+from agent import instincts
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -58,6 +59,7 @@ JOURNAL_FILE = STATE_DIR / "journal.md"
 CONVERSATIONS_FILE = STATE_DIR / "conversations.json"
 UI_REQUESTS_FILE = STATE_DIR / "ui_requests.json"
 INBOX_FILE = STATE_DIR / "inbox.json"
+ACTIONS_FILE = STATE_DIR / "actions.json"
 
 REQUIRED_STATE_FILES = {
     "agent_state.json": "json",
@@ -73,6 +75,7 @@ REQUIRED_STATE_FILES = {
     "audits.json": "json",
     "watches.json": "json",
     "api_costs.json": "json",
+    "actions.json": "json",
 }
 
 # ---------------------------------------------------------------------------
@@ -608,6 +611,20 @@ TOOL_SCHEMAS = [
             },
             "required": ["condition", "action_hint", "check_after"]
         }
+    },
+    {
+        "name": "update_prior",
+        "description": "Update a base rate prior for a category based on your research. Use this after researching real base rates to replace the default estimates with validated data. Categories: polymarket, outreach, product, content, service, arbitrage.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "The action category (polymarket, outreach, product, content, service, arbitrage)"},
+                "win_rate": {"type": "number", "description": "Estimated win rate as a decimal (0.0 to 1.0)"},
+                "avg_roi": {"type": "number", "description": "Average ROI as a decimal (e.g., 0.5 = 50% return)"},
+                "note": {"type": "string", "description": "Source or reasoning for these numbers"}
+            },
+            "required": ["category", "win_rate", "avg_roi"]
+        }
     }
 ]
 
@@ -715,7 +732,11 @@ def exec_record_transaction(type_: str, amount: float, description: str, strateg
 
     # Risk management checks for spending
     if type_ in ("expense", "investment"):
-        risk_result = risk.check_portfolio_risk(state["balance"], ledger, strategy, amount)
+        # Only apply explore mode cap when instincts have data (agent has started tracking)
+        actions = instincts.load_actions()
+        explore_mode = instincts.get_exploration_mode(actions) if actions else None
+        risk_result = risk.check_portfolio_risk(state["balance"], ledger, strategy, amount,
+                                                exploration_mode=explore_mode)
         logger.risk_check(risk_result["allowed"], risk_result["reason"],
                          strategy, amount, cycle=state.get("cycle", 0))
         if not risk_result["allowed"]:
@@ -940,8 +961,25 @@ def exec_run_projection(action: str, cost: float, strategy_type: str,
                         comparables: str = "") -> str:
     """Build and store a projection before spending money."""
     state = load_state()
+    ledger = load_ledger()
     burn = costs.get_burn_rate()
-    cal = audit.get_calibration_multiplier()
+    balance = state.get("balance", 100)
+
+    # Get instinct adjustments for this action
+    category = instincts.normalize_category(strategy_type)
+    conditions = {
+        "time_horizon_days": estimated_days_to_return,
+        "confidence_at_decision": confidence,
+        "capital_percentage": round((cost / balance * 100) if balance > 0 else 0, 1),
+        "risk_posture_at_time": risk.get_risk_posture(balance),
+    }
+    adj = instincts.get_adjustments_for_action(category, conditions)
+
+    # Use instinct calibration when available, fall back to audit
+    if adj["earned_count"] >= 3:
+        cal = adj["calibration_multiplier"]
+    else:
+        cal = audit.get_calibration_multiplier()
 
     proj = projections.create_projection(
         action=action, cost=cost, strategy_type=strategy_type,
@@ -949,27 +987,54 @@ def exec_run_projection(action: str, cost: float, strategy_type: str,
         confidence=confidence, assumptions=assumptions, risks=risks,
         comparables=comparables, bull_case=bull_case, bear_case=bear_case,
         research_summary=research_summary,
-        current_balance=state.get("balance", 100),
+        current_balance=balance,
         operational_cost_per_cycle=burn.get("avg_cost_per_cycle", 0),
         calibration_multiplier=cal,
     )
 
+    # Create a pending action entry linked to this projection
+    action_entry = instincts.create_action(
+        category=strategy_type,
+        subcategory=action[:80],
+        cost=cost,
+        expected_return=expected_return,
+        time_horizon_days=estimated_days_to_return,
+        confidence=confidence,
+        balance=balance,
+        risk_posture=risk.get_risk_posture(balance),
+        projection_id=proj["id"],
+    )
+
     logger.projection_created(proj["id"], action, proj["verdict"], cycle=state.get("cycle", 0))
 
-    # Format the full projection for the agent
+    # Format the full projection for the agent (show both raw and instinct-adjusted)
     lines = [
         f"PROJECTION #{proj['id']}",
         f"  Action: {action}",
         f"  Cost: ${cost:.2f} → Expected return: ${expected_return:.2f}",
         f"  Expected profit: ${proj['expected_profit']:.2f} (ROI: {proj['roi_percent']:.1f}%)",
         f"  Time: {estimated_days_to_return} days",
-        f"  Confidence: {confidence}% raw → {proj['confidence_calibrated']}% calibrated (multiplier: {cal})",
+        f"  Confidence: {confidence}% raw → {proj['confidence_calibrated']}% calibrated (multiplier: {cal:.2f})",
+    ]
+
+    # Instinct context
+    if adj["earned_count"] > 0 or adj["cross_pattern_warnings"]:
+        lines.append(f"  Instinct data: {adj['data_source']} ({adj['earned_count']} past actions in {category})")
+        lines.append(f"  Category win rate (blended): {adj['blended_win_rate']*100:.0f}%")
+        if adj["cross_pattern_warnings"]:
+            lines.append("  Cross-pattern warnings:")
+            for w in adj["cross_pattern_warnings"]:
+                lines.append(f"    - {w}")
+    if adj["exploration_note"]:
+        lines.append(f"  Exploration: {adj['exploration_note']}")
+
+    lines.extend([
         f"  Operational overhead: ${proj['operational_overhead']:.4f}",
         f"  Capital velocity cost: ${proj['capital_velocity_cost']:.4f}",
         f"  Bull case: {bull_case[:100]}",
         f"  Bear case: {bear_case[:100]}",
         f"  VERDICT: {proj['verdict'].upper().replace('_', ' ')}",
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -984,12 +1049,26 @@ def exec_resolve_projection(projection_id: str, actual_outcome: str,
     r = result["resolution"]
     logger.projection_resolved(projection_id, r["hit"], r["profit_delta"], cycle=state.get("cycle", 0))
 
-    return (
+    # Resolve the linked action and recompute instincts
+    status = "won" if r["hit"] else "lost"
+    resolved_action = instincts.resolve_action(projection_id, actual_return, actual_time_days, status)
+    if resolved_action:
+        instincts.recompute_instincts()
+
+    output = (
         f"Projection #{projection_id} resolved: {'HIT' if r['hit'] else 'MISS'}\n"
         f"  Predicted: ${result['expected_profit']:.2f} profit\n"
         f"  Actual: ${r['actual_profit']:.2f} profit (delta: ${r['profit_delta']:+.2f})\n"
         f"  Time: predicted {result['time_to_return_days']}d, actual {actual_time_days}d (delta: {r['time_delta']:+.1f}d)"
     )
+
+    if resolved_action:
+        mode = instincts.get_exploration_mode()
+        output += f"\n  Instincts updated ({mode} mode)."
+    else:
+        output += "\n  WARNING: No linked action found for instincts tracking."
+
+    return output
 
 
 def exec_update_pipeline(name: str, stage: str, strategy: str, description: str,
@@ -1041,6 +1120,20 @@ def exec_list_files(directory: str = ".") -> str:
         lines.append(f"  [{prefix}] {e.name}" + (f" ({size} bytes)" if size else ""))
     return "\n".join(lines) if lines else "Empty directory."
 
+def exec_update_prior(category: str, win_rate: float, avg_roi: float, note: str = "") -> str:
+    """Update a category's base rate prior from research."""
+    cat = instincts.normalize_category(category)
+    if cat == "other":
+        return f"Unknown category '{category}'. Use: polymarket, outreach, product, content, service, arbitrage."
+    if not (0.0 <= win_rate <= 1.0):
+        return f"Win rate must be between 0.0 and 1.0, got {win_rate}."
+    result = instincts.update_priors_from_research(cat, win_rate, avg_roi, note)
+    return (
+        f"Prior updated for '{cat}': win_rate={result['win_rate']:.0%}, "
+        f"avg_roi={result['avg_roi']:.0%}. Source: research (validated). "
+        f"This replaces the default estimate. Your instincts will now use this as the base rate."
+    )
+
 # Map tool names to execution functions
 TOOL_EXECUTORS = {
     "web_research": lambda args: exec_web_research(args["query"], args["reason"]),
@@ -1080,6 +1173,8 @@ TOOL_EXECUTORS = {
     "set_watch": lambda args: exec_set_watch(
         args["condition"], args["action_hint"], args["check_after"],
         args.get("expires_at", ""), args.get("projection_id", "")),
+    "update_prior": lambda args: exec_update_prior(
+        args["category"], args["win_rate"], args["avg_roi"], args.get("note", "")),
 }
 
 # ---------------------------------------------------------------------------
@@ -1125,6 +1220,8 @@ STRATEGY PERFORMANCE:
 {proposals_context}
 
 {audit_context}
+
+{instincts_context}
 
 YOUR PERSONALITY:
 - You're scrappy, resourceful, and biased toward action
@@ -1184,6 +1281,12 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
     ctx_watches = watches.get_watches_context()
     ctx_proposals = proposals.get_proposals_context()
     ctx_audit = audit.get_audit_context(cycle_num)
+    ctx_instincts = instincts.get_instincts_context()
+    ctx_instincts = ctx_instincts.replace("{", "{{").replace("}", "}}")
+
+    # Seed priors on first cycle
+    if cycle_num <= 1:
+        instincts.seed_priors()
 
     # Planning mode context
     if state.get("status") == "planning":
@@ -1229,6 +1332,7 @@ def build_system_prompt(state: dict, ledger: list, instructions: str = "Run your
         watches_context=ctx_watches,
         proposals_context=ctx_proposals,
         audit_context=ctx_audit,
+        instincts_context=ctx_instincts,
         planning_mode_context=planning_ctx,
         instructions=instructions,
     )
