@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Wallet, Target, TrendingUp, Kanban,
-  Sparkles, BookOpen, MessageCircle, Lightbulb, Activity, Brain
+  Sparkles, BookOpen, MessageCircle, Lightbulb, Activity, Brain, FileText
 } from 'lucide-react';
 
 const links = [
@@ -19,6 +19,7 @@ const moreLinks = [
   { to: '/proposals', icon: Lightbulb, label: 'Props' },
   { to: '/health', icon: Activity, label: 'Health' },
   { to: '/instincts', icon: Brain, label: 'Brain' },
+  { to: '/reports', icon: FileText, label: 'Reports' },
 ];
 
 export function MobileNav() {

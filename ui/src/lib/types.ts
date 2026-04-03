@@ -77,6 +77,66 @@ export interface PipelineItem {
   history: { from: string; to: string; at: string }[];
 }
 
+export interface DataBacking {
+  source: string;
+  data_point: string;
+  source_probability: number;
+  market_price: number;
+  edge: number;
+  edge_direction: string;
+  source_url: string;
+  retrieved_at: string;
+}
+
+export interface TransactionReport {
+  report_id: string;
+  timestamp: string;
+  type: 'expense' | 'income' | 'investment' | 'return';
+  summary: {
+    action: string;
+    amount: number;
+    outcome: 'pending' | 'won' | 'lost';
+    profit_loss: number | null;
+    balance_after: number;
+  };
+  reasoning: {
+    strategy: string;
+    thesis: string;
+    confidence_raw: number | null;
+    confidence_adjusted: number | null;
+    calibration_applied: string | null;
+    instinct_warnings: string[];
+    risk_posture_at_time: string | null;
+    exploration_mode: string | null;
+  };
+  data_backing: DataBacking | null;
+  projection: {
+    projection_id: string;
+    expected_return: number;
+    expected_profit: number;
+    roi_percent: number;
+    time_to_return_days: number;
+    verdict_raw: string;
+    verdict_adjusted: string;
+    bull_case: string;
+    bear_case: string;
+  } | null;
+  resolution: {
+    resolved_at: string;
+    actual_outcome: string;
+    actual_return: number;
+    actual_profit_loss: number;
+    prediction_delta: number;
+    notes: string | null;
+  } | null;
+  linked_ids: {
+    ledger_id: number;
+    action_id: string | null;
+    projection_id: string | null;
+    kalshi_order_id: string | null;
+  };
+}
+
 export interface Projection {
   id: string;
   timestamp: string;
@@ -96,6 +156,7 @@ export interface Projection {
   bull_case: string;
   bear_case: string;
   research_summary: string;
+  data_backing?: DataBacking;
   operational_overhead: number;
   capital_velocity_cost: number;
   verdict: string;

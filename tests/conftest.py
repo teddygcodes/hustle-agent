@@ -18,7 +18,7 @@ import pytest
 # Set dummy API key BEFORE any agent imports
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts, kalshi_client
+from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts, kalshi_client, reports
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +183,78 @@ def make_resolved_projection(hit: bool = True, confidence_raw: int = 70,
     }
 
 
+def make_data_backing(source: str = "National Weather Service API",
+                      data_point: str = "Forecast high: 94F, P(>90F) = 72%",
+                      source_probability: float = 0.72,
+                      market_price: float = 0.35,
+                      edge: float = 0.37,
+                      edge_direction: str = "market underpriced YES",
+                      source_url: str = "https://api.weather.gov/test",
+                      retrieved_at: str = None):
+    """Build a data_backing dict for testing."""
+    if retrieved_at is None:
+        retrieved_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    return {
+        "source": source,
+        "data_point": data_point,
+        "source_probability": source_probability,
+        "market_price": market_price,
+        "edge": edge,
+        "edge_direction": edge_direction,
+        "source_url": source_url,
+        "retrieved_at": retrieved_at,
+    }
+
+
+def make_report(txn_id: int = 1, report_type: str = "investment",
+                projection_id: str = None, has_data_backing: bool = False,
+                has_resolution: bool = False):
+    """Build a transaction report dict for testing."""
+    report = {
+        "report_id": f"rpt_{txn_id}",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "type": report_type,
+        "summary": {
+            "action": "Test transaction",
+            "amount": 5.0,
+            "outcome": "pending",
+            "profit_loss": None,
+            "balance_after": 95.0,
+        },
+        "reasoning": {
+            "strategy": "kalshi",
+            "thesis": "Test reasoning",
+            "confidence_raw": 70,
+            "confidence_adjusted": 55,
+            "calibration_applied": "kalshi category: 0.79x multiplier",
+            "instinct_warnings": [],
+            "risk_posture_at_time": "normal",
+            "exploration_mode": "exploit",
+        },
+        "data_backing": make_data_backing() if has_data_backing else None,
+        "projection": None,
+        "resolution": None,
+        "linked_ids": {
+            "ledger_id": txn_id,
+            "action_id": None,
+            "projection_id": projection_id,
+            "kalshi_order_id": None,
+        },
+    }
+    if has_resolution:
+        report["resolution"] = {
+            "resolved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "actual_outcome": "Contract resolved YES",
+            "actual_return": 10.0,
+            "actual_profit_loss": 5.0,
+            "prediction_delta": 2.0,
+            "notes": "Time delta: -1.0d",
+        }
+        report["summary"]["outcome"] = "won"
+        report["summary"]["profit_loss"] = 5.0
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Filesystem isolation fixture
 # ---------------------------------------------------------------------------
@@ -213,9 +285,13 @@ def isolated_fs(tmp_path, monkeypatch):
     (state_dir / "journal.md").write_text("# Hustle Agent — Decision Journal\n\n---\n")
     (state_dir / "actions.json").write_text("[]")
 
+    # Create reports directory
+    reports_dir = state_dir / "reports"
+    reports_dir.mkdir()
+
     # Monkeypatch every module's path constants
     modules_with_base = [engine, risk, projections, memory, costs, audit,
-                         watches, pipeline, proposals, logger, instincts]
+                         watches, pipeline, proposals, logger, instincts, reports]
     for mod in modules_with_base:
         monkeypatch.setattr(mod, "BASE_DIR", tmp_path)
         if hasattr(mod, "STATE_DIR"):
@@ -268,6 +344,9 @@ def isolated_fs(tmp_path, monkeypatch):
     # logger-specific paths
     monkeypatch.setattr(logger, "LOG_DIR", logs_dir)
     monkeypatch.setattr(logger, "EVENTS_FILE", logs_dir / "events.jsonl")
+
+    # reports-specific paths
+    monkeypatch.setattr(reports, "REPORTS_DIR", reports_dir)
 
     # kalshi_client paths
     monkeypatch.setattr(kalshi_client, "BASE_DIR", tmp_path)
