@@ -193,6 +193,73 @@ export interface AgentEvent {
   data: Record<string, unknown>;
 }
 
+export interface Action {
+  action_id: string;
+  projection_id: string | null;
+  timestamp: string;
+  category: string;
+  subcategory: string;
+  cost: number;
+  conditions: {
+    time_horizon_days: number;
+    market_odds: number | null;
+    confidence_at_decision: number;
+    capital_percentage: number;
+    time_of_day: string;
+    day_of_week: string;
+    risk_posture_at_time: string;
+    balance_at_time: number;
+  };
+  expected_return: number;
+  status: 'pending' | 'won' | 'lost' | 'partial' | 'expired';
+  actual_return: number | null;
+  actual_time_days: number | null;
+  resolved_at: string | null;
+}
+
+export interface CategoryScore {
+  win_rate: number;
+  avg_roi: number;
+  avg_return_time_days: number;
+  capital_efficiency: number;
+  trend: string;
+  confidence_calibration_gap: number;
+  sample_size: number;
+}
+
+export interface CrossPattern {
+  combo: string;
+  key: string;
+  win_rate: number;
+  avg_roi: number;
+  sample_size: number;
+  signal_strength: number;
+  description: string;
+}
+
+export interface InstinctsData {
+  last_computed: string;
+  action_count_at_compute: number;
+  exploration_mode: 'explore' | 'exploit';
+  category_scores: Record<string, CategoryScore>;
+  dimension_scores: Record<string, Record<string, { win_rate: number; avg_roi: number; sample_size: number }>>;
+  cross_patterns: CrossPattern[];
+  calibration: { overall: number; per_category: Record<string, number> };
+  instinct_sentences: string[];
+  history: { timestamp: string; sentences: string[]; overall_calibration: number; action_count: number }[];
+}
+
+export interface PriorEntry {
+  win_rate: number;
+  avg_roi: number;
+  source: 'default' | 'research' | 'earned';
+  validated: boolean;
+  research_date: string | null;
+  note: string;
+}
+
+export type PriorsData = Record<string, PriorEntry>;
+
 export interface MemoryData {
   lessons: { text: string; timestamp: string; cycle: number }[];
   strategy_postmortems: { strategy: string; thesis: string; outcome: string; profit_delta: number; lesson: string; would_retry: boolean; cycle: number }[];

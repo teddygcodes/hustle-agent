@@ -11,6 +11,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATE_DIR = BASE_DIR / "state"
 AUDITS_FILE = STATE_DIR / "audits.json"
+INSTINCTS_FILE = STATE_DIR / "instincts.json"
 
 AUDIT_INTERVAL = 10
 
@@ -72,6 +73,10 @@ def run_self_audit(state: dict, ledger: list, projections: list,
     ph = audit["pipeline_health"]
     if ph.get("stale_count", 0) > 2:
         recs.append(f"{ph['stale_count']} pipeline items haven't moved in 3+ days. Follow up or close them.")
+
+    # Cross-check with instincts calibration
+    instinct_recs = _audit_instincts_crosscheck(pa, state.get("cycle", 0))
+    recs.extend(instinct_recs)
 
     audit["recommendations"] = recs
 
@@ -161,6 +166,40 @@ def _audit_pipeline(pipeline: list) -> dict:
         "stale_count": len(stale),
         "total_expected_value": sum(i.get("expected_value", 0) for i in active),
     }
+
+
+def _audit_instincts_crosscheck(projection_accuracy: dict, cycle: int) -> list:
+    """Cross-check audit calibration with instincts per-category calibration."""
+    recs = []
+    if not INSTINCTS_FILE.exists():
+        return recs
+    try:
+        with open(INSTINCTS_FILE, "r") as f:
+            inst = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return recs
+
+    if not inst:
+        return recs
+
+    # Check if still in explore mode after many cycles
+    mode = inst.get("exploration_mode", "explore")
+    if mode == "explore" and cycle >= 20:
+        recs.append(f"Still in EXPLORE mode at cycle {cycle}. Diversify into more categories to build instincts faster.")
+
+    # Compare audit global calibration vs instinct per-category
+    audit_cal = projection_accuracy.get("calibration_multiplier", 1.0)
+    per_cat = inst.get("calibration", {}).get("per_category", {})
+    for cat, cat_cal in per_cat.items():
+        divergence = abs(cat_cal - audit_cal)
+        if divergence > 0.2:
+            direction = "more optimistic" if cat_cal > audit_cal else "more pessimistic"
+            recs.append(
+                f"Instinct calibration for '{cat}' ({cat_cal:.2f}) diverges from audit global ({audit_cal:.2f}) — "
+                f"category is {direction} than your overall pattern."
+            )
+
+    return recs
 
 
 def get_calibration_multiplier() -> float:

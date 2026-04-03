@@ -1,7 +1,7 @@
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard, Wallet, Target, TrendingUp, Kanban,
-  Sparkles, BookOpen, MessageCircle, Lightbulb, Activity
+  Sparkles, BookOpen, MessageCircle, Lightbulb, Activity, Brain
 } from 'lucide-react';
 import { usePolling } from '../lib/usePolling';
 import type { AgentState } from '../lib/types';
@@ -18,6 +18,7 @@ const links = [
   { to: '/chat', icon: MessageCircle, label: 'Chat' },
   { to: '/proposals', icon: Lightbulb, label: 'Proposals' },
   { to: '/health', icon: Activity, label: 'Health' },
+  { to: '/instincts', icon: Brain, label: 'Instincts' },
 ];
 
 export function Sidebar() {
