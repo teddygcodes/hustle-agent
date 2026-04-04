@@ -193,6 +193,29 @@ def _detect_line_movements(current_odds: dict, previous_odds: dict) -> list[dict
 
 
 # ---------------------------------------------------------------------------
+# Opportunity ranking helpers
+# ---------------------------------------------------------------------------
+
+def _sort_by_ev(opportunities: list[dict]) -> list[dict]:
+    """Sort opportunities descending by |edge| × confidence (expected value)."""
+    return sorted(
+        opportunities,
+        key=lambda o: abs(o.get("edge", 0)) * o.get("confidence", 0.5),
+        reverse=True,
+    )
+
+
+def _apply_b2b_penalty(opp: dict) -> dict:
+    """Reduce confidence by 0.10 for back-to-back game situations."""
+    if not opp.get("b2b"):
+        return opp
+    opp = opp.copy()
+    opp["confidence"] = max(0.0, opp.get("confidence", 0.5) - 0.10)
+    opp.setdefault("warnings", []).append("b2b: confidence reduced 0.10 (back-to-back)")
+    return opp
+
+
+# ---------------------------------------------------------------------------
 # NWS Weather scanning
 # ---------------------------------------------------------------------------
 
@@ -1326,8 +1349,11 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     if dropped:
         print(f"  [SANITY] Dropped {dropped} opportunity/ies with failed self-checks or near-zero values")
 
-    # Rank opportunities by relative edge (highest first)
-    all_opportunities.sort(key=lambda x: x.get("relative_edge", 0), reverse=True)
+    # Apply B2B confidence penalty before ranking
+    all_opportunities = [_apply_b2b_penalty(o) for o in all_opportunities]
+
+    # Rank by EV (|edge| × confidence) — highest conviction bets surface first
+    all_opportunities = _sort_by_ev(all_opportunities)
 
     # Determine next scan interval
     scan_interval = get_scan_interval(all_games)
