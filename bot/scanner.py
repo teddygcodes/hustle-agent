@@ -35,6 +35,9 @@ from bot.config import (
 from bot.math_engine import calculate_parlay_edge, calculate_weather_edge, calculate_vig_stack, _self_check_edge
 from bot.kalshi_series import scan_series_markets
 import bot.kalshi_series as _kalshi_series_mod
+from bot.price_monitor import PriceMonitor
+
+_price_monitor = PriceMonitor()
 
 
 # ---------------------------------------------------------------------------
@@ -1531,6 +1534,9 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
 
     # Rank by EV (|edge| × confidence) — highest conviction bets surface first
     all_opportunities = _sort_by_ev(all_opportunities)
+
+    # Annotate with price movement warnings (PriceMonitor)
+    all_opportunities = _price_monitor.annotate_all(all_opportunities)
 
     # Determine next scan interval
     scan_interval = get_scan_interval(all_games)

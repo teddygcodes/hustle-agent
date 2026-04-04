@@ -47,6 +47,9 @@ from bot.tracker import (
 )
 from bot.notifier import TelegramNotifier, format_opportunity, format_detail
 from bot.scheduler import check_scheduled_events
+from bot.outcome_tracker import OutcomeTracker
+
+_outcome_tracker = OutcomeTracker()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -795,6 +798,7 @@ class GlintBot:
                     f"edge={opp.get('relative_edge', 0):.1%} | side={opp.get('recommended_side')}"
                 )
                 await self.notifier.send_alert(opp)
+                _outcome_tracker.store_alert(opp)
 
                 try:
                     from bot.patterns import get_edge_accuracy
@@ -803,6 +807,17 @@ class GlintBot:
                         await self.notifier.send_message(f"📊 {accuracy_note}")
                 except Exception:
                     pass
+
+            # ----------------------------------------------------------
+            # Step 8b: OutcomeTracker — resolve settled alerts & calibration
+            # ----------------------------------------------------------
+            try:
+                resolved = _outcome_tracker.check_and_resolve()
+                if resolved:
+                    print(f"  [TRACKER] Resolved {resolved} market(s)")
+                _outcome_tracker.print_calibration_summary()
+            except Exception as e:
+                logger.debug(f"OutcomeTracker step skipped: {e}")
 
             # ----------------------------------------------------------
             # Step 9: Sleep until next scan
