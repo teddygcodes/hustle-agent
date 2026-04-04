@@ -196,6 +196,26 @@ def _detect_line_movements(current_odds: dict, previous_odds: dict) -> list[dict
 # NWS Weather scanning
 # ---------------------------------------------------------------------------
 
+def _get_forecast_temp_for_date(forecast: dict, target_date) -> Optional[float]:
+    """
+    Return the NWS daytime high for a specific calendar date.
+
+    Iterates the forecast periods (stored with 'start' in local time with
+    UTC offset) and returns the temperature for the first non-night period
+    whose start date matches target_date.  Returns None if no match found.
+    """
+    for period in forecast.get("periods", []):
+        if "night" in period.get("name", "").lower():
+            continue
+        try:
+            start_dt = datetime.fromisoformat(period["start"].replace("Z", "+00:00"))
+            if start_dt.date() == target_date:
+                return float(period["temperature"])
+        except Exception:
+            continue
+    return None
+
+
 def _fetch_nws_forecast(city: str, lat: float, lon: float) -> Optional[dict]:
     """Fetch NWS forecast for a city."""
     try:
@@ -353,12 +373,26 @@ def scan_weather_markets() -> list[dict]:
                 print(f"  [Weather] SKIP {ticker}: no temperature threshold found in {title_raw!r}")
                 continue
 
-        # Get forecast temp (use daytime high)
+        # Get forecast temp for the market's resolution date.
+        # Kalshi next-day markets close on a different calendar date than today —
+        # we must match the NWS period to that specific date, not just take the
+        # first daytime period (which would be today's temp when it's still early).
         forecast_temp = None
-        for period in forecasts[matched_city]["periods"]:
-            if "night" not in period["name"].lower():
-                forecast_temp = period["temperature"]
-                break
+        try:
+            close_str_for_date = market.get("close_time") or market.get("expiration_time", "")
+            target_date = datetime.fromisoformat(
+                close_str_for_date.replace("Z", "+00:00")
+            ).date()
+            forecast_temp = _get_forecast_temp_for_date(forecasts[matched_city], target_date)
+        except Exception:
+            pass
+
+        # Fallback: first daytime period if date-targeted lookup failed
+        if forecast_temp is None:
+            for period in forecasts[matched_city]["periods"]:
+                if "night" not in period.get("name", "").lower():
+                    forecast_temp = period["temperature"]
+                    break
 
         if forecast_temp is None:
             print(f"  [Weather] SKIP {ticker}: no daytime period in NWS forecast for {matched_city}")

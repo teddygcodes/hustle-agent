@@ -107,3 +107,56 @@ def test_scan_ethereum_series_no_markets_returns_empty():
 def test_eth_in_active_strategies():
     from bot.config import ACTIVE_STRATEGIES
     assert "eth_price_edge" in ACTIVE_STRATEGIES
+
+
+# ---------------------------------------------------------------------------
+# Weather NWS date targeting
+# ---------------------------------------------------------------------------
+
+def test_get_forecast_temp_for_date_matches_correct_period():
+    """Returns the temperature for the daytime period on the target date."""
+    from datetime import date
+    from bot.scanner import _get_forecast_temp_for_date
+
+    forecast = {
+        "periods": [
+            {"name": "This Afternoon", "temperature": 55, "start": "2026-04-04T13:00:00-04:00"},
+            {"name": "Tonight", "temperature": 42, "start": "2026-04-04T19:00:00-04:00"},
+            {"name": "Sunday", "temperature": 68, "start": "2026-04-05T06:00:00-04:00"},
+            {"name": "Sunday Night", "temperature": 50, "start": "2026-04-05T19:00:00-04:00"},
+        ]
+    }
+
+    # Should return tomorrow's high, not today's
+    result = _get_forecast_temp_for_date(forecast, date(2026, 4, 5))
+    assert result == 68.0
+
+
+def test_get_forecast_temp_for_date_skips_night_periods():
+    """Night periods are skipped even if their date matches."""
+    from datetime import date
+    from bot.scanner import _get_forecast_temp_for_date
+
+    forecast = {
+        "periods": [
+            {"name": "Tonight", "temperature": 42, "start": "2026-04-05T19:00:00-04:00"},
+        ]
+    }
+
+    result = _get_forecast_temp_for_date(forecast, date(2026, 4, 5))
+    assert result is None
+
+
+def test_get_forecast_temp_for_date_returns_none_when_no_match():
+    """Returns None when no period exists for the target date."""
+    from datetime import date
+    from bot.scanner import _get_forecast_temp_for_date
+
+    forecast = {
+        "periods": [
+            {"name": "This Afternoon", "temperature": 55, "start": "2026-04-04T13:00:00-04:00"},
+        ]
+    }
+
+    result = _get_forecast_temp_for_date(forecast, date(2026, 4, 7))
+    assert result is None
