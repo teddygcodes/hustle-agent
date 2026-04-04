@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.parlay import parse_parlay_title, price_parlay, ParlayLeg
 from agent.player_stats import estimate_player_prop_probability
-from bot.config import NWS_BIAS_CORRECTION, WEATHER_STD_DEV, MIN_RELATIVE_EDGE
+from bot.config import NWS_BIAS_CORRECTION, MIN_RELATIVE_EDGE
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +204,9 @@ def calculate_weather_edge(
         direction: "above", "below", or "range" — what YES means on this contract
         kalshi_price_cents: Current Kalshi YES price in cents
         threshold_high: Upper bound for "range" direction (e.g. 69° in "68-69°")
+        days_ahead: int, optional
+            Number of days ahead the forecast is (1-3). Controls sigma:
+            sigma = 2.0 + 0.75 * (days_ahead - 1). Default 1 (NWS 1-day RMSE ~2°F).
 
     Returns:
         {edge, relative_edge, fair_value, kalshi_price, confidence,
@@ -211,6 +214,9 @@ def calculate_weather_edge(
     """
     kalshi_price = kalshi_price_cents / 100.0
     math_chain = []
+
+    # Guard: ensure days_ahead is at least 1
+    days_ahead = max(1, days_ahead)
 
     # Dynamic sigma: cap days_ahead at 3 so uncertainty doesn't grow unbounded
     days_capped = min(days_ahead, 3)
