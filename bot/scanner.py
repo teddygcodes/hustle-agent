@@ -32,7 +32,8 @@ from bot.config import (
     ACTIVE_STRATEGIES, WEATHER_MIN_HOURS_TO_CLOSE,
 )
 from bot.math_engine import calculate_parlay_edge, calculate_weather_edge, calculate_vig_stack, _self_check_edge
-from bot.kalshi_series import scan_series_markets
+from bot.kalshi_series import scan_series_markets, _ODDS_API_GAME_MAP as _SERIES_GAME_MAP
+import bot.kalshi_series as _kalshi_series_mod
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,99 @@ def _apply_b2b_penalty(opp: dict) -> dict:
     opp["confidence"] = max(0.0, opp.get("confidence", 0.5) - 0.10)
     opp.setdefault("warnings", []).append("b2b: confidence reduced 0.10 (back-to-back)")
     return opp
+
+
+def _apply_home_away_modifier(opp: dict) -> dict:
+    """
+    Adjust confidence based on whether the opportunity's team is home or away.
+
+    Logic:
+      - Home team: confidence += 0.03
+      - Away team: confidence -= 0.03
+      - Away team AND B2B game: additional confidence -= 0.05
+
+    Only applies to sports opportunity types (e.g. series_game_edge).
+    Looks up the team in _ODDS_API_GAME_MAP via opp["sport"] and opp["team"].
+    Fails open — if team not found in the game map, returns opp unchanged.
+    """
+    SPORTS_OPP_TYPES = {"series_game_edge", "pregame_single_game", "live_latency_arb"}
+    if opp.get("type") not in SPORTS_OPP_TYPES:
+        return opp
+
+    sport = opp.get("sport", "")
+    team = (opp.get("team") or opp.get("canonical_team") or "").lower()
+    if not sport or not team:
+        return opp
+
+    # Always read from the live module-level dict so test injections take effect
+    game_map = _kalshi_series_mod._ODDS_API_GAME_MAP
+    sport_map = game_map.get(sport, {})
+    game_data = sport_map.get(team)
+    if not game_data:
+        return opp
+
+    opp = opp.copy()
+    home_team = (game_data.get("home_team") or "").lower()
+    is_home = (team == home_team)
+
+    if is_home:
+        opp["confidence"] = opp.get("confidence", 0.5) + 0.03
+        opp.setdefault("warnings", []).append("home_away: home team +0.03 confidence")
+    else:
+        opp["confidence"] = opp.get("confidence", 0.5) - 0.03
+        opp.setdefault("warnings", []).append("home_away: away team -0.03 confidence")
+        if game_data.get("is_b2b"):
+            opp["confidence"] = opp["confidence"] - 0.05
+            opp.setdefault("warnings", []).append("home_away: away B2B -0.05 confidence")
+
+    opp["confidence"] = round(max(0.0, opp["confidence"]), 4)
+    return opp
+
+
+def _cap_correlated_vig_stack(vig_stack_opps: list[dict]) -> list[dict]:
+    """
+    Cap total contracts for correlated vig stack opportunities that share the
+    same base series prefix (everything before the first '-' in the ticker).
+
+    For a group of N signals on the same series:
+      per_signal_contracts = max(1, single_signal_contracts // N)
+
+    Single-signal groups are left unchanged.
+    Returns the capped list (modifies copies of each affected opp dict).
+    """
+    if not vig_stack_opps:
+        return vig_stack_opps
+
+    # Group by series prefix (everything before the first '-')
+    from collections import defaultdict
+    groups: dict[str, list[int]] = defaultdict(list)
+    for idx, opp in enumerate(vig_stack_opps):
+        ticker = opp.get("ticker", "")
+        series = ticker.split("-")[0]
+        groups[series].append(idx)
+
+    result = [opp.copy() for opp in vig_stack_opps]
+
+    for series, indices in groups.items():
+        if len(indices) <= 1:
+            continue  # single signal — leave unchanged
+
+        group_size = len(indices)
+        # Use the first opp's contract count as the single-signal reference
+        first_opp = result[indices[0]]
+        single_signal_contracts = (
+            first_opp.get("recommended_contracts")
+            or first_opp.get("contracts")
+            or 1
+        )
+        per_signal = max(1, single_signal_contracts // group_size)
+
+        for idx in indices:
+            result[idx]["recommended_contracts"] = per_signal
+            if "contracts" in result[idx]:
+                result[idx]["contracts"] = per_signal
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1341,6 +1435,8 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
         _suppressed = _before - len(vig_stack_opps)
         if _suppressed:
             print(f"  [VIG_STACK] Suppressed {_suppressed} signal(s): weather model recommends YES on same ticker (conflicts with structural NO)")
+    # Cap correlated vig stack signals sharing the same series prefix
+    vig_stack_opps = _cap_correlated_vig_stack(vig_stack_opps)
     all_opportunities.extend(vig_stack_opps)
     print(f"  [VIG_STACK] Found {len(vig_stack_opps)} structural vig stack opportunities")
 
@@ -1353,6 +1449,8 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
             opp_type = opp.get("type", "")
             if opp_type in ("series_game_edge", "btc_price_edge", "ipl_game_edge", "eth_price_edge"):
                 opp["confidence"] = _get_dynamic_confidence(opp_type, opp.get("confidence", 0.75))
+        # Apply home/away confidence modifier to sports opportunities
+        series_opps = [_apply_home_away_modifier(o) for o in series_opps]
         all_opportunities.extend(series_opps)
         print(f"  [SERIES] Found {len(series_opps)} total series opportunities")
     else:

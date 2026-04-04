@@ -258,3 +258,96 @@ def test_weather_3day_lower_edge_than_1day():
     # When forecast (80) >> threshold (75), 1-day has tighter distribution → higher confidence
     # 3-day has wider sigma → P(above) is still high but closer to 50% → lower edge at same price
     assert abs(edge_1day_clear.get("edge", 0)) >= abs(edge_3day_clear.get("edge", 0))
+
+
+# ── Task 3: Home/Away Modifier ───────────────────────────────────────────────
+
+def test_home_team_confidence_boost():
+    """Home team opportunity gets +0.03 confidence boost."""
+    from bot.scanner import _apply_home_away_modifier
+    from bot import kalshi_series
+    # Inject a fake game map entry
+    kalshi_series._ODDS_API_GAME_MAP["nba"] = {
+        "lakers": {"home_team": "lakers", "away_team": "celtics", "is_b2b": False}
+    }
+    opp = {
+        "ticker": "KXNBAGAME-26APR05LAKCEL-LAK",
+        "type": "series_game_edge",
+        "confidence": 0.70,
+        "team": "lakers",
+        "sport": "nba",
+    }
+    result = _apply_home_away_modifier(opp)
+    assert abs(result["confidence"] - 0.73) < 0.001
+
+
+def test_away_team_confidence_penalty():
+    """Away team opportunity gets -0.03 confidence penalty."""
+    from bot.scanner import _apply_home_away_modifier
+    from bot import kalshi_series
+    kalshi_series._ODDS_API_GAME_MAP["nba"] = {
+        "celtics": {"home_team": "lakers", "away_team": "celtics", "is_b2b": False}
+    }
+    opp = {
+        "ticker": "KXNBAGAME-26APR05LAKCEL-CEL",
+        "type": "series_game_edge",
+        "confidence": 0.70,
+        "team": "celtics",
+        "sport": "nba",
+    }
+    result = _apply_home_away_modifier(opp)
+    assert abs(result["confidence"] - 0.67) < 0.001
+
+
+def test_away_b2b_stacks_penalty():
+    """Away team on B2B gets -0.03 - 0.05 = -0.08 total penalty."""
+    from bot.scanner import _apply_home_away_modifier
+    from bot import kalshi_series
+    kalshi_series._ODDS_API_GAME_MAP["nba"] = {
+        "celtics": {"home_team": "lakers", "away_team": "celtics", "is_b2b": True}
+    }
+    opp = {
+        "ticker": "KXNBAGAME-26APR05LAKCEL-CEL",
+        "type": "series_game_edge",
+        "confidence": 0.70,
+        "team": "celtics",
+        "sport": "nba",
+    }
+    result = _apply_home_away_modifier(opp)
+    assert abs(result["confidence"] - 0.62) < 0.001
+
+
+# ── Task 5: Correlated Vig Stack Cap ─────────────────────────────────────────
+
+def test_single_vig_signal_uncapped():
+    """Single vig stack signal for a series remains uncapped."""
+    from bot.scanner import _cap_correlated_vig_stack
+    opps = [{"ticker": "KXHIGHNY-26APR06", "type": "vig_stack", "recommended_contracts": 10}]
+    result = _cap_correlated_vig_stack(opps)
+    assert result[0]["recommended_contracts"] == 10
+
+
+def test_multiple_correlated_vig_signals_capped():
+    """3 correlated signals for same series each get capped to ~3 contracts."""
+    from bot.scanner import _cap_correlated_vig_stack
+    opps = [
+        {"ticker": "KXHIGHNY-26APR06T67", "type": "vig_stack", "recommended_contracts": 10},
+        {"ticker": "KXHIGHNY-26APR07T69", "type": "vig_stack", "recommended_contracts": 10},
+        {"ticker": "KXHIGHNY-26APR08T71", "type": "vig_stack", "recommended_contracts": 10},
+    ]
+    result = _cap_correlated_vig_stack(opps)
+    # Each should be capped: 10 // 3 = 3
+    for opp in result:
+        assert opp["recommended_contracts"] == 3
+
+
+def test_cap_distributes_evenly():
+    """2 correlated signals for same series each get half the contracts."""
+    from bot.scanner import _cap_correlated_vig_stack
+    opps = [
+        {"ticker": "KXHIGHCHI-26APR06T50", "type": "vig_stack", "recommended_contracts": 8},
+        {"ticker": "KXHIGHCHI-26APR07T52", "type": "vig_stack", "recommended_contracts": 8},
+    ]
+    result = _cap_correlated_vig_stack(opps)
+    assert result[0]["recommended_contracts"] == 4
+    assert result[1]["recommended_contracts"] == 4
