@@ -5,7 +5,38 @@
 @import "@fontsource/geist-sans/700.css";
 @import "@fontsource/geist-mono/400.css";
 
+/* ─── Nexus Nest: Design Tokens ─── */
 :root {
+  /* Core palette */
+  --nest-bg: #111111;
+  --nest-bg-raised: #1a1a1a;
+  --nest-bg-card: #1e1e1e;
+  --nest-bg-card-hover: #242424;
+  --nest-bg-surface: #282828;
+  --nest-border: #2a2a2a;
+  --nest-border-subtle: #222222;
+
+  /* Brand colors */
+  --nest-blue: #0099ff;
+  --nest-blue-dim: #0099ff40;
+  --nest-blue-glow: #0099ff25;
+  --nest-purple: #7c3aed;
+  --nest-purple-dim: #7c3aed40;
+  --nest-purple-glow: #7c3aed20;
+
+  /* Semantic */
+  --nest-success: #10b981;
+  --nest-warning: #f59e0b;
+  --nest-error: #ef4444;
+
+  /* Text */
+  --nest-text: #e5e7eb;
+  --nest-text-bright: #ffffff;
+  --nest-text-muted: #9ca3af;
+  --nest-text-dim: #6b7280;
+  --nest-text-ghost: #4b5563;
+
+  /* Typography */
   font-family: 'Geist Sans', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -14,24 +45,178 @@
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--nest-bg);
+  color: var(--nest-text);
 }
 
 .font-mono {
   font-family: 'Geist Mono', ui-monospace, monospace;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #52525b; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #444; }
 
+/* ─── Animations ─── */
+
+/* Dream shimmer - GPU progress bar */
 @keyframes shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
 }
-
 .dream-shimmer {
-  background: linear-gradient(90deg, #7c3aed, #10b981, #7c3aed);
+  background: linear-gradient(90deg, var(--nest-purple), var(--nest-blue), var(--nest-success), var(--nest-blue), var(--nest-purple));
+  background-size: 300% 100%;
+  animation: shimmer 4s ease-in-out infinite;
+}
+
+/* Data shimmer sweep — highlights key numbers */
+@keyframes data-sweep {
+  0% { background-position: -100% 0; }
+  100% { background-position: 200% 0; }
+}
+.data-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 153, 255, 0.08) 45%,
+    rgba(124, 58, 237, 0.12) 55%,
+    transparent 100%
+  );
   background-size: 200% 100%;
-  animation: shimmer 3s ease-in-out infinite;
+  animation: data-sweep 3s ease-in-out infinite;
+}
+
+/* Glow pulse for "shiny objects" in The Collection */
+@keyframes glow-breathe {
+  0%, 100% { box-shadow: 0 0 12px var(--glow-color, rgba(0, 153, 255, 0.12)); }
+  50% { box-shadow: 0 0 22px var(--glow-color, rgba(0, 153, 255, 0.22)); }
+}
+.shiny-card {
+  --glow-color: rgba(0, 153, 255, 0.15);
+  animation: glow-breathe 3s ease-in-out infinite;
+  border: 1px solid rgba(0, 153, 255, 0.15);
+  transition: border-color 0.3s, box-shadow 0.3s, transform 0.2s;
+}
+.shiny-card:hover {
+  border-color: rgba(0, 153, 255, 0.35);
+  box-shadow: 0 0 30px var(--glow-color);
+  transform: translateY(-2px);
+}
+.shiny-card-purple {
+  --glow-color: rgba(124, 58, 237, 0.15);
+  border-color: rgba(124, 58, 237, 0.15);
+}
+.shiny-card-purple:hover {
+  border-color: rgba(124, 58, 237, 0.35);
+}
+.shiny-card-green {
+  --glow-color: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.12);
+}
+.shiny-card-green:hover {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.shiny-card-white {
+  --glow-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.shiny-card-white:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+/* Avatar float animation */
+@keyframes avatar-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+.avatar-float {
+  animation: avatar-float 3s ease-in-out infinite;
+}
+
+/* Earning pulse (blue) */
+@keyframes earning-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(0, 153, 255, 0.2), inset 0 0 8px rgba(0, 153, 255, 0.05); }
+  50% { box-shadow: 0 0 20px rgba(0, 153, 255, 0.35), inset 0 0 12px rgba(0, 153, 255, 0.08); }
+}
+.glow-earning {
+  animation: earning-glow 2s ease-in-out infinite;
+}
+
+/* Spending pulse (red) */
+@keyframes spending-glow {
+  0%, 100% { box-shadow: 0 0 8px rgba(239, 68, 68, 0.15), inset 0 0 8px rgba(239, 68, 68, 0.03); }
+  50% { box-shadow: 0 0 18px rgba(239, 68, 68, 0.3), inset 0 0 12px rgba(239, 68, 68, 0.06); }
+}
+.glow-spending {
+  animation: spending-glow 2s ease-in-out infinite;
+}
+
+/* Stagger entrance for cards */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up {
+  animation: fade-up 0.4s ease-out both;
+}
+
+/* Nest gradient backgrounds */
+.nest-gradient-top {
+  background: linear-gradient(
+    135deg,
+    rgba(0, 153, 255, 0.04) 0%,
+    rgba(124, 58, 237, 0.04) 50%,
+    transparent 100%
+  );
+}
+.nest-gradient-card {
+  background: linear-gradient(
+    160deg,
+    var(--nest-bg-card) 0%,
+    #1c1c2e 100%
+  );
+}
+
+/* Sidebar accent edge */
+.sidebar-edge {
+  background: linear-gradient(180deg, var(--nest-blue) 0%, var(--nest-purple) 60%, transparent 100%);
+}
+
+/* Confidence bar gradient */
+.confidence-bar {
+  background: linear-gradient(90deg, var(--nest-blue), var(--nest-purple));
+}
+
+/* Noise texture overlay */
+.nest-noise::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.015;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Card base style */
+.nest-card {
+  background: var(--nest-bg-card);
+  border: 1px solid var(--nest-border);
+  border-radius: 12px;
+  transition: border-color 0.2s, background 0.2s;
+}
+.nest-card:hover {
+  border-color: #333;
+  background: var(--nest-bg-card-hover);
+}
+
+/* ─── Prose overrides for journal/markdown ─── */
+.prose-nest {
+  --tw-prose-body: var(--nest-text-muted);
+  --tw-prose-headings: var(--nest-text);
+  --tw-prose-bold: var(--nest-text);
+  --tw-prose-code: var(--nest-blue);
 }

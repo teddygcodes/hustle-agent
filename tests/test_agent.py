@@ -19,7 +19,7 @@ import pytest
 
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, reports
+from agent import engine, tool_executors, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, reports
 from tests.conftest import (
     make_text_block, make_tool_use_block, make_api_response,
     make_txn, make_resolved_projection, make_data_backing, make_report, DEFAULT_STATE,
@@ -237,17 +237,8 @@ class TestRiskManagement:
         result = risk.check_portfolio_risk(60.0, [], "kalshi", 1.50)
         assert result["allowed"] is True
 
-    def test_daily_limit_blocks(self):
-        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-        ledger = [
-            make_txn("expense", 28.0, timestamp=f"{today}T10:00:00+00:00"),
-        ]
-        result = risk.check_portfolio_risk(90.0, ledger, "kalshi", 3.0)
-        assert result["allowed"] is False
-        assert "DAILY" in result["reason"]
-
     def test_exposure_cap_blocks(self):
-        # 40% of $100 = $40. Invest $35 (spread across days to avoid daily limit), then try $10 more = $45 > $40
+        # 40% of $100 = $40. Invest $35, then try $10 more = $45 > $40
         yesterday = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
         ledger = [
             make_txn("investment", 35.0, strategy="crypto", timestamp=f"{yesterday}T10:00:00+00:00"),
@@ -264,7 +255,6 @@ class TestRiskManagement:
     def test_risk_context_format(self):
         ctx = risk.get_risk_context(80.0, [])
         assert "RISK POSTURE" in ctx
-        assert "Daily spend" in ctx
         assert "Drawdown buffer" in ctx
 
 
@@ -352,8 +342,8 @@ class TestToolExecutors:
         assert len(requests) == 1
         assert "dark mode" in requests[0]["request"].lower()
 
-    def test_set_mood(self, active_state):
-        engine.exec_set_mood("excited and hopeful")
+    def test_write_journal_sets_mood(self, active_state):
+        engine.exec_write_journal("Testing mood update", mood="excited and hopeful")
         state = engine.load_state()
         assert state["mood"] == "excited and hopeful"
 
@@ -1040,14 +1030,14 @@ class TestFullCycleSimulation:
         state["name"] = "TestBot"
         engine.save_state(state)
 
-        # First call: tool_use (set_mood), second call: text (end_turn)
+        # First call: tool_use (write_journal with mood), second call: text (end_turn)
         mock_anthropic.messages.create.side_effect = [
             make_api_response(
-                [make_tool_use_block("set_mood", {"mood": "fired up"}, "toolu_1")],
+                [make_tool_use_block("write_journal", {"entry": "Ready to hustle!", "mood": "fired up"}, "toolu_1")],
                 stop_reason="tool_use",
             ),
             make_api_response(
-                [make_text_block("Mood set. Ready to hustle!")],
+                [make_text_block("Journal written. Ready to hustle!")],
             ),
         ]
         engine.run_cycle()
@@ -1061,14 +1051,14 @@ class TestFullCycleSimulation:
         engine.save_state(state)
 
         mock_anthropic.messages.create.side_effect = [
-            # First response: set_mood
+            # First response: write_journal with mood
             make_api_response(
-                [make_tool_use_block("set_mood", {"mood": "focused"}, "toolu_1")],
+                [make_tool_use_block("write_journal", {"entry": "Testing tools.", "mood": "focused"}, "toolu_1")],
                 stop_reason="tool_use",
             ),
-            # Second response: write_journal
+            # Second response: reflect
             make_api_response(
-                [make_tool_use_block("write_journal", {"entry": "Testing tools."}, "toolu_2")],
+                [make_tool_use_block("reflect", {"lesson": "Tools work.", "category": "system"}, "toolu_2")],
                 stop_reason="tool_use",
             ),
             # Third response: done
@@ -1136,20 +1126,40 @@ class TestFullCycleSimulation:
         inbox = engine.load_inbox()
         assert len(inbox) == 0
 
-    def test_cycle_max_iterations_15(self, isolated_fs, mock_anthropic):
+    def test_cycle_max_iterations_30(self, isolated_fs, mock_anthropic):
         state = engine.load_state()
         state["status"] = "active"
         state["name"] = "TestBot"
         engine.save_state(state)
 
-        # Always return tool_use to force max iterations
+        # Return varying tool calls to avoid duplicate detector
+        call_num = 0
+        def make_varying_response(**kwargs):
+            nonlocal call_num
+            call_num += 1
+            return make_api_response(
+                [make_tool_use_block("write_journal", {"entry": f"thinking_{call_num}"}, f"toolu_{call_num}")],
+                stop_reason="tool_use",
+            )
+        mock_anthropic.messages.create.side_effect = make_varying_response
+        engine.run_cycle()
+        # Should have been called 30 times (max iterations)
+        assert mock_anthropic.messages.create.call_count == 30
+
+    def test_cycle_duplicate_tool_loop_detection(self, isolated_fs, mock_anthropic):
+        state = engine.load_state()
+        state["status"] = "active"
+        state["name"] = "TestBot"
+        engine.save_state(state)
+
+        # Always return identical tool_use to trigger duplicate detection
         mock_anthropic.messages.create.return_value = make_api_response(
-            [make_tool_use_block("set_mood", {"mood": "stuck"}, "toolu_loop")],
+            [make_tool_use_block("write_journal", {"entry": "stuck"}, "toolu_loop")],
             stop_reason="tool_use",
         )
         engine.run_cycle()
-        # Should have been called 15 times (max iterations)
-        assert mock_anthropic.messages.create.call_count == 15
+        # Should stop at iteration 3 (duplicate detected), not 30
+        assert mock_anthropic.messages.create.call_count == 3
 
     def test_cycle_api_error_retry(self, isolated_fs, mock_anthropic, monkeypatch):
         import anthropic as anthropic_mod
@@ -1386,7 +1396,8 @@ class TestDataBacking:
         assert "data_backing" in result.lower()
 
     def test_kalshi_order_blocked_low_edge(self, active_state):
-        """Kalshi order should be BLOCKED when edge < 0.10."""
+        """Kalshi order should be BLOCKED when relative edge < 15%."""
+        # edge=0.03, market_price=0.35 → relative edge = 0.03/0.35 = 8.6% < 15%
         db = make_data_backing(source_probability=0.38, market_price=0.35, edge=0.03)
         proj = projections.create_projection(
             action="Buy YES on test market", cost=5.0, strategy_type="kalshi",
@@ -1399,12 +1410,16 @@ class TestDataBacking:
         )
         result = engine.exec_place_kalshi_order("KXTEST", "yes", 5, 35, "test", proj["id"])
         assert "BLOCKED" in result
-        assert "0.10" in result
+        assert "15%" in result
 
-    @patch.object(engine, "kalshi_client")
+    @patch.object(tool_executors, "kalshi_client")
     def test_kalshi_order_succeeds_with_valid_backing(self, mock_kc, active_state):
-        """Kalshi order should succeed with valid projection + data_backing + edge >= 0.10."""
-        mock_kc.place_order.return_value = {"order_id": "ord_123", "status": "resting"}
+        """Kalshi order should succeed with valid projection + data_backing + relative edge >= 15%."""
+        mock_kc.place_order.return_value = {
+            "order_id": "ord_123", "status": "executed",
+            "count": 5, "filled_count": 5, "remaining_count": 0,
+            "price_cents": 35, "cost_dollars": 1.75,
+        }
 
         db = make_data_backing(source_probability=0.72, market_price=0.35, edge=0.37)
         proj = projections.create_projection(

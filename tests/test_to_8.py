@@ -173,3 +173,50 @@ def test_price_small_movement_no_penalty():
         assert result["confidence"] == 0.70
     finally:
         os.unlink(cache_path)
+
+
+def test_price_warn_only_band_no_confidence_penalty():
+    """4¢ movement against YES: warning added but confidence unchanged."""
+    import tempfile, json
+    from bot.price_monitor import PriceMonitor
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json.dump({}, f)
+        cache_path = f.name
+    try:
+        monitor = PriceMonitor(cache_path=cache_path)
+        monitor.update("KXTEST-WARN", yes_ask=14)
+        opp = {
+            "ticker": "KXTEST-WARN",
+            "recommended_side": "yes",
+            "confidence": 0.70,
+            "warnings": [],
+        }
+        result = monitor.annotate(opp, current_yes_ask=18)  # 4¢ rise — warn only
+        assert any("moving against" in w.lower() for w in result["warnings"])
+        assert result["confidence"] == 0.70  # no penalty at this band
+    finally:
+        os.unlink(cache_path)
+
+
+def test_price_moving_against_no_position():
+    """BUY NO: YES price falling >5¢ = warning and reduced confidence."""
+    import tempfile, json
+    from bot.price_monitor import PriceMonitor
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json.dump({}, f)
+        cache_path = f.name
+    try:
+        monitor = PriceMonitor(cache_path=cache_path)
+        monitor.update("KXTEST-NO", yes_ask=70)  # prior YES price
+        opp = {
+            "ticker": "KXTEST-NO",
+            "recommended_side": "no",
+            "confidence": 0.70,
+            "warnings": [],
+        }
+        # YES price fell to 60¢ (10¢ drop) — bad for BUY NO holder
+        result = monitor.annotate(opp, current_yes_ask=60)
+        assert any("moving against" in w.lower() for w in result["warnings"])
+        assert result["confidence"] < 0.70
+    finally:
+        os.unlink(cache_path)

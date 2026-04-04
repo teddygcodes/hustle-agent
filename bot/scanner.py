@@ -324,9 +324,32 @@ def scan_weather_markets() -> list[dict]:
             print(f"  [Weather] SKIP {ticker}: no yes_ask price (yes_ask={yes_ask})")
             continue
 
-        # Next-day filter: skip markets closing within WEATHER_MIN_HOURS_TO_CLOSE.
-        # Same-day markets are priced by real-time temperature, not NWS forecasts —
-        # our model has no edge on them.
+        # Micro-price filter: skip near-certain outcomes (1-2¢ or 98-99¢).
+        # At these extremes NWS model uncertainty exceeds the absolute edge — and
+        # genuine 1¢ markets have too little liquidity for meaningful execution.
+        if yes_ask <= 2 or yes_ask >= 98:
+            print(f"  [Weather] SKIP {ticker}: extreme price {yes_ask}¢ — near-certain market, model uncertainty dominates")
+            continue
+
+        # Today's market filter: skip any market whose ticker date matches today (UTC).
+        # Weather markets for today are priced by real-time temperature data, not NWS
+        # forecasts — our model has zero edge and generates fake 1000%+ signals on 1¢ contracts.
+        # Use ticker date rather than close_time because weather markets in US timezones
+        # may not close until 5am UTC the next day (>8h from 8pm UTC), defeating a
+        # simple hours_to_close filter.
+        _today_ticker_str = datetime.now(timezone.utc).strftime("%y%b%d").upper()
+        ticker_parts_for_date = ticker.split("-")
+        if len(ticker_parts_for_date) >= 2:
+            _date_seg = ticker_parts_for_date[1][:7]  # e.g. "26APR04"
+            if _date_seg == _today_ticker_str:
+                print(
+                    f"  [Weather] SKIP {ticker}: today's market (date={_date_seg}) — "
+                    f"priced by observed temp, not forecast"
+                )
+                continue
+
+        # Next-day filter: also skip markets closing within WEATHER_MIN_HOURS_TO_CLOSE
+        # (catches edge cases where ticker date doesn't parse cleanly)
         close_str = market.get("close_time") or market.get("expiration_time", "")
         if close_str:
             try:
@@ -1108,6 +1131,22 @@ def scan_vig_stack_series() -> list[dict]:
             yes_ask = market.get("yes_ask")
             no_ask = market.get("no_ask")
 
+            # Skip today's contracts — the vig stack model assumes prices reflect
+            # structural vig inflation. Today's markets are priced by observed temperature,
+            # not by vig, so the math produces fake 1000%+ "edges".
+            # Use ticker date (e.g. "26APR04") rather than hours_to_close because US
+            # weather markets close at ~midnight local time = up to 5am UTC, which
+            # can be >8h from an 8pm UTC scan.
+            _today_vs = datetime.now(timezone.utc).strftime("%y%b%d").upper()
+            _tp = ticker.split("-")
+            if len(_tp) >= 2 and _tp[1][:7] == _today_vs:
+                continue
+
+            # Also skip contracts where yes_ask is extreme (near-certain/near-impossible)
+            # — these are either resolving or heavily directional and break the vig formula
+            if yes_ask >= 85 or yes_ask <= 15:
+                continue
+
             # NO fair value = 100¢ - (YES_ask adjusted for vig)
             yes_fair_cents = yes_ask / vig_factor
             no_fair_cents = 100.0 - yes_fair_cents
@@ -1276,9 +1315,23 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     all_opportunities.extend(weather_opps)
     print(f"  [WEATHER] Found {len(weather_opps)} opportunities")
 
+    # Tickers where weather model recommends BUY YES — these conflict with vig stack
+    # which always recommends BUY NO. Weather has direct NWS signal; vig stack is
+    # mechanical. Suppress vig stack on any ticker where they disagree.
+    _weather_yes_tickers = {
+        opp["ticker"] for opp in weather_opps
+        if opp.get("recommended_side") == "yes"
+    }
+
     # Scan vig stack series (structural NO edge — no external odds, no liquidity filter)
     print(f"\n  [VIG_STACK] Scanning series ladders for structural NO edges...")
     vig_stack_opps = scan_vig_stack_series()
+    if _weather_yes_tickers:
+        _before = len(vig_stack_opps)
+        vig_stack_opps = [o for o in vig_stack_opps if o["ticker"] not in _weather_yes_tickers]
+        _suppressed = _before - len(vig_stack_opps)
+        if _suppressed:
+            print(f"  [VIG_STACK] Suppressed {_suppressed} signal(s): weather model recommends YES on same ticker (conflicts with structural NO)")
     all_opportunities.extend(vig_stack_opps)
     print(f"  [VIG_STACK] Found {len(vig_stack_opps)} structural vig stack opportunities")
 

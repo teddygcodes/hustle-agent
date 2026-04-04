@@ -1,19 +1,17 @@
 """
 Hustle Agent — Risk Management
 
-Portfolio-level controls: per-strategy exposure, daily spend limits,
-drawdown trigger for capital preservation mode.
+Portfolio-level controls: per-strategy exposure caps, per-trade caps
+($25 normal, $5 explore), and drawdown trigger for capital preservation mode.
 """
+from __future__ import annotations
 
-import json
-import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATE_DIR = BASE_DIR / "state"
 
 MAX_EXPOSURE_PER_STRATEGY = 0.40  # 40% of current balance
-MAX_DAILY_SPEND = 30.0
 DRAWDOWN_THRESHOLD = 70.0  # capital preservation below this
 
 
@@ -41,16 +39,6 @@ def _get_strategy_exposure(ledger: list) -> dict[str, float]:
     return {k: max(0, v) for k, v in exposure.items()}
 
 
-def _get_daily_spend(ledger: list) -> float:
-    """Sum of today's expenses/investments."""
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    return sum(
-        txn["amount"] for txn in ledger
-        if txn["type"] in ("expense", "investment")
-        and txn["timestamp"].startswith(today)
-    )
-
-
 def check_portfolio_risk(balance: float, ledger: list,
                          proposed_strategy: str, proposed_amount: float,
                          exploration_mode: str = None) -> dict:
@@ -73,16 +61,6 @@ def check_portfolio_risk(balance: float, ledger: list,
             "risk_posture": posture,
         }
 
-    # Daily spend limit
-    daily = _get_daily_spend(ledger)
-    if daily + proposed_amount > MAX_DAILY_SPEND:
-        remaining = max(0, MAX_DAILY_SPEND - daily)
-        return {
-            "allowed": False,
-            "reason": f"DAILY LIMIT: Already spent ${daily:.2f} today. Max ${MAX_DAILY_SPEND:.0f}/day. Remaining: ${remaining:.2f}.",
-            "risk_posture": posture,
-        }
-
     # Per-strategy exposure
     exposure = _get_strategy_exposure(ledger)
     current = exposure.get(proposed_strategy, 0)
@@ -100,14 +78,11 @@ def check_portfolio_risk(balance: float, ledger: list,
 def get_risk_context(balance: float, ledger: list) -> str:
     """Build risk block for system prompt. Always included."""
     posture = get_risk_posture(balance)
-    daily = _get_daily_spend(ledger)
-    daily_remaining = max(0, MAX_DAILY_SPEND - daily)
     exposure = _get_strategy_exposure(ledger)
     distance = balance - DRAWDOWN_THRESHOLD
 
     lines = [
         f"RISK POSTURE: {posture.upper()}",
-        f"  Daily spend: ${daily:.2f} / ${MAX_DAILY_SPEND:.0f} (${daily_remaining:.2f} remaining)",
         f"  Drawdown buffer: ${distance:.2f} above ${DRAWDOWN_THRESHOLD:.0f} threshold",
     ]
 

@@ -137,6 +137,20 @@ BOVADA_SPORT_PATHS = {
 }
 
 # ---------------------------------------------------------------------------
+# FanDuel Sportsbook API (free, no auth — unofficial frontend API)
+# Uses FanDuel's own frontend key (_ak). Self-disables on 403.
+# ---------------------------------------------------------------------------
+FANDUEL_BASE = "https://sbapi.tn.sportsbook.fanduel.com/api"
+FANDUEL_AK = "FhMFpcPWXMeyZxOx"
+FANDUEL_SPORT_IDS = {
+    "nba":   "nba",
+    "mlb":   "mlb",
+    "nhl":   "nhl",
+    "ncaab": "college-basketball",
+    "nfl":   "nfl",
+}
+
+# ---------------------------------------------------------------------------
 # ESPN Free API (scores + game status; odds often return 0)
 # ---------------------------------------------------------------------------
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -146,6 +160,23 @@ ESPN_SPORT_PATHS = {
     "nhl": "hockey/nhl",
     "nfl": "football/nfl",
     "ncaab": "basketball/mens-college-basketball",
+}
+
+# ---------------------------------------------------------------------------
+# TheRundown API (free tier — 20,000 data points/day; free key via email signup)
+# Sign up at: https://therundown.io/api  — no credit card required
+# Save key to config/therundown.json: {"api_key": "YOUR_KEY"}
+# ---------------------------------------------------------------------------
+_therundown_cfg = _load_json(CONFIG_DIR / "therundown.json")
+THERUNDOWN_API_KEY = _therundown_cfg.get("api_key", "")
+THERUNDOWN_BASE = "https://therundown-therundown-v1.p.rapidapi.com"
+# Sport IDs: https://therundown.io/api/sports
+THERUNDOWN_SPORT_IDS = {
+    "nba":   4,
+    "mlb":   3,
+    "nhl":   6,
+    "ncaab": 5,
+    "nfl":   1,
 }
 
 # ---------------------------------------------------------------------------

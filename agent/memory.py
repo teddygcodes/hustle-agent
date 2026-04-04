@@ -9,6 +9,7 @@ Persistent learning across cycles:
 - Saved scripts (reusable code the agent wrote)
 - Tyler takeaways (extracted conversation insights, capped at 100)
 """
+from __future__ import annotations
 
 import json
 import datetime

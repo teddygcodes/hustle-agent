@@ -5,6 +5,7 @@ The agent can propose new tools/capabilities, but changes require Tyler's approv
 Constitution: cannot modify engine.py, spending cap, financial tracking,
 honesty rules, or ledger integrity.
 """
+from __future__ import annotations
 
 import json
 import datetime

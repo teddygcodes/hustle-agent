@@ -14,14 +14,14 @@ export function DailyPnLChart({ ledger }: { ledger: Transaction[] }) {
   const data = Object.entries(byDay).map(([date, pnl]) => ({ date, pnl: Math.round(pnl * 100) / 100 }));
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
-      <h3 className="text-sm font-medium text-zinc-300 mb-4">Daily P&L</h3>
+    <div className="nest-card p-5">
+      <h3 className="text-sm font-medium mb-4" style={{ color: 'var(--nest-text)' }}>Daily P&L</h3>
       <ResponsiveContainer width="100%" height={220}>
         <BarChart data={data}>
-          <XAxis dataKey="date" tick={{ fill: '#71717a', fontSize: 11 }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fill: '#71717a', fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
+          <XAxis dataKey="date" tick={{ fill: '#6b7280', fontSize: 11 }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fill: '#6b7280', fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={v => `$${v}`} />
           <Tooltip
-            contentStyle={{ background: '#18181b', border: '1px solid #27272a', borderRadius: 8, fontSize: 12 }}
+            contentStyle={{ background: '#1e1e1e', border: '1px solid #2a2a2a', borderRadius: 8, fontSize: 12, color: '#e5e7eb' }}
             formatter={(v) => [`$${Number(v).toFixed(2)}`, 'P&L']}
           />
           <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>

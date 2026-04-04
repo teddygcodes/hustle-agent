@@ -45,21 +45,26 @@ export default function Journal() {
       ) : (
         <>
           <div className="relative mb-6">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--nest-text-ghost)' }} />
             <input
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search entries..."
-              className="w-full pl-9 pr-4 py-2 bg-zinc-900 border border-zinc-800 rounded-lg text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-700"
+              className="w-full pl-9 pr-4 py-2 rounded-lg text-sm focus:outline-none"
+              style={{
+                background: 'var(--nest-bg-card)',
+                border: '1px solid var(--nest-border)',
+                color: 'var(--nest-text)',
+              }}
             />
           </div>
 
           <div className="space-y-4">
             {filtered.map((entry, i) => (
-              <div key={i} className="bg-zinc-900 border border-zinc-800 rounded-lg p-5">
-                <h3 className="text-sm font-medium text-zinc-300 mb-3">{entry.heading}</h3>
-                <div className="prose prose-sm prose-invert max-w-none text-zinc-400 [&_strong]:text-zinc-300 [&_h3]:text-zinc-300 [&_h4]:text-zinc-400 [&_code]:text-violet-400 [&_code]:bg-zinc-800 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded">
+              <div key={i} className="nest-card p-5 animate-fade-up" style={{ animationDelay: `${i * 40}ms` }}>
+                <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>{entry.heading}</h3>
+                <div className="prose prose-sm prose-invert max-w-none prose-nest [&_code]:text-[var(--nest-blue)] [&_code]:bg-[var(--nest-bg-surface)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded">
                   <Markdown>{entry.body}</Markdown>
                 </div>
               </div>

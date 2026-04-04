@@ -26,7 +26,7 @@ from bot.config import (
     COINGECKO_BASE,
 )
 from bot.math_engine import _self_check_edge
-from bot.odds_scraper import _odds_api_fallback
+from bot.odds_scraper import _odds_api_fallback, fetch_consensus_odds
 from bot.injuries import check_back_to_back as _check_b2b, get_last_10 as _get_l10
 
 try:
@@ -65,10 +65,10 @@ COINGECKO_BTC_HISTORY_URL = (
     "?vs_currency=usd&days=10&interval=daily"
 )
 
-# TTL cache for Odds API lookups — avoids burning the 500/month quota
-# One call per sport per 30 min maximum regardless of how often the scanner runs
+# TTL cache for Odds API lookups — 500/month free tier = ~15/day with 8h cache
+# 5 sports × 3 calls/day = 15/day = 450/month (fits within free tier with buffer)
 _ODDS_API_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
-_ODDS_API_CACHE_TTL = 1800  # seconds
+_ODDS_API_CACHE_TTL = 28800  # 8 hours — was 1800 (30 min) which burned ~7,200 calls/month
 
 # Companion game map: sport → {team_name_lower → {home_team, away_team, home_away}}
 # Populated during _build_odds_api_lookup(); used for Elo cross-check.
@@ -274,90 +274,100 @@ _ODDS_API_FAIL_TTL = 300  # 5 min retry on failure vs 30 min on success
 
 def _build_odds_api_lookup(sport: str) -> dict[str, float]:
     """
-    Build lowercase-team-name → vig-removed-prob dict from The Odds API.
+    Build lowercase-team-name → vig-removed-prob dict for games 2-5 days out.
 
-    Cached per-sport for 30 minutes (success) or 5 minutes (failure/empty) to
-    stay within the 500 req/month free tier while retrying transient errors quickly.
+    This SUPPLEMENTS _build_bovada_lookup() which covers today's games.
+    The Odds API is the only free source with a 3-5 day horizon, so it is
+    always called (cached 8 hours = ~450 calls/month, within the free 500 limit).
 
-    Always called alongside Bovada so we cover games Bovada doesn't list yet
-    (typically games 48+ hours out).
+    Additionally merges in fetch_consensus_odds() data (DK/Bovada/FanDuel) for
+    games where free chain has more current prices than the 8h-cached Odds API.
+
+    Cached per-sport for 8 hours (success) or 5 minutes (failure/empty).
     """
     cached = _ODDS_API_CACHE.get(sport)
     if cached:
         age = _time.monotonic() - cached[0]
         ttl = _ODDS_API_FAIL_TTL if cached[1] == {} else _ODDS_API_CACHE_TTL
         if age < ttl:
-            # Restore game map from its own cache so Elo cross-check works on cache hits
             gm_cached = _ODDS_API_GAME_MAP_CACHE.get(sport)
             if gm_cached:
                 _ODDS_API_GAME_MAP[sport] = gm_cached[1]
             return cached[1]
 
     now_utc = datetime.now(timezone.utc)
-    print(f"  [OddsAPI/{sport.upper()}] Fetching from The Odds API...")
-    try:
-        result = _odds_api_fallback(sport)
-        if "error" in result:
-            print(f"  [OddsAPI/{sport.upper()}] ERROR: {result['error']}")
-            _ODDS_API_CACHE[sport] = (_time.monotonic(), {})
-            return {}
 
-        raw_games = result.get("games", [])
-        print(f"  [OddsAPI/{sport.upper()}] Got {len(raw_games)} games total")
-
-        lookup: dict[str, float] = {}
-        skipped_started = 0
-        skipped_no_consensus = 0
-
-        for game in raw_games:
+    def _add_games_to_lookup(games: list[dict], lookup: dict, override: bool = False):
+        """Merge game consensus into lookup, populating game map. override=True replaces existing."""
+        if sport not in _ODDS_API_GAME_MAP:
+            _ODDS_API_GAME_MAP[sport] = {}
+        for game in games:
+            if not game.get("consensus"):
+                continue
             home = game.get("home_team", "?")
             away = game.get("away_team", "?")
             commence_raw = game.get("commence_time", "")
-
-            # Pregame only — skip games that have already started
             if commence_raw:
                 try:
-                    commence_dt = datetime.fromisoformat(
-                        commence_raw.replace("Z", "+00:00")
-                    )
+                    commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
                     if commence_dt <= now_utc:
-                        skipped_started += 1
                         continue
                 except (ValueError, TypeError):
-                    pass  # Unknown format — include the game
-
-            consensus = game.get("consensus", {})
-            if not consensus:
-                skipped_no_consensus += 1
-                print(f"  [OddsAPI/{sport.upper()}]   {away} @ {home}: NO consensus data")
-                continue
-
-            if sport not in _ODDS_API_GAME_MAP:
-                _ODDS_API_GAME_MAP[sport] = {}
-            for team_name, prob in consensus.items():
+                    pass
+            for team_name, prob in game["consensus"].items():
                 if prob and prob > 0:
-                    lookup[team_name.lower()] = prob
-                    lookup[team_name.split()[-1].lower()] = prob
-                    is_home = team_name == home
-                    _ODDS_API_GAME_MAP[sport][team_name.lower()] = {
-                        "home_team": home,
-                        "away_team": away,
-                        "home_away": "home" if is_home else "away",
-                    }
+                    key = team_name.lower()
+                    words = team_name.split()
+                    last_word = words[-1].lower()
+                    first_word = words[0].lower()
+                    if override or key not in lookup:
+                        lookup[key] = prob
+                        lookup[last_word] = prob
+                        # First-word key helps when canonical uses different spelling
+                        # e.g. "Royal Challengers Bangalore" vs "Royal Challengers Bengaluru"
+                        # — first word "royal" maps to both
+                        if first_word not in lookup:
+                            lookup[first_word] = prob
+                        _ODDS_API_GAME_MAP[sport][key] = {
+                            "home_team": home,
+                            "away_team": away,
+                            "home_away": "home" if team_name == home else "away",
+                        }
 
-        print(
-            f"  [OddsAPI/{sport.upper()}] Result: {len(lookup)//2} teams added | "
-            f"skipped {skipped_started} started, {skipped_no_consensus} no-consensus"
-        )
-        _ODDS_API_CACHE[sport] = (_time.monotonic(), lookup)
-        if sport in _ODDS_API_GAME_MAP:
-            _ODDS_API_GAME_MAP_CACHE[sport] = (_time.monotonic(), _ODDS_API_GAME_MAP[sport])
-        return lookup
+    lookup: dict[str, float] = {}
 
+    # Step 1: The Odds API — 3-5 day horizon (cached 8h, ~450 calls/month)
+    print(f"  [OddsAPI/{sport.upper()}] Fetching from The Odds API...")
+    try:
+        result = _odds_api_fallback(sport)
+        if "error" not in result:
+            raw_games = result.get("games", [])
+            _add_games_to_lookup(raw_games, lookup)
+            skipped_no_consensus = sum(1 for g in raw_games if not g.get("consensus"))
+            print(
+                f"  [OddsAPI/{sport.upper()}] Got {len(raw_games)} games | "
+                f"{len(lookup)//2} teams | {skipped_no_consensus} no-consensus"
+            )
+        else:
+            print(f"  [OddsAPI/{sport.upper()}] ERROR: {result['error']}")
     except Exception as e:
         print(f"  [OddsAPI/{sport.upper()}] Exception: {e}")
-        _ODDS_API_CACHE[sport] = (_time.monotonic(), {})
-        return {}
+
+    # Step 2: Overlay free chain (DK/Bovada/FanDuel) for more current today's odds
+    # Free chain has fresher prices for games within 24h; Odds API fills the 2-5 day gap.
+    chain_result = fetch_consensus_odds(sport)
+    chain_games = [g for g in chain_result.get("games", []) if g.get("consensus")]
+    if chain_games:
+        _add_games_to_lookup(chain_games, lookup, override=True)
+        source = chain_result.get("source", "free_chain")
+        print(
+            f"  [OddsAPI/{sport.upper()}] +{source} overlay: {len(lookup)//2} total teams"
+        )
+
+    _ODDS_API_CACHE[sport] = (_time.monotonic(), lookup if lookup else {})
+    if sport in _ODDS_API_GAME_MAP:
+        _ODDS_API_GAME_MAP_CACHE[sport] = (_time.monotonic(), _ODDS_API_GAME_MAP[sport])
+    return lookup
 
 
 # ---------------------------------------------------------------------------
@@ -415,16 +425,19 @@ def scan_sports_series(sport: str) -> list[dict]:
         prob_source = "none"
 
         if canonical:
+            _cwords = canonical.split()
             prob = (
                 bovada_lookup.get(canonical.lower())
-                or bovada_lookup.get(canonical.split()[-1].lower())
+                or bovada_lookup.get(_cwords[-1].lower())
+                or bovada_lookup.get(_cwords[0].lower())
             )
             if prob:
                 prob_source = "bovada"
             else:
                 prob = (
                     odds_api_lookup.get(canonical.lower())
-                    or odds_api_lookup.get(canonical.split()[-1].lower())
+                    or odds_api_lookup.get(_cwords[-1].lower())
+                    or odds_api_lookup.get(_cwords[0].lower())
                 )
                 if prob:
                     prob_source = "odds_api"
@@ -443,29 +456,45 @@ def scan_sports_series(sport: str) -> list[dict]:
 
         # Fix #5: Time-to-game edge requirement — distant games need a larger edge
         # because the odds are less reliable (more uncertainty, less sharp money).
-        # Parse game date from ticker segment like "26APR05" (year=26, month=APR, day=05).
+        # Parse game date (and optional time) from ticker like "26APR041410TORCWS".
+        # MLB tickers include HHMM in Eastern Time; other sports use date only.
         hours_to_game = 0.0
         game_dt = None
         try:
             parts = ticker.split("-")
             if len(parts) >= 3:
-                date_seg = parts[1]  # e.g. "26APR05HOUGSW"
-                # Extract the leading date portion (YYMONDD pattern)
+                date_seg = parts[1]  # e.g. "26APR041410TORCWS" or "26APR05CAROTT"
                 import re as _re
-                m = _re.match(r"(\d{2})([A-Z]{3})(\d{2})", date_seg)
+                # Capture YYMONDD + optional HHMM (game start time in ET)
+                m = _re.match(r"(\d{2})([A-Z]{3})(\d{2})(\d{4})?", date_seg)
                 if m:
                     yy, mon, dd = m.group(1), m.group(2), m.group(3)
+                    time_str = m.group(4)  # e.g. "1410" or None
                     month_map = {
                         "JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
                         "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12
                     }
-                    game_dt = datetime(
-                        2000 + int(yy), month_map.get(mon, 1), int(dd),
-                        tzinfo=timezone.utc
-                    )
+                    yr, mo, dy = 2000 + int(yy), month_map.get(mon, 1), int(dd)
+                    if time_str:
+                        # Convert ET→UTC: EDT (Apr–Oct) = UTC-4, EST (Nov–Mar) = UTC-5
+                        et_offset_hours = 4 if 3 <= mo <= 10 else 5
+                        from datetime import timedelta as _td
+                        hh, mm = int(time_str[:2]), int(time_str[2:])
+                        game_dt = datetime(yr, mo, dy, hh, mm, tzinfo=timezone.utc) + _td(hours=et_offset_hours)
+                    else:
+                        # No time in ticker — use start of game day (UTC midnight)
+                        game_dt = datetime(yr, mo, dy, tzinfo=timezone.utc)
                     hours_to_game = (game_dt - now_utc).total_seconds() / 3600
         except Exception:
             pass
+
+        # Skip games that have already started — odds from cache may be stale
+        if game_dt and hours_to_game < 0:
+            print(
+                f"    [Series/{sport.upper()}] SKIP {ticker}: "
+                f"game started {-hours_to_game:.1f}h ago (stale odds)"
+            )
+            continue
 
         # Back-to-back check for the team we're betting on
         team_b2b = False
@@ -830,9 +859,11 @@ def scan_ipl_series() -> list[dict]:
         return []
 
     odds_lookup = _build_odds_api_lookup("ipl")
+    # Debug: print exact keys in lookup so name mismatches are visible in logs
     print(
         f"  [Series/IPL] {len(markets)} open markets | "
-        f"{len(odds_lookup)//2} Odds API teams"
+        f"{len(odds_lookup)//2} Odds API teams | "
+        f"lookup keys: {sorted(set(k for k in odds_lookup if len(k) > 4))}"
     )
 
     now_utc = datetime.now(timezone.utc)
@@ -858,14 +889,20 @@ def scan_ipl_series() -> list[dict]:
             print(f"    [Series/IPL] SKIP {ticker}: unknown abbrev={abbrev!r}")
             continue
 
+        # Try exact match, last-word match, then first-word match
+        # (covers "Royal Challengers Bengaluru" vs "Royal Challengers Bangalore" etc.)
         prob = (
             odds_lookup.get(canonical.lower())
             or odds_lookup.get(canonical.split()[-1].lower())
+            or odds_lookup.get(canonical.split()[0].lower())
         )
         if prob is None or prob <= 0:
             print(
                 f"    [Series/IPL] SKIP {ticker}: "
-                f"no odds match for canonical={canonical!r}"
+                f"no odds match for canonical={canonical!r} "
+                f"(tried: {canonical.lower()!r}, "
+                f"{canonical.split()[-1].lower()!r}, "
+                f"{canonical.split()[0].lower()!r})"
             )
             continue
 
@@ -1069,9 +1106,9 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     """
     Run all series scanners and return combined opportunities.
 
-    Sports are scanned in parallel using a thread pool — each sport makes
-    independent HTTP calls (Bovada + Odds API + Kalshi), so parallelism
-    reduces wall-clock time from ~60 s → ~15 s on 4 sports.
+    Sports are scanned sequentially with 0.5s gaps to avoid Kalshi 429 rate limits.
+    Bovada and Odds API calls are still fast (cached or quick), so total time is
+    ~20-30 s — acceptable given the 2-minute scan interval.
 
     Args:
         odds_by_sport: Unused — Bovada is fetched directly inside scan_sports_series.
@@ -1079,28 +1116,26 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     """
     all_opps: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=len(SPORTS_SERIES)) as executor:
-        future_to_sport = {
-            executor.submit(scan_sports_series, sport): sport
-            for sport in SPORTS_SERIES
-        }
-        for future in as_completed(future_to_sport):
-            sport = future_to_sport[future]
-            try:
-                opps = future.result()
-                print(f"  [Series/{sport.upper()}] Found {len(opps)} opportunities")
-                all_opps.extend(opps)
-            except Exception as e:
-                print(f"  [Series/{sport.upper()}] Error: {e}")
+    for sport in SPORTS_SERIES:
+        try:
+            opps = scan_sports_series(sport)
+            print(f"  [Series/{sport.upper()}] Found {len(opps)} opportunities")
+            all_opps.extend(opps)
+        except Exception as e:
+            print(f"  [Series/{sport.upper()}] Error: {e}")
+        _time.sleep(1.0)  # 1s gap between sports to avoid Kalshi 429
 
+    _time.sleep(1.0)  # extra gap before BTC (NBA paginator hits Kalshi hard)
     btc_opps = scan_bitcoin_series()
     print(f"  [Series/BTC] Found {len(btc_opps)} opportunities")
     all_opps.extend(btc_opps)
 
+    _time.sleep(1.0)
     ipl_opps = scan_ipl_series()
     print(f"  [Series/IPL] Found {len(ipl_opps)} opportunities")
     all_opps.extend(ipl_opps)
 
+    _time.sleep(0.5)
     eth_opps = scan_ethereum_series()
     print(f"  [Series/ETH] Found {len(eth_opps)} opportunities")
     all_opps.extend(eth_opps)

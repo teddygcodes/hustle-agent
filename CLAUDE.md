@@ -51,11 +51,10 @@ The agent can:
 - `web_research` — Search the internet for opportunities, prices, data
 - `execute_code` — Run Python/bash scripts (API calls, data analysis, building things)
 - `record_transaction` — Log money in/out (enforces $25 cap)
-- `write_journal` — Write diary entries
+- `write_journal` — Write diary entries (optional `mood` field updates emotional state in the same call)
 - `message_tyler` — Send messages to Tyler
 - `update_strategy` — Manage its strategy portfolio
 - `request_ui_change` — Describe what it wants the UI to look like
-- `set_mood` — Update its emotional state
 - `update_dream_gpu` — Set/update its dream GPU target
 - `browse_kalshi_markets` — Browse/search Kalshi prediction markets (no auth needed)
 - `get_kalshi_market_detail` — Deep dive on a specific Kalshi market with orderbook (no auth needed)

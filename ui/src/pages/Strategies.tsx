@@ -10,11 +10,11 @@ export default function Strategies() {
   const strategies = state?.strategies || [];
 
   const borderColor: Record<string, string> = {
-    active: 'border-l-emerald-500',
-    paused: 'border-l-amber-500',
-    retired: 'border-l-zinc-600',
-    exploring: 'border-l-blue-500',
-    planned: 'border-l-blue-500',
+    active: 'var(--nest-success)',
+    paused: 'var(--nest-warning)',
+    retired: 'var(--nest-text-ghost)',
+    exploring: 'var(--nest-blue)',
+    planned: 'var(--nest-blue)',
   };
 
   return (
@@ -25,46 +25,51 @@ export default function Strategies() {
         <EmptyState message="No strategies yet. The agent will develop its first strategy during cycle 1." />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {strategies.map(s => {
+          {strategies.map((s, idx) => {
             const roi = s.invested > 0 ? ((s.returned - s.invested) / s.invested) * 100 : 0;
             return (
               <div
                 key={s.name}
-                className={`bg-zinc-900 border border-zinc-800 border-l-2 ${borderColor[s.status] || 'border-l-zinc-600'} rounded-lg p-4`}
+                className="nest-card p-4 animate-fade-up"
+                style={{
+                  borderLeftWidth: '2px',
+                  borderLeftColor: borderColor[s.status] || 'var(--nest-text-ghost)',
+                  animationDelay: `${idx * 60}ms`,
+                }}
               >
                 <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-medium text-zinc-200">{s.name}</h3>
+                  <h3 className="text-sm font-medium" style={{ color: 'var(--nest-text)' }}>{s.name}</h3>
                   <StatusBadge status={s.status} />
                 </div>
-                <p className="text-xs text-zinc-500 mb-3 line-clamp-2">{s.description}</p>
+                <p className="text-xs mb-3 line-clamp-2" style={{ color: 'var(--nest-text-dim)' }}>{s.description}</p>
                 <div className="grid grid-cols-3 gap-2 text-center mb-3">
                   <div>
-                    <p className="text-xs text-zinc-500">Invested</p>
-                    <p className="text-sm font-mono text-zinc-300">{money(s.invested)}</p>
+                    <p className="text-[10px]" style={{ color: 'var(--nest-text-ghost)' }}>Invested</p>
+                    <p className="text-sm font-mono" style={{ color: 'var(--nest-text)' }}>{money(s.invested)}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-zinc-500">Returned</p>
-                    <p className="text-sm font-mono text-zinc-300">{money(s.returned)}</p>
+                    <p className="text-[10px]" style={{ color: 'var(--nest-text-ghost)' }}>Returned</p>
+                    <p className="text-sm font-mono" style={{ color: 'var(--nest-text)' }}>{money(s.returned)}</p>
                   </div>
                   <div>
-                    <p className="text-xs text-zinc-500">ROI</p>
-                    <p className={`text-sm font-mono ${roi >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    <p className="text-[10px]" style={{ color: 'var(--nest-text-ghost)' }}>ROI</p>
+                    <p className={`text-sm font-mono ${roi >= 0 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]'}`}>
                       {roi >= 0 ? '+' : ''}{roi.toFixed(1)}%
                     </p>
                   </div>
                 </div>
                 {s.confidence > 0 && (
                   <div className="mb-2">
-                    <div className="flex justify-between text-xs text-zinc-500 mb-1">
-                      <span>Confidence</span>
-                      <span>{s.confidence}%</span>
+                    <div className="flex justify-between text-[10px] mb-1">
+                      <span style={{ color: 'var(--nest-text-ghost)' }}>Confidence</span>
+                      <span className="font-mono" style={{ color: 'var(--nest-text-dim)' }}>{s.confidence}%</span>
                     </div>
-                    <div className="w-full h-1 bg-zinc-800 rounded-full">
-                      <div className="h-full bg-violet-500 rounded-full" style={{ width: `${s.confidence}%` }} />
+                    <div className="w-full h-1.5 rounded-full" style={{ background: 'var(--nest-bg-surface)' }}>
+                      <div className="h-full confidence-bar rounded-full" style={{ width: `${s.confidence}%` }} />
                     </div>
                   </div>
                 )}
-                {s.notes && <p className="text-xs text-zinc-600 italic mt-2">{s.notes}</p>}
+                {s.notes && <p className="text-[11px] italic mt-2" style={{ color: 'var(--nest-text-ghost)' }}>{s.notes}</p>}
               </div>
             );
           })}

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react';
 
 const links = [
-  { to: '/', icon: LayoutDashboard, label: 'Home' },
+  { to: '/', icon: LayoutDashboard, label: 'Nest' },
   { to: '/finances', icon: Wallet, label: 'Money' },
   { to: '/strategies', icon: Target, label: 'Strats' },
   { to: '/chat', icon: MessageCircle, label: 'Chat' },
@@ -24,18 +24,18 @@ const moreLinks = [
 
 export function MobileNav() {
   return (
-    <nav className="fixed bottom-0 left-0 right-0 bg-zinc-950 border-t border-zinc-800 z-50 md:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 md:hidden border-t"
+      style={{ background: 'var(--nest-bg)', borderColor: 'var(--nest-border)' }}>
       <div className="flex overflow-x-auto">
         {[...links, ...moreLinks].map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
             end={to === '/'}
-            className={({ isActive }) =>
-              `flex flex-col items-center gap-0.5 px-3 py-2 text-[10px] min-w-[56px] ${
-                isActive ? 'text-violet-400' : 'text-zinc-500'
-              }`
-            }
+            className="flex flex-col items-center gap-0.5 px-3 py-2 text-[10px] min-w-[56px]"
+            style={({ isActive }) => ({
+              color: isActive ? 'var(--nest-blue)' : 'var(--nest-text-ghost)',
+            })}
           >
             <Icon size={16} />
             {label}

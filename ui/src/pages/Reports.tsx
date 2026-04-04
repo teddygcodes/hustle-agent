@@ -7,17 +7,17 @@ import { EmptyState } from '../components/EmptyState';
 import { money, shortDate } from '../lib/utils';
 import clsx from 'clsx';
 
-const typeColors: Record<string, string> = {
-  income: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  return: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
-  expense: 'bg-red-500/15 text-red-400 border-red-500/30',
-  investment: 'bg-violet-500/15 text-violet-400 border-violet-500/30',
+const typeColors: Record<string, { bg: string; text: string; border: string }> = {
+  income: { bg: 'rgba(16, 185, 129, 0.1)', text: 'var(--nest-success)', border: 'rgba(16, 185, 129, 0.2)' },
+  return: { bg: 'rgba(16, 185, 129, 0.1)', text: 'var(--nest-success)', border: 'rgba(16, 185, 129, 0.2)' },
+  expense: { bg: 'rgba(239, 68, 68, 0.1)', text: 'var(--nest-error)', border: 'rgba(239, 68, 68, 0.2)' },
+  investment: { bg: 'rgba(124, 58, 237, 0.1)', text: 'var(--nest-purple)', border: 'rgba(124, 58, 237, 0.2)' },
 };
 
 const outcomeColors: Record<string, string> = {
-  won: 'text-emerald-400',
-  lost: 'text-red-400',
-  pending: 'text-amber-400',
+  won: 'var(--nest-success)',
+  lost: 'var(--nest-error)',
+  pending: 'var(--nest-warning)',
 };
 
 export default function Reports() {
@@ -36,7 +36,6 @@ export default function Reports() {
     return list;
   }, [items, typeFilter, statusFilter]);
 
-  // Stats
   const resolved = items.filter(r => r.resolution);
   const hits = resolved.filter(r => r.summary.outcome === 'won').length;
   const hitRate = resolved.length > 0 ? (hits / resolved.length) * 100 : 0;
@@ -53,220 +52,191 @@ export default function Reports() {
         <EmptyState message="No transaction reports yet. Reports are generated automatically when the agent records transactions." />
       ) : (
         <>
-          {/* Stats row */}
           <div className="grid grid-cols-4 gap-3 mb-6">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-              <p className="text-xs text-zinc-500">Total Reports</p>
-              <p className="text-xl font-semibold text-zinc-100 font-mono">{items.length}</p>
-            </div>
-            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-              <p className="text-xs text-zinc-500">Resolved</p>
-              <p className="text-xl font-semibold text-zinc-100 font-mono">{resolved.length}</p>
-            </div>
-            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-              <p className="text-xs text-zinc-500">Hit Rate</p>
-              <p className={clsx('text-xl font-semibold font-mono', resolved.length > 0 ? 'text-emerald-400' : 'text-zinc-500')}>
-                {resolved.length > 0 ? `${hitRate.toFixed(0)}%` : '--'}
-              </p>
-            </div>
-            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-              <p className="text-xs text-zinc-500">Avg Edge</p>
-              <p className={clsx('text-xl font-semibold font-mono', withEdge.length > 0 ? 'text-violet-400' : 'text-zinc-500')}>
-                {withEdge.length > 0 ? `${(avgEdge * 100).toFixed(1)}pp` : '--'}
-              </p>
-            </div>
+            {[
+              { label: 'Total Reports', value: items.length.toString(), color: 'var(--nest-text-bright)' },
+              { label: 'Resolved', value: resolved.length.toString(), color: 'var(--nest-text-bright)' },
+              { label: 'Hit Rate', value: resolved.length > 0 ? `${hitRate.toFixed(0)}%` : '--', color: resolved.length > 0 ? 'var(--nest-success)' : 'var(--nest-text-ghost)' },
+              { label: 'Avg Edge', value: withEdge.length > 0 ? `${(avgEdge * 100).toFixed(1)}pp` : '--', color: withEdge.length > 0 ? 'var(--nest-purple)' : 'var(--nest-text-ghost)' },
+            ].map(s => (
+              <div key={s.label} className="nest-card p-4 text-center">
+                <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--nest-text-ghost)' }}>{s.label}</p>
+                <p className="text-xl font-semibold font-mono" style={{ color: s.color }}>{s.value}</p>
+              </div>
+            ))}
           </div>
 
-          {/* Filters */}
           <div className="flex flex-wrap gap-4 mb-4">
             <div className="flex gap-1">
               {['all', 'investment', 'expense', 'income', 'return'].map(t => (
-                <button
-                  key={t}
-                  onClick={() => setTypeFilter(t)}
-                  className={clsx(
-                    'text-xs px-2.5 py-1 rounded-md transition-colors',
-                    typeFilter === t ? 'bg-zinc-700 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'
-                  )}
-                >
+                <button key={t} onClick={() => setTypeFilter(t)}
+                  className="text-xs px-2.5 py-1 rounded-md transition-colors"
+                  style={{
+                    background: typeFilter === t ? 'var(--nest-bg-surface)' : 'transparent',
+                    color: typeFilter === t ? 'var(--nest-text-bright)' : 'var(--nest-text-dim)',
+                  }}>
                   {t}
                 </button>
               ))}
             </div>
             <div className="flex gap-1">
               {['all', 'pending', 'resolved'].map(s => (
-                <button
-                  key={s}
-                  onClick={() => setStatusFilter(s)}
-                  className={clsx(
-                    'text-xs px-2.5 py-1 rounded-md transition-colors',
-                    statusFilter === s ? 'bg-zinc-700 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'
-                  )}
-                >
+                <button key={s} onClick={() => setStatusFilter(s)}
+                  className="text-xs px-2.5 py-1 rounded-md transition-colors"
+                  style={{
+                    background: statusFilter === s ? 'var(--nest-bg-surface)' : 'transparent',
+                    color: statusFilter === s ? 'var(--nest-text-bright)' : 'var(--nest-text-dim)',
+                  }}>
                   {s}
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Report cards */}
           <div className="space-y-3">
-            {filtered.map(r => {
+            {filtered.map((r, idx) => {
               const isExpanded = expanded === r.report_id;
+              const tc = typeColors[r.type] || typeColors.expense;
               return (
                 <div
                   key={r.report_id}
-                  className={clsx(
-                    'bg-zinc-900 border rounded-lg transition-colors cursor-pointer',
-                    r.summary.outcome === 'won' ? 'border-emerald-800/50' :
-                    r.summary.outcome === 'lost' ? 'border-red-800/50' :
-                    'border-zinc-800'
-                  )}
+                  className="nest-card cursor-pointer animate-fade-up"
+                  style={{
+                    animationDelay: `${idx * 40}ms`,
+                    borderColor: r.summary.outcome === 'won' ? 'rgba(16, 185, 129, 0.2)' :
+                      r.summary.outcome === 'lost' ? 'rgba(239, 68, 68, 0.2)' : undefined,
+                  }}
                   onClick={() => setExpanded(isExpanded ? null : r.report_id)}
                 >
-                  {/* Summary row */}
                   <div className="p-4">
                     <div className="flex items-start justify-between mb-2">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <span className={clsx('text-[10px] font-semibold px-2 py-0.5 rounded border', typeColors[r.type] || typeColors.expense)}>
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded"
+                            style={{ background: tc.bg, color: tc.text, border: `1px solid ${tc.border}` }}>
                             {r.type.toUpperCase()}
                           </span>
-                          <span className="text-xs text-zinc-500 font-mono">{r.report_id}</span>
-                          <span className={clsx('text-xs font-semibold', outcomeColors[r.summary.outcome])}>
+                          <span className="text-xs font-mono" style={{ color: 'var(--nest-text-ghost)' }}>{r.report_id}</span>
+                          <span className="text-xs font-semibold" style={{ color: outcomeColors[r.summary.outcome] }}>
                             {r.summary.outcome.toUpperCase()}
                           </span>
                         </div>
-                        <p className="text-sm text-zinc-200 truncate">{r.summary.action}</p>
-                        <p className="text-xs text-zinc-500 mt-0.5">{shortDate(r.timestamp)} &middot; {r.reasoning.strategy}</p>
+                        <p className="text-sm truncate" style={{ color: 'var(--nest-text)' }}>{r.summary.action}</p>
+                        <p className="text-xs mt-0.5" style={{ color: 'var(--nest-text-ghost)' }}>{shortDate(r.timestamp)} &middot; {r.reasoning.strategy}</p>
                       </div>
                       <div className="text-right shrink-0 ml-4">
-                        <p className="text-sm font-mono text-zinc-200">{money(r.summary.amount)}</p>
+                        <p className="text-sm font-mono" style={{ color: 'var(--nest-text)' }}>{money(r.summary.amount)}</p>
                         {r.data_backing && (
-                          <p className="text-xs text-violet-400 font-mono mt-0.5">
+                          <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--nest-purple)' }}>
                             edge: {(r.data_backing.edge * 100).toFixed(1)}pp
                           </p>
                         )}
                         {r.projection && (
-                          <div className="mt-1">
-                            <VerdictBadge verdict={r.projection.verdict_raw} />
-                          </div>
+                          <div className="mt-1"><VerdictBadge verdict={r.projection.verdict_raw} /></div>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  {/* Expanded detail */}
                   {isExpanded && (
-                    <div className="border-t border-zinc-800 p-4 space-y-4">
-                      {/* Reasoning */}
+                    <div className="p-4 space-y-4" style={{ borderTop: '1px solid var(--nest-border)' }}>
                       <div>
-                        <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Reasoning</h4>
-                        <p className="text-sm text-zinc-300">{r.reasoning.thesis}</p>
+                        <h4 className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--nest-text-dim)' }}>Reasoning</h4>
+                        <p className="text-sm" style={{ color: 'var(--nest-text)' }}>{r.reasoning.thesis}</p>
                         {r.reasoning.confidence_raw != null && (
-                          <div className="flex gap-4 mt-2 text-xs text-zinc-500">
-                            <span>Confidence: {r.reasoning.confidence_raw}% raw{r.reasoning.confidence_adjusted != null && ` -> ${r.reasoning.confidence_adjusted}% adjusted`}</span>
+                          <div className="flex gap-4 mt-2 text-xs" style={{ color: 'var(--nest-text-ghost)' }}>
+                            <span>Confidence: {r.reasoning.confidence_raw}% raw{r.reasoning.confidence_adjusted != null && ` \u2192 ${r.reasoning.confidence_adjusted}% adjusted`}</span>
                             {r.reasoning.calibration_applied && <span>{r.reasoning.calibration_applied}</span>}
                           </div>
                         )}
                       </div>
 
-                      {/* Data Backing */}
                       {r.data_backing && (
                         <div>
-                          <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Data Backing</h4>
-                          <div className="bg-zinc-950 border border-zinc-800 rounded-lg p-3 space-y-2">
+                          <h4 className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--nest-text-dim)' }}>Data Backing</h4>
+                          <div className="rounded-lg p-3 space-y-2" style={{ background: 'var(--nest-bg)', border: '1px solid var(--nest-border)' }}>
                             <div className="flex justify-between text-sm">
-                              <span className="text-zinc-500">Source</span>
-                              <span className="text-zinc-200">{r.data_backing.source}</span>
+                              <span style={{ color: 'var(--nest-text-ghost)' }}>Source</span>
+                              <span style={{ color: 'var(--nest-text)' }}>{r.data_backing.source}</span>
                             </div>
-                            <p className="text-xs text-zinc-400">{r.data_backing.data_point}</p>
-                            <div className="grid grid-cols-3 gap-3 pt-2 border-t border-zinc-800">
+                            <p className="text-xs" style={{ color: 'var(--nest-text-dim)' }}>{r.data_backing.data_point}</p>
+                            <div className="grid grid-cols-3 gap-3 pt-2" style={{ borderTop: '1px solid var(--nest-border)' }}>
                               <div className="text-center">
-                                <p className="text-[10px] text-zinc-500 uppercase">Source Prob</p>
-                                <p className="text-sm font-mono text-emerald-400">{(r.data_backing.source_probability * 100).toFixed(0)}%</p>
+                                <p className="text-[10px] uppercase" style={{ color: 'var(--nest-text-ghost)' }}>Source Prob</p>
+                                <p className="text-sm font-mono text-[var(--nest-success)]">{(r.data_backing.source_probability * 100).toFixed(0)}%</p>
                               </div>
                               <div className="text-center">
-                                <p className="text-[10px] text-zinc-500 uppercase">Market Price</p>
-                                <p className="text-sm font-mono text-zinc-300">{(r.data_backing.market_price * 100).toFixed(0)}%</p>
+                                <p className="text-[10px] uppercase" style={{ color: 'var(--nest-text-ghost)' }}>Market Price</p>
+                                <p className="text-sm font-mono" style={{ color: 'var(--nest-text)' }}>{(r.data_backing.market_price * 100).toFixed(0)}%</p>
                               </div>
                               <div className="text-center">
-                                <p className="text-[10px] text-zinc-500 uppercase">Edge</p>
-                                <p className="text-sm font-mono text-violet-400">{(r.data_backing.edge * 100).toFixed(1)}pp</p>
+                                <p className="text-[10px] uppercase" style={{ color: 'var(--nest-text-ghost)' }}>Edge</p>
+                                <p className="text-sm font-mono" style={{ color: 'var(--nest-purple)' }}>{(r.data_backing.edge * 100).toFixed(1)}pp</p>
                               </div>
                             </div>
-                            <p className="text-xs text-zinc-500">{r.data_backing.edge_direction}</p>
                           </div>
                         </div>
                       )}
 
-                      {/* Projection */}
                       {r.projection && (
                         <div>
-                          <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Projection</h4>
+                          <h4 className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--nest-text-dim)' }}>Projection</h4>
                           <div className="grid grid-cols-4 gap-3 text-center text-xs">
-                            <div>
-                              <p className="text-zinc-500">Expected Return</p>
-                              <p className="text-zinc-300 font-mono">{money(r.projection.expected_return)}</p>
-                            </div>
-                            <div>
-                              <p className="text-zinc-500">Expected Profit</p>
-                              <p className="text-zinc-300 font-mono">{money(r.projection.expected_profit)}</p>
-                            </div>
-                            <div>
-                              <p className="text-zinc-500">ROI</p>
-                              <p className="text-zinc-300 font-mono">{r.projection.roi_percent.toFixed(1)}%</p>
-                            </div>
-                            <div>
-                              <p className="text-zinc-500">Time</p>
-                              <p className="text-zinc-300 font-mono">{r.projection.time_to_return_days}d</p>
-                            </div>
+                            {[
+                              { l: 'Expected Return', v: money(r.projection.expected_return) },
+                              { l: 'Expected Profit', v: money(r.projection.expected_profit) },
+                              { l: 'ROI', v: `${r.projection.roi_percent.toFixed(1)}%` },
+                              { l: 'Time', v: `${r.projection.time_to_return_days}d` },
+                            ].map(x => (
+                              <div key={x.l}>
+                                <p style={{ color: 'var(--nest-text-ghost)' }}>{x.l}</p>
+                                <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{x.v}</p>
+                              </div>
+                            ))}
                           </div>
                           {(r.projection.bull_case || r.projection.bear_case) && (
                             <div className="grid grid-cols-2 gap-3 mt-3 text-xs">
                               <div>
-                                <p className="text-emerald-500 font-semibold mb-1">Bull Case</p>
-                                <p className="text-zinc-400">{r.projection.bull_case}</p>
+                                <p className="font-semibold mb-1 text-[var(--nest-success)]">Bull Case</p>
+                                <p style={{ color: 'var(--nest-text-dim)' }}>{r.projection.bull_case}</p>
                               </div>
                               <div>
-                                <p className="text-red-500 font-semibold mb-1">Bear Case</p>
-                                <p className="text-zinc-400">{r.projection.bear_case}</p>
+                                <p className="font-semibold mb-1 text-[var(--nest-error)]">Bear Case</p>
+                                <p style={{ color: 'var(--nest-text-dim)' }}>{r.projection.bear_case}</p>
                               </div>
                             </div>
                           )}
                         </div>
                       )}
 
-                      {/* Resolution */}
                       {r.resolution && (
                         <div>
-                          <h4 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-2">Resolution</h4>
+                          <h4 className="text-[10px] font-semibold uppercase tracking-wider mb-2" style={{ color: 'var(--nest-text-dim)' }}>Resolution</h4>
                           <div className="grid grid-cols-3 gap-3 text-center text-xs">
                             <div>
-                              <p className="text-zinc-500">Actual Return</p>
-                              <p className="text-zinc-300 font-mono">{money(r.resolution.actual_return)}</p>
+                              <p style={{ color: 'var(--nest-text-ghost)' }}>Actual Return</p>
+                              <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{money(r.resolution.actual_return)}</p>
                             </div>
                             <div>
-                              <p className="text-zinc-500">P&L</p>
-                              <p className={clsx('font-mono', (r.resolution.actual_profit_loss || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                              <p style={{ color: 'var(--nest-text-ghost)' }}>P&L</p>
+                              <p className={clsx('font-mono', (r.resolution.actual_profit_loss || 0) >= 0 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]')}>
                                 {(r.resolution.actual_profit_loss || 0) >= 0 ? '+' : ''}{money(r.resolution.actual_profit_loss || 0)}
                               </p>
                             </div>
                             <div>
-                              <p className="text-zinc-500">vs Prediction</p>
-                              <p className={clsx('font-mono', (r.resolution.prediction_delta || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                              <p style={{ color: 'var(--nest-text-ghost)' }}>vs Prediction</p>
+                              <p className={clsx('font-mono', (r.resolution.prediction_delta || 0) >= 0 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]')}>
                                 {(r.resolution.prediction_delta || 0) >= 0 ? '+' : ''}{money(r.resolution.prediction_delta || 0)}
                               </p>
                             </div>
                           </div>
                           {r.resolution.actual_outcome && (
-                            <p className="text-xs text-zinc-400 mt-2">{r.resolution.actual_outcome}</p>
+                            <p className="text-xs mt-2" style={{ color: 'var(--nest-text-dim)' }}>{r.resolution.actual_outcome}</p>
                           )}
                         </div>
                       )}
 
-                      {/* Linked IDs */}
-                      <div className="flex gap-4 text-[10px] text-zinc-600 pt-2 border-t border-zinc-800">
+                      <div className="flex gap-4 text-[10px] pt-2" style={{ borderTop: '1px solid var(--nest-border)', color: 'var(--nest-text-ghost)' }}>
                         {r.linked_ids.projection_id && <span>proj: {r.linked_ids.projection_id}</span>}
                         {r.linked_ids.kalshi_order_id && <span>order: {r.linked_ids.kalshi_order_id}</span>}
                         <span>txn: #{r.linked_ids.ledger_id}</span>

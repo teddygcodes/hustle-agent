@@ -4,6 +4,7 @@ Hustle Agent — Transaction Reports
 Every transaction generates a permanent report with reasoning, data backing,
 projection snapshot, and eventual resolution. Creates accountability.
 """
+from __future__ import annotations
 
 import json
 import datetime

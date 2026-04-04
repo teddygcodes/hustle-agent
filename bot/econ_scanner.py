@@ -86,42 +86,60 @@ def _get_cpi_nowcast() -> Optional[float]:
     Returns None if FRED key is missing or API is unavailable.
     """
     global _CPI_CACHE
-    if _CPI_CACHE and (_time.monotonic() - _CPI_CACHE[0]) < _CPI_CACHE_TTL:
+    # Only serve cache if it holds a successful (non-None) result
+    if _CPI_CACHE and _CPI_CACHE[1] is not None and (_time.monotonic() - _CPI_CACHE[0]) < _CPI_CACHE_TTL:
         return _CPI_CACHE[1]
 
     api_key = _load_fred_key()
     if not api_key:
         print("  [Econ] No FRED API key — register free at fred.stlouisfed.org/docs/api/api_key.html")
         print("  [Econ] Save key to config/fred.json: {\"api_key\": \"YOUR_KEY\"}")
-        _CPI_CACHE = (_time.monotonic(), None)
+        # Don't cache missing-key failures — retry on next cycle once key is added
         return None
 
-    # Fetch last 13 months of CPIAUCSL to compute latest 12-month change
+    # Fetch 15 months to handle occasional "." (missing) values in FRED
     url = (
         f"{FRED_BASE}/series/observations"
         f"?series_id={FRED_SERIES_CPI}&api_key={api_key}"
-        f"&file_type=json&sort_order=desc&limit=13"
+        f"&file_type=json&sort_order=desc&limit=15"
     )
     data = _get_json(url)
     if not data or "observations" not in data:
-        _CPI_CACHE = (_time.monotonic(), None)
+        print(f"  [Econ] FRED API returned unexpected response — check api_key in config/fred.json")
+        return None  # Don't cache API errors — retry next cycle
+
+    # Build date→value dict, skipping missing "." values
+    obs_by_month: dict[str, float] = {}
+    for o in data["observations"]:
+        val = o.get("value", ".")
+        if val != ".":
+            try:
+                obs_by_month[o["date"][:7]] = float(val)  # "YYYY-MM"
+            except (ValueError, KeyError):
+                pass
+
+    if not obs_by_month:
+        print(f"  [Econ] FRED returned no valid observations")
         return None
 
-    obs = [o for o in data["observations"] if o.get("value", ".") != "."]
-    if len(obs) < 13:
-        _CPI_CACHE = (_time.monotonic(), None)
+    # Find most recent month and look up year-ago by date (handles gaps)
+    latest_month = max(obs_by_month)
+    year, month = int(latest_month[:4]), int(latest_month[5:7])
+    year_ago_month = f"{year - 1:04d}-{month:02d}"
+
+    if year_ago_month not in obs_by_month:
+        print(f"  [Econ] FRED missing year-ago data ({year_ago_month}) — data not ready")
         return None
 
     try:
-        latest = float(obs[0]["value"])
-        year_ago = float(obs[12]["value"])
+        latest = obs_by_month[latest_month]
+        year_ago = obs_by_month[year_ago_month]
         yoy_pct = ((latest - year_ago) / year_ago) * 100.0
-        print(f"  [Econ] FRED CPI: latest={latest:.3f} year_ago={year_ago:.3f} YoY={yoy_pct:.2f}%")
-        _CPI_CACHE = (_time.monotonic(), yoy_pct)
+        print(f"  [Econ] FRED CPI: {latest_month}={latest:.3f} {year_ago_month}={year_ago:.3f} YoY={yoy_pct:.2f}%")
+        _CPI_CACHE = (_time.monotonic(), yoy_pct)  # Only cache successful results
         return yoy_pct
     except (ValueError, ZeroDivisionError):
-        _CPI_CACHE = (_time.monotonic(), None)
-        return None
+        return None  # Don't cache parse errors
 
 
 def _fetch_kalshi_econ_markets() -> list[dict]:
@@ -159,7 +177,7 @@ def scan_econ_markets() -> list[dict]:
 
     nowcast = _get_cpi_nowcast()
     if nowcast is None:
-        print("  [Econ] Cleveland Fed nowcast unavailable — skipping")
+        print("  [Econ] FRED CPI data unavailable — skipping")
         return []
 
     print(f"  [Econ] {len(markets)} markets | Cleveland Fed CPI nowcast={nowcast:.2f}%")

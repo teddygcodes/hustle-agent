@@ -294,6 +294,10 @@ NHL_TEAM_ALIASES: dict[str, str] = {
     "ana": "Anaheim Ducks",
     "arizona coyotes": "Arizona Coyotes",
     "coyotes": "Arizona Coyotes",
+    "utah hockey club": "Utah Hockey Club",
+    "utah hc": "Utah Hockey Club",
+    "utah": "Utah Hockey Club",
+    "uta": "Utah Hockey Club",
     "boston bruins": "Boston Bruins",
     "bruins": "Boston Bruins",
     "buffalo": "Buffalo Sabres",
@@ -534,6 +538,7 @@ IPL_TEAM_ALIASES: dict[str, str] = {
     "csk":  "Chennai Super Kings",
     "mi":   "Mumbai Indians",
     "rcb":  "Royal Challengers Bengaluru",
+    # Odds API sometimes uses old spelling "Bangalore" — handled via first-word match in scanner
     "kkr":  "Kolkata Knight Riders",
     "dc":   "Delhi Capitals",
     "pbks": "Punjab Kings",

@@ -33,8 +33,11 @@ class PriceMonitor:
 
     def _save(self):
         os.makedirs(os.path.dirname(self.cache_path), exist_ok=True)
-        with open(self.cache_path, "w") as f:
-            json.dump(self._cache, f)
+        try:
+            with open(self.cache_path, "w") as f:
+                json.dump(self._cache, f)
+        except OSError as e:
+            logger.error("Failed to save price cache: %s", e)
 
     def update(self, ticker: str, yes_ask: int):
         """Store current yes_ask price for ticker, persist to disk."""

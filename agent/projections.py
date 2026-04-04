@@ -4,6 +4,7 @@ Hustle Agent — Projection System
 Before spending money, the agent must project outcomes.
 After resolution, it records what actually happened for calibration.
 """
+from __future__ import annotations
 
 import json
 import uuid

@@ -18,7 +18,7 @@ import pytest
 # Set dummy API key BEFORE any agent imports
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
-from agent import engine, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts, kalshi_client, reports
+from agent import engine, state, tool_executors, risk, projections, memory, costs, audit, watches, pipeline, proposals, logger, instincts, kalshi_client, reports
 
 
 # ---------------------------------------------------------------------------
@@ -290,14 +290,26 @@ def isolated_fs(tmp_path, monkeypatch):
     reports_dir.mkdir()
 
     # Monkeypatch every module's path constants
-    modules_with_base = [engine, risk, projections, memory, costs, audit,
+    modules_with_base = [engine, state, tool_executors, risk, projections, memory, costs, audit,
                          watches, pipeline, proposals, logger, instincts, reports]
     for mod in modules_with_base:
         monkeypatch.setattr(mod, "BASE_DIR", tmp_path)
         if hasattr(mod, "STATE_DIR"):
             monkeypatch.setattr(mod, "STATE_DIR", state_dir)
 
-    # engine-specific paths
+    # state module paths (load_state/save_state/etc. read these)
+    monkeypatch.setattr(state, "STATE_FILE", state_dir / "agent_state.json")
+    monkeypatch.setattr(state, "LEDGER_FILE", state_dir / "ledger.json")
+    monkeypatch.setattr(state, "JOURNAL_FILE", state_dir / "journal.md")
+    monkeypatch.setattr(state, "CONVERSATIONS_FILE", state_dir / "conversations.json")
+    monkeypatch.setattr(state, "UI_REQUESTS_FILE", state_dir / "ui_requests.json")
+    monkeypatch.setattr(state, "INBOX_FILE", state_dir / "inbox.json")
+    monkeypatch.setattr(state, "BACKUP_DIR", backup_dir)
+    monkeypatch.setattr(state, "TOOLS_DIR", tools_dir)
+    monkeypatch.setattr(state, "CONFIG_DIR", config_dir)
+    monkeypatch.setattr(state, "ACTIONS_FILE", state_dir / "actions.json")
+
+    # engine-specific paths (re-exported from state, also patched for direct access)
     monkeypatch.setattr(engine, "STATE_FILE", state_dir / "agent_state.json")
     monkeypatch.setattr(engine, "LEDGER_FILE", state_dir / "ledger.json")
     monkeypatch.setattr(engine, "JOURNAL_FILE", state_dir / "journal.md")
