@@ -598,6 +598,7 @@ def scan_weather_markets() -> list[dict]:
                 "edge": edge_result["edge"],
                 "relative_edge": edge_result["relative_edge"],
                 "confidence": edge_result["confidence"],
+                "kalshi_price": edge_result.get("kalshi_price", 0),
                 "recommended_side": "yes" if edge_result["edge"] > 0 else "no",
                 "scanned_at": datetime.now(timezone.utc).isoformat(),
             })
