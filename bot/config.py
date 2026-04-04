@@ -216,7 +216,7 @@ PAPER_MODE = True
 # "weather"         — NWS bias correction (next-day markets only)
 # "vig_stack_series" — Series ladder NO edge (mechanical, no prediction)
 # Add others only after 20+ resolved paper trades with +CLV on each.
-ACTIVE_STRATEGIES = ["weather", "vig_stack_series", "series_game_edge", "ipl_game_edge", "eth_price_edge"]
+ACTIVE_STRATEGIES = ["weather", "vig_stack_series", "series_game_edge", "ipl_game_edge", "eth_price_edge", "econ_cpi_edge"]
 
 # ---------------------------------------------------------------------------
 # Weather strategy — next-day filter

@@ -1286,6 +1286,13 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     else:
         print(f"  [SERIES] Disabled — not in ACTIVE_STRATEGIES.")
 
+    if "econ_cpi_edge" in ACTIVE_STRATEGIES:
+        print(f"\n  [ECON] Scanning economic markets...")
+        from bot.econ_scanner import scan_econ_markets
+        econ_opps = scan_econ_markets()
+        print(f"  [ECON] Found {len(econ_opps)} opportunities")
+        all_opportunities.extend(econ_opps)
+
     # Injury filter: drop series_game_edge opps where the team has a player OUT.
     # Uses ESPN's free injury API. Fails open — if ESPN is down, opp is NOT dropped.
     print(f"\n  [INJURIES] Checking injury reports for series game edges...")
