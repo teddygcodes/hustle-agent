@@ -424,6 +424,7 @@ def scan_weather_markets() -> list[dict]:
         # rather than from close_time in UTC — Kalshi weather markets close at ~11pm
         # local time, so close_time in UTC crosses midnight and returns the WRONG date.
         forecast_temp = None
+        target_date = None
         _MONTH_MAP = {
             "JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
             "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12,
@@ -442,6 +443,13 @@ def scan_weather_markets() -> list[dict]:
                     forecast_temp = _get_forecast_temp_for_date(forecasts[matched_city], target_date)
         except Exception:
             pass
+
+        # Compute days_ahead from target_date (cap at 3)
+        if target_date is not None:
+            today = datetime.now(timezone.utc).date()
+            days_ahead = max(1, min(3, (target_date - today).days + 1))
+        else:
+            days_ahead = 1
 
         # Fallback: first daytime period if ticker-date lookup failed
         if forecast_temp is None:
@@ -462,6 +470,7 @@ def scan_weather_markets() -> list[dict]:
             direction=direction,
             kalshi_price_cents=yes_ask,
             threshold_high=threshold_high,
+            days_ahead=days_ahead,
         )
 
         fair_value = edge_result.get("fair_value", 0)

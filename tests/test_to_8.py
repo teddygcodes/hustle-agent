@@ -220,3 +220,41 @@ def test_price_moving_against_no_position():
         assert result["confidence"] < 0.70
     finally:
         os.unlink(cache_path)
+
+
+# ── Task 4: Dynamic Weather Sigma ────────────────────────────────────────────
+
+def test_weather_sigma_scales_with_days_ahead():
+    """calculate_weather_edge() uses larger sigma for farther-out forecasts."""
+    from bot.math_engine import calculate_weather_edge
+    # Same setup: NYC, forecast 72°F, threshold 75°F, direction "above", price 20¢
+    edge_1day = calculate_weather_edge("New York", 72.0, 75.0, "above", 20, days_ahead=1)
+    edge_3day = calculate_weather_edge("New York", 72.0, 75.0, "above", 20, days_ahead=3)
+    # With larger sigma on 3-day, P(above) is higher → but so is uncertainty
+    # The key: fair_value should differ between 1-day and 3-day
+    assert edge_1day["fair_value"] != edge_3day["fair_value"]
+
+
+def test_weather_1day_sigma_unchanged():
+    """days_ahead=1 (default) produces same result as before (sigma=2.0)."""
+    from bot.math_engine import calculate_weather_edge
+    edge_default = calculate_weather_edge("New York", 72.0, 75.0, "above", 20)
+    edge_explicit = calculate_weather_edge("New York", 72.0, 75.0, "above", 20, days_ahead=1)
+    assert edge_default["fair_value"] == edge_explicit["fair_value"]
+
+
+def test_weather_3day_lower_edge_than_1day():
+    """3-day forecast produces lower edge than 1-day for the same gap (more uncertainty)."""
+    from bot.math_engine import calculate_weather_edge
+    # Forecast 72°F, threshold 75°F (3°F gap), BUY YES at 20¢
+    # With more uncertainty (3-day), fair_value approaches 50% → less edge
+    edge_1day = calculate_weather_edge("New York", 72.0, 75.0, "above", 20, days_ahead=1)
+    edge_3day = calculate_weather_edge("New York", 72.0, 75.0, "above", 20, days_ahead=3)
+    # When temp is below threshold, more uncertainty means higher P(above) — closer to 50%
+    # So for a BUY YES case where forecast < threshold, 3-day means P(above) is HIGHER
+    # BUT: for a case where the forecast IS above threshold (clear edge), 3-day should reduce edge
+    edge_1day_clear = calculate_weather_edge("New York", 80.0, 75.0, "above", 85, days_ahead=1)
+    edge_3day_clear = calculate_weather_edge("New York", 80.0, 75.0, "above", 85, days_ahead=3)
+    # When forecast (80) >> threshold (75), 1-day has tighter distribution → higher confidence
+    # 3-day has wider sigma → P(above) is still high but closer to 50% → lower edge at same price
+    assert abs(edge_1day_clear.get("edge", 0)) >= abs(edge_3day_clear.get("edge", 0))

@@ -189,6 +189,7 @@ def calculate_weather_edge(
     direction: str,
     kalshi_price_cents: int,
     threshold_high: float | None = None,
+    days_ahead: int = 1,
 ) -> dict:
     """
     Calculate edge on a Kalshi weather market using NWS data + bias correction.
@@ -211,18 +212,23 @@ def calculate_weather_edge(
     kalshi_price = kalshi_price_cents / 100.0
     math_chain = []
 
+    # Dynamic sigma: cap days_ahead at 3 so uncertainty doesn't grow unbounded
+    days_capped = min(days_ahead, 3)
+    sigma = 2.0 + 0.75 * (days_capped - 1)
+    math_chain.append(f"days_ahead={days_ahead} (capped={days_capped}) → sigma={sigma:.2f}°F")
+
     # Apply NWS warm bias correction
     corrected_temp = forecast_temp - NWS_BIAS_CORRECTION
     math_chain.append(f"NWS forecast: {forecast_temp}°F - {NWS_BIAS_CORRECTION}°F bias = {corrected_temp}°F corrected")
 
     # Normal distribution probability
     # P(actual > threshold) using corrected forecast as mean
-    z_score = (threshold - corrected_temp) / WEATHER_STD_DEV
+    z_score = (threshold - corrected_temp) / sigma
     # Using error function: CDF(z) = 0.5 * (1 + erf(z / sqrt(2)))
     p_below = 0.5 * (1.0 + math.erf(z_score / math.sqrt(2)))
     p_above = 1.0 - p_below
 
-    math_chain.append(f"Z-score: ({threshold} - {corrected_temp}) / {WEATHER_STD_DEV} = {z_score:.3f}")
+    math_chain.append(f"Z-score: ({threshold} - {corrected_temp}) / {sigma:.2f} = {z_score:.3f}")
     math_chain.append(f"P(above {threshold}°F): {p_above:.4f}")
     math_chain.append(f"P(below {threshold}°F): {p_below:.4f}")
 
@@ -241,7 +247,7 @@ def calculate_weather_edge(
                 "corrected_temp": corrected_temp, "p_above": p_above, "p_below": p_below,
             }
         # P(low <= temp < high) = CDF(high) - CDF(low)
-        z_high = (threshold_high - corrected_temp) / WEATHER_STD_DEV
+        z_high = (threshold_high - corrected_temp) / sigma
         p_below_high = 0.5 * (1.0 + math.erf(z_high / math.sqrt(2)))
         fair_value = p_below_high - p_below  # P(threshold <= temp < threshold_high)
         math_chain.append(
