@@ -98,20 +98,24 @@ _ETH_CACHE_TTL = 1800  # 30 min
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _get_json(url: str, timeout: int = 12) -> dict | list | None:
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-                "Accept": "application/json",
-            }
-        )
-        with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
-    except Exception as e:
-        print(f"  [SeriesHTTP] Error fetching {url[:80]}: {e}")
-        return None
+def _get_json(url: str, timeout: int = 12, max_retries: int = 3) -> dict | list | None:
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                    "Accept": "application/json",
+                }
+            )
+            with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            if attempt < max_retries - 1:
+                _time.sleep(2 ** attempt)  # 1s, 2s backoff
+            else:
+                print(f"  [SeriesHTTP] Error fetching {url[:80]}: {e}")
+    return None
 
 
 # ---------------------------------------------------------------------------

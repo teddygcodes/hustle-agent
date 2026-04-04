@@ -97,7 +97,8 @@ def test_get_json_retries_on_failure():
         raise urllib.error.URLError("connection reset")
 
     with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-         patch("time.sleep"):
+         patch("bot.kalshi_series._time") as mock_time:
+        mock_time.sleep = lambda _: None
         result = ks._get_json("http://example.com/test")
 
     assert result is None
