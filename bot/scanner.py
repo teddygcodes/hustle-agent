@@ -397,20 +397,30 @@ def scan_weather_markets() -> list[dict]:
                 continue
 
         # Get forecast temp for the market's resolution date.
-        # Kalshi next-day markets close on a different calendar date than today —
-        # we must match the NWS period to that specific date, not just take the
-        # first daytime period (which would be today's temp when it's still early).
+        # Parse the date from the TICKER (e.g. KXHIGHNY-26APR05-T67 → April 5, 2026)
+        # rather than from close_time in UTC — Kalshi weather markets close at ~11pm
+        # local time, so close_time in UTC crosses midnight and returns the WRONG date.
         forecast_temp = None
+        _MONTH_MAP = {
+            "JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+            "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12,
+        }
         try:
-            close_str_for_date = market.get("close_time") or market.get("expiration_time", "")
-            target_date = datetime.fromisoformat(
-                close_str_for_date.replace("Z", "+00:00")
-            ).date()
-            forecast_temp = _get_forecast_temp_for_date(forecasts[matched_city], target_date)
+            # Ticker format: KXHIGHNY-26APR05-T67
+            ticker_parts = ticker.split("-")
+            if len(ticker_parts) >= 2:
+                date_seg = ticker_parts[1]  # e.g. '26APR05'
+                m = re.match(r"(\d{2})([A-Z]{3})(\d{2})$", date_seg)
+                if m:
+                    yy, mon, dd = int(m.group(1)), m.group(2), int(m.group(3))
+                    target_date = datetime(
+                        2000 + yy, _MONTH_MAP.get(mon, 1), dd
+                    ).date()
+                    forecast_temp = _get_forecast_temp_for_date(forecasts[matched_city], target_date)
         except Exception:
             pass
 
-        # Fallback: first daytime period if date-targeted lookup failed
+        # Fallback: first daytime period if ticker-date lookup failed
         if forecast_temp is None:
             for period in forecasts[matched_city]["periods"]:
                 if "night" not in period.get("name", "").lower():

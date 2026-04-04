@@ -1,8 +1,13 @@
 """
 Economic Markets Scanner — CPI / Inflation
 
-Compares Cleveland Fed CPI Nowcast probability to Kalshi KXCPIYOY market prices.
-No auth required — Cleveland Fed nowcast is a free public API.
+Compares latest FRED CPI data to Kalshi KXCPIYOY market prices.
+
+Data source: FRED API (Federal Reserve Economic Data).
+Free key registration at https://fred.stlouisfed.org/docs/api/api_key.html
+Set key in config/fred.json: {"api_key": "YOUR_KEY_HERE"}
+
+If no key is configured, the scanner skips gracefully every cycle.
 """
 from __future__ import annotations
 
@@ -13,10 +18,11 @@ import ssl
 import time as _time
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from agent.kalshi_client import get_markets
-from bot.config import MIN_RELATIVE_EDGE
+from bot.config import MIN_RELATIVE_EDGE, CONFIG_DIR
 from bot.math_engine import _self_check_edge
 
 try:
@@ -32,13 +38,26 @@ ECON_SERIES_TICKERS = [
     "KXCPI",      # Monthly CPI
 ]
 
-# Cleveland Fed Inflation Nowcasting — free, no auth
-CLEVELAND_FED_NOWCAST_URL = (
-    "https://www.clevelandfed.org/api/inflation-nowcasting/nowcast"
-)
+# FRED API — free key required (register at fred.stlouisfed.org)
+# Series CPIAUCSL = CPI for All Urban Consumers (YoY % change computed below)
+FRED_BASE = "https://api.stlouisfed.org/fred"
+FRED_SERIES_CPI = "CPIAUCSL"
 
-_NOWCAST_CACHE: tuple[float, Optional[float]] | None = None
-_NOWCAST_CACHE_TTL = 3600  # 1 hour — nowcast updates infrequently
+_CPI_CACHE: tuple[float, Optional[float]] | None = None
+_CPI_CACHE_TTL = 3600  # 1 hour
+
+
+def _load_fred_key() -> Optional[str]:
+    """Load FRED API key from config/fred.json if present."""
+    try:
+        cfg_path = Path(CONFIG_DIR) / "fred.json"
+        if cfg_path.exists():
+            cfg = json.loads(cfg_path.read_text())
+            key = cfg.get("api_key", "").strip()
+            return key if key else None
+    except Exception:
+        pass
+    return None
 
 
 def _get_json(url: str, timeout: int = 12, max_retries: int = 3) -> dict | list | None:
@@ -60,38 +79,49 @@ def _get_json(url: str, timeout: int = 12, max_retries: int = 3) -> dict | list 
 
 def _get_cpi_nowcast() -> Optional[float]:
     """
-    Fetch Cleveland Fed CPI nowcast point estimate (percent YoY).
+    Fetch latest 12-month CPI inflation rate from FRED (CPIAUCSL).
 
-    Returns e.g. 3.2 meaning the nowcast predicts 3.2% CPI year-over-year.
-    Returns None if the API is unavailable.
+    Computes YoY % change from the two most recent monthly observations.
+    Returns the annualized rate as a float (e.g. 3.2 = 3.2% YoY).
+    Returns None if FRED key is missing or API is unavailable.
     """
-    global _NOWCAST_CACHE
-    if _NOWCAST_CACHE and (_time.monotonic() - _NOWCAST_CACHE[0]) < _NOWCAST_CACHE_TTL:
-        return _NOWCAST_CACHE[1]
+    global _CPI_CACHE
+    if _CPI_CACHE and (_time.monotonic() - _CPI_CACHE[0]) < _CPI_CACHE_TTL:
+        return _CPI_CACHE[1]
 
-    data = _get_json(CLEVELAND_FED_NOWCAST_URL)
-    if not data:
-        _NOWCAST_CACHE = (_time.monotonic(), None)
+    api_key = _load_fred_key()
+    if not api_key:
+        print("  [Econ] No FRED API key — register free at fred.stlouisfed.org/docs/api/api_key.html")
+        print("  [Econ] Save key to config/fred.json: {\"api_key\": \"YOUR_KEY\"}")
+        _CPI_CACHE = (_time.monotonic(), None)
+        return None
+
+    # Fetch last 13 months of CPIAUCSL to compute latest 12-month change
+    url = (
+        f"{FRED_BASE}/series/observations"
+        f"?series_id={FRED_SERIES_CPI}&api_key={api_key}"
+        f"&file_type=json&sort_order=desc&limit=13"
+    )
+    data = _get_json(url)
+    if not data or "observations" not in data:
+        _CPI_CACHE = (_time.monotonic(), None)
+        return None
+
+    obs = [o for o in data["observations"] if o.get("value", ".") != "."]
+    if len(obs) < 13:
+        _CPI_CACHE = (_time.monotonic(), None)
         return None
 
     try:
-        if isinstance(data, dict):
-            val = data.get("nowcast") or data.get("value") or data.get("estimate")
-            if val is not None:
-                result = float(val)
-                _NOWCAST_CACHE = (_time.monotonic(), result)
-                return result
-        if isinstance(data, list) and data:
-            val = data[0].get("nowcast") or data[0].get("value")
-            if val is not None:
-                result = float(val)
-                _NOWCAST_CACHE = (_time.monotonic(), result)
-                return result
-    except (KeyError, TypeError, ValueError):
-        pass
-
-    _NOWCAST_CACHE = (_time.monotonic(), None)
-    return None
+        latest = float(obs[0]["value"])
+        year_ago = float(obs[12]["value"])
+        yoy_pct = ((latest - year_ago) / year_ago) * 100.0
+        print(f"  [Econ] FRED CPI: latest={latest:.3f} year_ago={year_ago:.3f} YoY={yoy_pct:.2f}%")
+        _CPI_CACHE = (_time.monotonic(), yoy_pct)
+        return yoy_pct
+    except (ValueError, ZeroDivisionError):
+        _CPI_CACHE = (_time.monotonic(), None)
+        return None
 
 
 def _fetch_kalshi_econ_markets() -> list[dict]:

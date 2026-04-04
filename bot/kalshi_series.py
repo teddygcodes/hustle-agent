@@ -81,7 +81,7 @@ _BTC_VOL_CACHE: tuple[float, float] | None = None
 _BTC_VOL_CACHE_TTL = 1800  # 30 min
 
 # ETH constants and cache
-ETH_SERIES = "ETH"
+ETH_SERIES = "KXETHD"
 ETH_DAILY_VOL = 0.045   # fallback if CoinGecko unavailable
 COINGECKO_ETH_URL = f"{COINGECKO_BASE}/simple/price?ids=ethereum&vs_currencies=usd"
 COINGECKO_ETH_HISTORY_URL = (
