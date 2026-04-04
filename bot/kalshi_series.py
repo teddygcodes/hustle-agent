@@ -62,7 +62,7 @@ BTC_DAILY_VOL = 0.035   # fallback if CoinGecko is unavailable
 COINGECKO_BTC_URL = f"{COINGECKO_BASE}/simple/price?ids=bitcoin&vs_currencies=usd"
 COINGECKO_BTC_HISTORY_URL = (
     f"{COINGECKO_BASE}/coins/bitcoin/market_chart"
-    "?vs_currency=usd&days=1&interval=hourly"
+    "?vs_currency=usd&days=10&interval=daily"
 )
 
 # TTL cache for Odds API lookups — avoids burning the 500/month quota
@@ -86,7 +86,7 @@ ETH_DAILY_VOL = 0.045   # fallback if CoinGecko unavailable
 COINGECKO_ETH_URL = f"{COINGECKO_BASE}/simple/price?ids=ethereum&vs_currencies=usd"
 COINGECKO_ETH_HISTORY_URL = (
     f"{COINGECKO_BASE}/coins/ethereum/market_chart"
-    "?vs_currency=usd&days=1&interval=hourly"
+    "?vs_currency=usd&days=10&interval=daily"
 )
 
 _ETH_VOL_CACHE: tuple[float, float] | None = None
@@ -619,7 +619,7 @@ def scan_sports_series(sport: str) -> list[dict]:
 
 def _get_btc_realized_vol() -> float:
     """
-    Compute 24h realized daily volatility from CoinGecko hourly prices.
+    Compute 10-day realized daily volatility from CoinGecko daily closes.
     Returns daily vol (not annualized). Falls back to BTC_DAILY_VOL on any error.
     """
     global _BTC_VOL_CACHE
@@ -635,12 +635,13 @@ def _get_btc_realized_vol() -> float:
         return BTC_DAILY_VOL
 
     log_returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
-    hourly_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
-    daily_vol = math.sqrt(hourly_variance * 24)
-    # Floor at 1%, ceiling at 12%
+    # Each return is already a daily return — variance is daily directly
+    daily_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
+    daily_vol = math.sqrt(daily_variance)
+    # Floor at 1%, ceiling at 12% — 10-day daily window
     daily_vol = max(0.01, min(0.12, daily_vol))
 
-    print(f"  [Series/BTC] Realized 24h vol: {daily_vol:.2%} (from {len(prices)} hourly prices)")
+    print(f"  [Series/BTC] Realized 10d vol: {daily_vol:.2%} (from {len(prices)} daily closes)")
     _BTC_VOL_CACHE = (_time.monotonic(), daily_vol)
     return daily_vol
 
@@ -657,7 +658,7 @@ def _get_btc_spot() -> float | None:
 
 
 def _get_eth_realized_vol() -> float:
-    """Compute 24h realized daily volatility for ETH from CoinGecko hourly prices."""
+    """Compute 10-day realized daily volatility for ETH from CoinGecko daily closes."""
     global _ETH_VOL_CACHE
     if _ETH_VOL_CACHE and (_time.monotonic() - _ETH_VOL_CACHE[0]) < _ETH_CACHE_TTL:
         return _ETH_VOL_CACHE[1]
@@ -668,10 +669,11 @@ def _get_eth_realized_vol() -> float:
     if len(prices) < 4:
         return ETH_DAILY_VOL
     log_returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
-    hourly_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
-    daily_vol = math.sqrt(hourly_variance * 24)
-    daily_vol = max(0.01, min(0.15, daily_vol))
-    print(f"  [Series/ETH] Realized 24h vol: {daily_vol:.2%}")
+    # Each return is already a daily return — variance is daily directly
+    daily_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
+    daily_vol = math.sqrt(daily_variance)
+    daily_vol = max(0.01, min(0.15, daily_vol))  # 1%-15%, 10-day daily window
+    print(f"  [Series/ETH] Realized 10d vol: {daily_vol:.2%}")
     _ETH_VOL_CACHE = (_time.monotonic(), daily_vol)
     return daily_vol
 
