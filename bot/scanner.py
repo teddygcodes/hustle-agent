@@ -16,6 +16,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+from collections import defaultdict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -32,7 +33,7 @@ from bot.config import (
     ACTIVE_STRATEGIES, WEATHER_MIN_HOURS_TO_CLOSE,
 )
 from bot.math_engine import calculate_parlay_edge, calculate_weather_edge, calculate_vig_stack, _self_check_edge
-from bot.kalshi_series import scan_series_markets, _ODDS_API_GAME_MAP as _SERIES_GAME_MAP
+from bot.kalshi_series import scan_series_markets
 import bot.kalshi_series as _kalshi_series_mod
 
 
@@ -255,7 +256,7 @@ def _apply_home_away_modifier(opp: dict) -> dict:
     else:
         opp["confidence"] = opp.get("confidence", 0.5) - 0.03
         opp.setdefault("warnings", []).append("home_away: away team -0.03 confidence")
-        if game_data.get("is_b2b"):
+        if opp.get("b2b"):
             opp["confidence"] = opp["confidence"] - 0.05
             opp.setdefault("warnings", []).append("home_away: away B2B -0.05 confidence")
 
@@ -278,7 +279,6 @@ def _cap_correlated_vig_stack(vig_stack_opps: list[dict]) -> list[dict]:
         return vig_stack_opps
 
     # Group by series prefix (everything before the first '-')
-    from collections import defaultdict
     groups: dict[str, list[int]] = defaultdict(list)
     for idx, opp in enumerate(vig_stack_opps):
         ticker = opp.get("ticker", "")

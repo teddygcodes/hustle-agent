@@ -304,7 +304,7 @@ def test_away_b2b_stacks_penalty():
     from bot.scanner import _apply_home_away_modifier
     from bot import kalshi_series
     kalshi_series._ODDS_API_GAME_MAP["nba"] = {
-        "celtics": {"home_team": "lakers", "away_team": "celtics", "is_b2b": True}
+        "celtics": {"home_team": "lakers", "away_team": "celtics"}
     }
     opp = {
         "ticker": "KXNBAGAME-26APR05LAKCEL-CEL",
@@ -312,6 +312,7 @@ def test_away_b2b_stacks_penalty():
         "confidence": 0.70,
         "team": "celtics",
         "sport": "nba",
+        "b2b": True,
     }
     result = _apply_home_away_modifier(opp)
     assert abs(result["confidence"] - 0.62) < 0.001
