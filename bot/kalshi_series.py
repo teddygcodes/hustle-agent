@@ -80,6 +80,19 @@ _ODDS_API_GAME_MAP_CACHE: dict[str, tuple[float, dict[str, dict]]] = {}
 _BTC_VOL_CACHE: tuple[float, float] | None = None
 _BTC_VOL_CACHE_TTL = 1800  # 30 min
 
+# ETH constants and cache
+ETH_SERIES = "ETH"
+ETH_DAILY_VOL = 0.045   # fallback if CoinGecko unavailable
+COINGECKO_ETH_URL = f"{COINGECKO_BASE}/simple/price?ids=ethereum&vs_currencies=usd"
+COINGECKO_ETH_HISTORY_URL = (
+    f"{COINGECKO_BASE}/coins/ethereum/market_chart"
+    "?vs_currency=usd&days=1&interval=hourly"
+)
+
+_ETH_VOL_CACHE: tuple[float, float] | None = None
+_ETH_SPOT_CACHE: tuple[float, float] | None = None
+_ETH_CACHE_TTL = 1800  # 30 min
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -643,6 +656,42 @@ def _get_btc_spot() -> float | None:
         return None
 
 
+def _get_eth_realized_vol() -> float:
+    """Compute 24h realized daily volatility for ETH from CoinGecko hourly prices."""
+    global _ETH_VOL_CACHE
+    if _ETH_VOL_CACHE and (_time.monotonic() - _ETH_VOL_CACHE[0]) < _ETH_CACHE_TTL:
+        return _ETH_VOL_CACHE[1]
+    data = _get_json(COINGECKO_ETH_HISTORY_URL)
+    if not data:
+        return ETH_DAILY_VOL
+    prices = [p[1] for p in data.get("prices", []) if len(p) == 2]
+    if len(prices) < 4:
+        return ETH_DAILY_VOL
+    log_returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
+    hourly_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
+    daily_vol = math.sqrt(hourly_variance * 24)
+    daily_vol = max(0.01, min(0.15, daily_vol))
+    print(f"  [Series/ETH] Realized 24h vol: {daily_vol:.2%}")
+    _ETH_VOL_CACHE = (_time.monotonic(), daily_vol)
+    return daily_vol
+
+
+def _get_eth_spot() -> float | None:
+    """Fetch ETH/USD spot price from CoinGecko."""
+    global _ETH_SPOT_CACHE
+    if _ETH_SPOT_CACHE and (_time.monotonic() - _ETH_SPOT_CACHE[0]) < _ETH_CACHE_TTL:
+        return _ETH_SPOT_CACHE[1]
+    data = _get_json(COINGECKO_ETH_URL)
+    if not data:
+        return None
+    try:
+        price = float(data["ethereum"]["usd"])
+        _ETH_SPOT_CACHE = (_time.monotonic(), price)
+        return price
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _btc_normal_prob(spot: float, threshold: float, hours_remaining: float) -> float:
     """
     P(BTC_close > threshold) using log-normal approximation.
@@ -902,6 +951,110 @@ def scan_ipl_series() -> list[dict]:
     return opportunities
 
 
+def scan_ethereum_series() -> list[dict]:
+    """
+    Scan ETH series for edges vs CoinGecko spot price.
+
+    Uses log-normal probability model (same as BTC scanner) to compute
+    P(ETH_close > threshold). ETH resolves at 21:00 UTC daily.
+    Returns list of opportunity dicts with type='eth_price_edge'.
+    """
+    markets = _fetch_series_markets(ETH_SERIES)
+    if not markets:
+        print(f"  [Series/ETH] No open markets for {ETH_SERIES}")
+        return []
+
+    spot = _get_eth_spot()
+    if not spot:
+        print(f"  [Series/ETH] Could not fetch ETH spot price")
+        return []
+
+    now_utc = datetime.now(timezone.utc)
+    resolve_today = now_utc.replace(hour=21, minute=0, second=0, microsecond=0)
+    hours_remaining = (resolve_today - now_utc).total_seconds() / 3600.0
+
+    if hours_remaining < 0:
+        print(f"  [Series/ETH] All today's markets already resolved (past 21:00 UTC)")
+        return []
+
+    vol = _get_eth_realized_vol()
+    print(
+        f"  [Series/ETH] {len(markets)} open markets | "
+        f"spot=${spot:,.0f} | vol={vol:.2%} | hours_remaining={hours_remaining:.1f}h"
+    )
+
+    today_str = now_utc.strftime("%y%b%d").upper()
+
+    opportunities = []
+    for market in markets:
+        ticker = market.get("ticker", "")
+        title = market.get("title", "")
+        yes_ask = market.get("yes_ask")
+        if not yes_ask or yes_ask <= 0:
+            continue
+
+        if today_str not in ticker:
+            continue
+
+        # Extract threshold: ETHUSD-26APR0421-T1800 → 1800
+        threshold = None
+        for part in ticker.split("-"):
+            if part.startswith("T") and part[1:].isdigit():
+                threshold = float(part[1:])
+                break
+        if threshold is None:
+            continue
+
+        scaled_vol = vol * math.sqrt(hours_remaining / 24.0)
+        log_ratio = math.log(spot / threshold)
+        z = log_ratio / scaled_vol if scaled_vol > 0 else 0.0
+        fair_value = 0.5 * math.erfc(-z / math.sqrt(2))
+
+        kalshi_price = yes_ask / 100.0
+        edge = fair_value - kalshi_price
+        relative_edge = edge / kalshi_price if kalshi_price > 0 else 0.0
+
+        check_ok, check_msg = _self_check_edge(fair_value, kalshi_price, edge)
+        if not check_ok:
+            continue
+
+        if kalshi_price <= 0.03 or fair_value <= 0.03:
+            continue
+
+        if abs(relative_edge) < MIN_RELATIVE_EDGE:
+            continue
+
+        opportunities.append({
+            "type": "eth_price_edge",
+            "ticker": ticker,
+            "title": title,
+            "market": market,
+            "edge": round(edge, 4),
+            "relative_edge": round(relative_edge, 4),
+            "confidence": 0.68,
+            "recommended_side": "yes" if edge > 0 else "no",
+            "eth_spot": round(spot, 0),
+            "threshold": threshold,
+            "fair_value": round(fair_value, 4),
+            "kalshi_price": round(kalshi_price, 4),
+            "hours_remaining": round(hours_remaining, 2),
+            "realized_vol": round(vol, 4),
+            "edge_result": {
+                "fair_value": round(fair_value, 4),
+                "kalshi_price": round(kalshi_price, 4),
+                "edge": round(edge, 4),
+                "relative_edge": round(relative_edge, 4),
+                "confidence": 0.68,
+                "self_check_passed": True,
+                "math_chain": [check_msg],
+                "warnings": [],
+            },
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
+        })
+
+    return opportunities
+
+
 # ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
@@ -941,5 +1094,9 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     ipl_opps = scan_ipl_series()
     print(f"  [Series/IPL] Found {len(ipl_opps)} opportunities")
     all_opps.extend(ipl_opps)
+
+    eth_opps = scan_ethereum_series()
+    print(f"  [Series/ETH] Found {len(eth_opps)} opportunities")
+    all_opps.extend(eth_opps)
 
     return all_opps

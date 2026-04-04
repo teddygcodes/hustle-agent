@@ -81,6 +81,7 @@ def test_scan_series_markets_calls_ipl():
 
     with patch.object(ks, "scan_sports_series", return_value=[]), \
          patch.object(ks, "scan_bitcoin_series", return_value=[]), \
+         patch.object(ks, "scan_ethereum_series", return_value=[]), \
          patch.object(ks, "scan_ipl_series", return_value=[{"type": "ipl_game_edge"}]) as mock_ipl:
         result = ks.scan_series_markets()
 
@@ -91,3 +92,18 @@ def test_scan_series_markets_calls_ipl():
 def test_ipl_in_active_strategies():
     from bot.config import ACTIVE_STRATEGIES
     assert "ipl_game_edge" in ACTIVE_STRATEGIES
+
+
+def test_scan_ethereum_series_no_markets_returns_empty():
+    from unittest.mock import patch
+    from bot.kalshi_series import scan_ethereum_series
+
+    with patch("bot.kalshi_series._fetch_series_markets", return_value=[]):
+        result = scan_ethereum_series()
+
+    assert result == []
+
+
+def test_eth_in_active_strategies():
+    from bot.config import ACTIVE_STRATEGIES
+    assert "eth_price_edge" in ACTIVE_STRATEGIES

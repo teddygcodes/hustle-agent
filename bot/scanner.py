@@ -1217,12 +1217,12 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
 
     # Scan Kalshi series tickers (individual game markets + BTC)
     # Only run if these types are in ACTIVE_STRATEGIES
-    if any(s in ACTIVE_STRATEGIES for s in ("series_game_edge", "btc_price_edge", "ipl_game_edge")):
+    if any(s in ACTIVE_STRATEGIES for s in ("series_game_edge", "btc_price_edge", "ipl_game_edge", "eth_price_edge")):
         print(f"\n  [SERIES] Scanning Kalshi series markets...")
         series_opps = scan_series_markets()
         for opp in series_opps:
             opp_type = opp.get("type", "")
-            if opp_type in ("series_game_edge", "btc_price_edge", "ipl_game_edge"):
+            if opp_type in ("series_game_edge", "btc_price_edge", "ipl_game_edge", "eth_price_edge"):
                 opp["confidence"] = _get_dynamic_confidence(opp_type, opp.get("confidence", 0.75))
         all_opportunities.extend(series_opps)
         print(f"  [SERIES] Found {len(series_opps)} total series opportunities")
