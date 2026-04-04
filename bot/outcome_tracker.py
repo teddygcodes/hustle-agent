@@ -6,11 +6,12 @@ and records wins/losses. After 50+ samples per strategy, flags underperformers.
 """
 from __future__ import annotations
 
-import json
+import logging
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
+
+logger = logging.getLogger("nexus.outcome_tracker")
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "state", "outcomes.db")
 
@@ -157,8 +158,8 @@ class OutcomeTracker:
                 if result in ("yes", "no"):
                     self.record_resolution(alert["id"], result)
                     resolved_count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Resolution failed for %s: %s", alert['ticker'], e)
         return resolved_count
 
     def print_calibration_summary(self):
