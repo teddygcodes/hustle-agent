@@ -107,3 +107,69 @@ def test_calibration_flags_underperforming_strategy():
         assert report["series_game_edge"]["flagged"] is True
     finally:
         os.unlink(db_path)
+
+
+# ── Task 2: Price Monitor ─────────────────────────────────────────────────────
+
+def test_price_cache_stores_and_retrieves():
+    """PriceMonitor stores a price and retrieves it on next call."""
+    import tempfile, json
+    from bot.price_monitor import PriceMonitor
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json.dump({}, f)
+        cache_path = f.name
+    try:
+        monitor = PriceMonitor(cache_path=cache_path)
+        monitor.update("KXTEST-T67", yes_ask=27)
+        cached = monitor.get_cached("KXTEST-T67")
+        assert cached is not None
+        assert cached["yes_ask"] == 27
+    finally:
+        os.unlink(cache_path)
+
+
+def test_price_moving_against_yes_adds_warning():
+    """BUY YES: price rising >5¢ since last scan adds warning and reduces confidence."""
+    import tempfile, json
+    from bot.price_monitor import PriceMonitor
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json.dump({}, f)
+        cache_path = f.name
+    try:
+        monitor = PriceMonitor(cache_path=cache_path)
+        # Previously priced at 14¢, now at 20¢ — market correcting against BUY YES
+        monitor.update("KXTEST-SAC", yes_ask=14)
+        opp = {
+            "ticker": "KXTEST-SAC",
+            "recommended_side": "yes",
+            "confidence": 0.70,
+            "warnings": [],
+        }
+        result = monitor.annotate(opp, current_yes_ask=20)
+        assert any("moving against" in w.lower() for w in result["warnings"])
+        assert result["confidence"] < 0.70
+    finally:
+        os.unlink(cache_path)
+
+
+def test_price_small_movement_no_penalty():
+    """Price movement <=3¢ against position produces no warning."""
+    import tempfile, json
+    from bot.price_monitor import PriceMonitor
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        json.dump({}, f)
+        cache_path = f.name
+    try:
+        monitor = PriceMonitor(cache_path=cache_path)
+        monitor.update("KXTEST-SMALL", yes_ask=14)
+        opp = {
+            "ticker": "KXTEST-SMALL",
+            "recommended_side": "yes",
+            "confidence": 0.70,
+            "warnings": [],
+        }
+        result = monitor.annotate(opp, current_yes_ask=16)  # only 2¢ rise
+        assert result["warnings"] == []
+        assert result["confidence"] == 0.70
+    finally:
+        os.unlink(cache_path)
