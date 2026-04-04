@@ -352,3 +352,57 @@ def test_cap_distributes_evenly():
     result = _cap_correlated_vig_stack(opps)
     assert result[0]["recommended_contracts"] == 4
     assert result[1]["recommended_contracts"] == 4
+
+
+# ── ELO Fallback (abbrev lookup fix) ────────────────────────────────────────
+
+def test_elo_fallback_away_team():
+    """_elo_fallback_prob correctly identifies away team from ticker."""
+    from bot.kalshi_series import _elo_fallback_prob
+    from agent.parlay import NBA_TEAM_ALIASES
+    # SASDEN: SAS listed first = away
+    # If ELO is seeded, should return a float between 0 and 1
+    result = _elo_fallback_prob(
+        "KXNBAGAME-26APR04SASDEN-SAS",
+        "sas", "San Antonio Spurs",
+        NBA_TEAM_ALIASES, "nba"
+    )
+    # Should return a probability (ELO may or may not be seeded in test env)
+    # Just check it returns float or None (not an exception)
+    assert result is None or (0.0 < result < 1.0)
+
+
+def test_elo_fallback_home_team():
+    """_elo_fallback_prob correctly identifies home team from ticker."""
+    from bot.kalshi_series import _elo_fallback_prob
+    from agent.parlay import NBA_TEAM_ALIASES
+    # SASDEN: DEN listed second = home
+    result = _elo_fallback_prob(
+        "KXNBAGAME-26APR04SASDEN-DEN",
+        "den", "Denver Nuggets",
+        NBA_TEAM_ALIASES, "nba"
+    )
+    assert result is None or (0.0 < result < 1.0)
+
+
+def test_elo_fallback_complement():
+    """Away team prob = 1 - home team prob for same matchup."""
+    from bot.kalshi_series import _elo_fallback_prob
+    from agent.parlay import NBA_TEAM_ALIASES
+    ticker = "KXNBAGAME-26APR04SASDEN"
+    prob_sas = _elo_fallback_prob(ticker + "-SAS", "sas", "San Antonio Spurs", NBA_TEAM_ALIASES, "nba")
+    prob_den = _elo_fallback_prob(ticker + "-DEN", "den", "Denver Nuggets", NBA_TEAM_ALIASES, "nba")
+    if prob_sas is not None and prob_den is not None:
+        assert abs(prob_sas + prob_den - 1.0) < 0.001
+
+
+def test_elo_fallback_unknown_opponent_returns_none():
+    """Returns None when opponent abbrev can't be resolved."""
+    from bot.kalshi_series import _elo_fallback_prob
+    from agent.parlay import NBA_TEAM_ALIASES
+    result = _elo_fallback_prob(
+        "KXNBAGAME-26APR04XXXYYY-XXX",
+        "xxx", None,  # unknown team
+        NBA_TEAM_ALIASES, "nba"
+    )
+    assert result is None

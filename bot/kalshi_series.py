@@ -95,6 +95,66 @@ _ETH_CACHE_TTL = 1800  # 30 min
 
 
 # ---------------------------------------------------------------------------
+# ELO fallback helper
+# ---------------------------------------------------------------------------
+
+def _elo_fallback_prob(
+    ticker: str,
+    abbrev: str,
+    canonical: str | None,
+    alias_dict: dict,
+    sport: str,
+) -> float | None:
+    """
+    Use Elo ratings as fallback probability when no bookmaker odds are available.
+    Parses the opponent's abbreviation from the ticker's middle segment.
+    Convention: away team abbreviation listed first in the ticker, then home team.
+    Returns P(our team wins) or None if Elo can't compute.
+    """
+    import re as _re
+    if not canonical:
+        return None
+    try:
+        parts = ticker.split("-")
+        if len(parts) < 3:
+            return None
+        date_seg = parts[1]  # e.g. "26APR04SASDEN" or "26APR041410TORCWS"
+        m = _re.match(r"\d{2}[A-Z]{3}\d{2}(?:\d{4})?([A-Z]+)", date_seg)
+        if not m:
+            return None
+        teams_part = m.group(1)  # e.g. "SASDEN"
+        abbrev_upper = abbrev.upper()
+
+        if teams_part.startswith(abbrev_upper):
+            # Our team is listed first = AWAY
+            opp_abbrev = teams_part[len(abbrev_upper):]
+            is_home = False
+        elif teams_part.endswith(abbrev_upper):
+            # Our team is listed second = HOME
+            opp_abbrev = teams_part[:-len(abbrev_upper)]
+            is_home = True
+        else:
+            return None
+
+        if not opp_abbrev:
+            return None
+        opp_canonical = alias_dict.get(opp_abbrev.lower())
+        if not opp_canonical:
+            return None
+
+        from bot.elo import get_elo_prob as _get_elo_prob
+        home_name = canonical if is_home else opp_canonical
+        away_name = opp_canonical if is_home else canonical
+        elo_raw = _get_elo_prob(home_name, away_name, sport)
+        if elo_raw is None:
+            return None
+        prob = elo_raw if is_home else (1.0 - elo_raw)
+        return round(prob, 4)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
@@ -448,11 +508,16 @@ def scan_sports_series(sport: str) -> list[dict]:
                 prob_source = "bovada" if abbrev in bovada_lookup else "odds_api"
 
         if prob is None or prob <= 0:
-            print(
-                f"    [Series/{sport.upper()}] SKIP {ticker}: "
-                f"no match for abbrev={abbrev!r} canonical={canonical!r} source=none"
-            )
-            continue
+            # ELO fallback: parse opponent from ticker, use Elo win probability
+            prob = _elo_fallback_prob(ticker, abbrev, canonical, alias_dict, sport)
+            if prob is not None:
+                prob_source = "elo_fallback"
+            else:
+                print(
+                    f"    [Series/{sport.upper()}] SKIP {ticker}: "
+                    f"no match for abbrev={abbrev!r} canonical={canonical!r} source=none"
+                )
+                continue
 
         # Fix #5: Time-to-game edge requirement — distant games need a larger edge
         # because the odds are less reliable (more uncertainty, less sharp money).
@@ -539,6 +604,9 @@ def scan_sports_series(sport: str) -> list[dict]:
             confidence = 0.65
         elif hours_to_game > 48:
             confidence = 0.72
+
+        if prob_source == "elo_fallback":
+            confidence = min(confidence, 0.65)  # Elo is less sharp than bookmaker lines
 
         # Elo cross-check: boost confidence when Elo agrees with books, cut when it disagrees
         elo_prob = None
@@ -896,15 +964,20 @@ def scan_ipl_series() -> list[dict]:
             or odds_lookup.get(canonical.split()[-1].lower())
             or odds_lookup.get(canonical.split()[0].lower())
         )
+        prob_source = "odds_api"
         if prob is None or prob <= 0:
-            print(
-                f"    [Series/IPL] SKIP {ticker}: "
-                f"no odds match for canonical={canonical!r} "
-                f"(tried: {canonical.lower()!r}, "
-                f"{canonical.split()[-1].lower()!r}, "
-                f"{canonical.split()[0].lower()!r})"
-            )
-            continue
+            prob = _elo_fallback_prob(ticker, abbrev, canonical, IPL_TEAM_ALIASES, "ipl")
+            if prob is not None:
+                prob_source = "elo_fallback"
+            else:
+                print(
+                    f"    [Series/IPL] SKIP {ticker}: "
+                    f"no odds match for canonical={canonical!r} "
+                    f"(tried: {canonical.lower()!r}, "
+                    f"{canonical.split()[-1].lower()!r}, "
+                    f"{canonical.split()[0].lower()!r})"
+                )
+                continue
 
         hours_to_game = 0.0
         game_dt = None
@@ -958,6 +1031,9 @@ def scan_ipl_series() -> list[dict]:
             confidence = 0.60
         elif hours_to_game > 48:
             confidence = 0.68
+
+        if prob_source == "elo_fallback":
+            confidence = min(confidence, 0.65)  # Elo is less sharp than bookmaker lines
 
         game_date_str = game_dt.strftime("%a %b") + f" {game_dt.day}" if game_dt else None
 
