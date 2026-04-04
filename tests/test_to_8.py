@@ -386,14 +386,29 @@ def test_elo_fallback_home_team():
 
 
 def test_elo_fallback_complement():
-    """Away team prob = 1 - home team prob for same matchup."""
+    """Away team prob + home team prob = 1.0 for same matchup (ELO complement property)."""
+    from unittest.mock import patch
     from bot.kalshi_series import _elo_fallback_prob
     from agent.parlay import NBA_TEAM_ALIASES
-    ticker = "KXNBAGAME-26APR04SASDEN"
-    prob_sas = _elo_fallback_prob(ticker + "-SAS", "sas", "San Antonio Spurs", NBA_TEAM_ALIASES, "nba")
-    prob_den = _elo_fallback_prob(ticker + "-DEN", "den", "Denver Nuggets", NBA_TEAM_ALIASES, "nba")
-    if prob_sas is not None and prob_den is not None:
-        assert abs(prob_sas + prob_den - 1.0) < 0.001
+
+    # Mock get_elo_prob to return a known value: P(Denver wins) = 0.58
+    with patch("bot.elo.get_elo_prob", return_value=0.58) as mock_elo:
+        # SAS is away (listed first in SASDEN) → prob_sas = 1 - 0.58 = 0.42
+        prob_sas = _elo_fallback_prob(
+            "KXNBAGAME-26APR04SASDEN-SAS", "sas", "San Antonio Spurs",
+            NBA_TEAM_ALIASES, "nba"
+        )
+        # DEN is home (listed second in SASDEN) → prob_den = 0.58
+        prob_den = _elo_fallback_prob(
+            "KXNBAGAME-26APR04SASDEN-DEN", "den", "Denver Nuggets",
+            NBA_TEAM_ALIASES, "nba"
+        )
+
+    assert prob_sas is not None
+    assert prob_den is not None
+    assert abs(prob_sas + prob_den - 1.0) < 0.001
+    assert abs(prob_den - 0.58) < 0.001   # home team = ELO raw value
+    assert abs(prob_sas - 0.42) < 0.001   # away team = 1 - ELO raw value
 
 
 def test_elo_fallback_unknown_opponent_returns_none():
