@@ -12,4 +12,3 @@ __pycache__/
 .DS_Store
 tools/
 output/
-{agent,state,config,ui,tools}/

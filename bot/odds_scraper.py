@@ -36,6 +36,7 @@ from bot.config import (
     BOVADA_BASE, BOVADA_SPORT_PATHS,
     FANDUEL_BASE, FANDUEL_AK, FANDUEL_SPORT_IDS,
     THERUNDOWN_API_KEY, THERUNDOWN_BASE, THERUNDOWN_SPORT_IDS,
+    ODDS_API_MONTHLY_LIMIT,
 )
 
 logger = logging.getLogger("glint.odds_scraper")
@@ -68,6 +69,41 @@ def _cache_set(sport: str, data: dict, has_live: bool = False):
         "fetched_at": time.time(),
         "has_live": has_live,
     }
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — transient failure tracking per data source
+# ---------------------------------------------------------------------------
+
+_SOURCE_FAILURES: dict[str, int] = {}    # source → consecutive failure count
+_SOURCE_COOLDOWN: dict[str, float] = {}  # source → monotonic timestamp of cooldown start
+_CB_THRESHOLD = 3        # consecutive failures before cooldown
+_CB_COOLDOWN_SECS = 300  # 5 minutes
+
+
+def _cb_record_failure(source: str) -> None:
+    _SOURCE_FAILURES[source] = _SOURCE_FAILURES.get(source, 0) + 1
+    if _SOURCE_FAILURES[source] >= _CB_THRESHOLD:
+        _SOURCE_COOLDOWN[source] = time.monotonic()
+        logger.warning("Circuit breaker OPEN: %s — pausing %ds after %d failures",
+                       source, _CB_COOLDOWN_SECS, _CB_THRESHOLD)
+
+
+def _cb_record_success(source: str) -> None:
+    _SOURCE_FAILURES.pop(source, None)
+    _SOURCE_COOLDOWN.pop(source, None)
+
+
+def _cb_is_open(source: str) -> bool:
+    ts = _SOURCE_COOLDOWN.get(source)
+    if ts is None:
+        return False
+    if time.monotonic() - ts >= _CB_COOLDOWN_SECS:
+        _SOURCE_COOLDOWN.pop(source, None)
+        _SOURCE_FAILURES.pop(source, None)
+        logger.info("Circuit breaker CLOSED: %s — resuming", source)
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +171,7 @@ _DK_DISABLED = False  # Set True after first 403 — skip all DK calls this sess
 def _dk_get(url: str, timeout: int = 5) -> dict | None:
     """Fetch JSON from DraftKings public sportsbook API."""
     global _DK_DISABLED
-    if _DK_DISABLED:
+    if _DK_DISABLED or _cb_is_open("draftkings"):
         return None
     try:
         ctx = ssl.create_default_context(cafile=certifi.where())
@@ -154,16 +190,19 @@ def _dk_get(url: str, timeout: int = 5) -> dict | None:
             },
         )
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
+            _cb_record_success("draftkings")
+            return data
     except urllib.error.HTTPError as e:
         if e.code == 403:
             _DK_DISABLED = True
             logger.warning("DK 403 Forbidden — Akamai WAF blocking this IP. DraftKings disabled for this session.")
         else:
+            _cb_record_failure("draftkings")
             logger.warning("DraftKings API error (%s): %s", url[:80], e)
         return None
     except Exception as e:
-        _DK_DISABLED = True  # Any failure (timeout, connection error) disables DK for this session
+        _cb_record_failure("draftkings")
         logger.warning(f"DraftKings API error ({url[:80]}): {e}")
         return None
 
@@ -406,6 +445,8 @@ def fetch_draftkings_odds(sport: str) -> dict:
 
 def _bovada_get(url: str, timeout: int = 12) -> list | None:
     """Fetch JSON from Bovada public events API. Returns list or None."""
+    if _cb_is_open("bovada"):
+        return None
     try:
         ctx = ssl.create_default_context(cafile=certifi.where())
         req = urllib.request.Request(
@@ -416,8 +457,11 @@ def _bovada_get(url: str, timeout: int = 12) -> list | None:
             },
         )
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
+            _cb_record_success("bovada")
+            return data
     except Exception as e:
+        _cb_record_failure("bovada")
         logger.warning(f"Bovada API error ({url[:80]}): {e}")
         return None
 
@@ -606,7 +650,7 @@ _FD_DISABLED = False
 def _fd_get(url: str, timeout: int = 8) -> dict | None:
     """Fetch JSON from FanDuel's public sportsbook frontend API."""
     global _FD_DISABLED
-    if _FD_DISABLED:
+    if _FD_DISABLED or _cb_is_open("fanduel"):
         return None
     try:
         ctx = ssl.create_default_context(cafile=certifi.where())
@@ -623,15 +667,19 @@ def _fd_get(url: str, timeout: int = 8) -> dict | None:
             },
         )
         with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
+            _cb_record_success("fanduel")
+            return data
     except urllib.error.HTTPError as e:
         if e.code in (403, 401):
             _FD_DISABLED = True
             logger.warning("FD %d — FanDuel API blocked. Disabled for this session.", e.code)
         else:
+            _cb_record_failure("fanduel")
             logger.warning("FanDuel API error (%s): %s", url[:80], e)
         return None
     except Exception as e:
+        _cb_record_failure("fanduel")
         logger.warning(f"FanDuel API error ({url[:80]}): {e}")
         return None
 
@@ -1077,6 +1125,17 @@ def _increment_odds_api_count(n: int = 1):
 def _odds_api_fallback(sport: str) -> dict:
     """Fall back to The Odds API. Tracks usage."""
     try:
+        if BOT_STATE_FILE.exists():
+            _s = json.loads(BOT_STATE_FILE.read_text())
+            _used = _s.get("odds_api_requests_this_month", 0)
+            if _used >= ODDS_API_MONTHLY_LIMIT:
+                logger.warning("Odds API quota exhausted (%d/%d) — skipping", _used, ODDS_API_MONTHLY_LIMIT)
+                return {"error": "quota_exhausted", "games": []}
+            if _used >= int(ODDS_API_MONTHLY_LIMIT * 0.9):
+                logger.warning("Odds API at 90%% quota (%d/%d)", _used, ODDS_API_MONTHLY_LIMIT)
+    except Exception:
+        pass
+    try:
         from agent.sports_data import get_odds
         logger.info(f"Falling back to The Odds API for {sport}")
         result = get_odds(sport)
@@ -1264,3 +1323,44 @@ def fetch_consensus_odds(sport: str) -> dict:
         logger.info("ODDS Odds API returned %d games with odds", len(games_with_odds))
         _cache_set(sport, result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# DK/FD disabled-flag persistence (survive bot restarts)
+# ---------------------------------------------------------------------------
+
+def load_source_flags(state: dict) -> None:
+    """Restore DK/FD disabled flags from saved bot_state. Call on startup."""
+    global _DK_DISABLED, _FD_DISABLED
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).timestamp()
+
+    dk_until = state.get("dk_disabled_until", 0)
+    if dk_until and now < dk_until:
+        _DK_DISABLED = True
+        logger.info("DraftKings still blocked (%.0f min remaining) — skipping DK this session",
+                    (dk_until - now) / 60)
+    else:
+        _DK_DISABLED = False
+
+    fd_until = state.get("fd_disabled_until", 0)
+    if fd_until and now < fd_until:
+        _FD_DISABLED = True
+        logger.info("FanDuel still blocked (%.0f min remaining) — skipping FD this session",
+                    (fd_until - now) / 60)
+    else:
+        _FD_DISABLED = False
+
+
+def get_source_flags() -> dict:
+    """Return current DK/FD disabled state for persistence in bot_state.json."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).timestamp()
+    ttl = 12 * 3600  # 12-hour WAF rotation window
+    return {
+        "dk_disabled": _DK_DISABLED,
+        "dk_disabled_until": (now + ttl) if _DK_DISABLED else 0,
+        "fd_disabled": _FD_DISABLED,
+        "fd_disabled_until": (now + ttl) if _FD_DISABLED else 0,
+    }

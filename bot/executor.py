@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -24,28 +25,19 @@ from bot.config import (
     MAX_POSITION_PERCENT, MAX_TOTAL_EXPOSURE, MIN_RELATIVE_EDGE,
     POSITIONS_FILE, TRADE_HISTORY_FILE, BOT_STATE_FILE,
     TRAILING_STOP_MIN_HOLD, PAPER_MODE, MAX_PRICE_MOVE_CENTS,
+    PAPER_TRADES_FILE, PAPER_STARTING_BALANCE,
 )
+
+_PAPER_TYPE_MAP = {
+    "vig_stack_series": "vig_stack",
+    "series_game_edge": "series_game",
+    "econ_cpi_edge": "econ",
+}
 from bot.math_engine import verify_contract_direction, calculate_parlay_edge, calculate_weather_edge
 from bot.sizing import kelly_size
+from bot.state_io import load_json as _load_json, save_json as _save_json
 
 logger = logging.getLogger("nexus.executor")
-
-
-# ---------------------------------------------------------------------------
-# State I/O
-# ---------------------------------------------------------------------------
-
-def _load_json(path: Path) -> list | dict:
-    if path.exists():
-        return json.loads(path.read_text())
-    return [] if "positions" in str(path) or "history" in str(path) else {}
-
-
-def _save_json(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=str))
-    tmp.rename(path)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +45,37 @@ def _save_json(path: Path, data):
 # ---------------------------------------------------------------------------
 
 def _check_balance(cost_dollars: float) -> tuple[bool, float, str]:
-    """Check if we have enough balance for the trade."""
+    """Check if we have enough balance for the trade.
+
+    In PAPER_MODE, derives balance from paper trade history so the simulation
+    is self-contained and does not depend on live API connectivity.
+    """
+    if PAPER_MODE:
+        paper_trades = _load_json(PAPER_TRADES_FILE)
+        if not isinstance(paper_trades, list):
+            paper_trades = []
+        balance = PAPER_STARTING_BALANCE
+        for t in paper_trades:
+            if not isinstance(t, dict):
+                continue
+            entry_cost = t.get("contracts", 0) * t.get("entry_price", 0.0)
+            status = t.get("status", "open")
+            if status == "open":
+                balance -= entry_cost                    # still at risk
+            elif status == "won":
+                balance -= entry_cost                    # paid for entry
+                balance += t.get("contracts", 0) * 1.0  # $1/contract payout
+            elif status == "lost":
+                balance -= entry_cost                    # lost the stake
+            elif status == "exited_early":
+                balance -= entry_cost                    # paid for entry
+                balance += t.get("contracts", 0) * t.get("exit_price", 0.0)  # got back proceeds
+            # "resting" → not filled yet, don't deduct
+        balance = round(balance, 2)
+        if balance < cost_dollars:
+            return False, balance, f"Insufficient paper balance: ${balance:.2f} < ${cost_dollars:.2f}"
+        return True, balance, "ok"
+
     result = get_balance()
     if "error" in result:
         return False, 0.0, f"Balance check failed: {result['error']}"
@@ -72,8 +94,39 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
             f"{MAX_POSITION_PERCENT:.0%} of ${balance:.2f} (${balance * MAX_POSITION_PERCENT:.2f})"
         )
 
-    # Total exposure limit
     positions = _load_json(POSITIONS_FILE)
+
+    # Dedup: block re-entry if we already hold an open position in this ticker
+    existing = [
+        p for p in positions
+        if isinstance(p, dict)
+        and p.get("ticker") == ticker
+        and p.get("status") in ("resting", "filled", "partial")
+    ]
+    if existing:
+        return False, f"Already hold open position in {ticker} — skipping duplicate entry"
+
+    # Cooldown: block re-entry for 4 hours after any exit on same ticker
+    from datetime import datetime, timezone, timedelta
+    _COOLDOWN = timedelta(hours=4)
+    _now = datetime.now(timezone.utc)
+    recent_exits = [
+        p for p in positions
+        if isinstance(p, dict)
+        and p.get("ticker") == ticker
+        and p.get("status") in ("exited", "exited_early")
+        and p.get("exited_at")
+    ]
+    for p in recent_exits:
+        try:
+            exited_at = datetime.fromisoformat(p["exited_at"])
+            if (_now - exited_at) < _COOLDOWN:
+                remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
+                return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
+        except Exception:
+            pass
+
+    # Total exposure limit
     total_exposure = sum(p.get("cost", 0) for p in positions if isinstance(p, dict))
     if (total_exposure + cost_dollars) > balance * MAX_TOTAL_EXPOSURE:
         return False, (
@@ -118,8 +171,8 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             else vig_result.get("kalshi_yes_price") or (1.0 - (opportunity.get("no_ask_cents", 0) / 100.0))
         )
 
-        print(
-            f"  [EdgeCheck/NO] {ticker} | "
+        logger.debug(
+            f"[EdgeCheck/NO] {ticker} | "
             f"scan_yes_ask={original_yes_price:.4f} refetch_yes_ask={current_yes_price:.4f} | "
             f"delta={current_yes_price - original_yes_price:+.4f}"
         )
@@ -132,7 +185,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             )
 
         if abs(current_yes_price - original_yes_price) < 0.001:
-            print(f"  [EdgeCheck/NO] {ticker} | price unchanged → edge still valid")
+            logger.debug(f"[EdgeCheck/NO] {ticker} | price unchanged → edge still valid")
             return True, "ok"
 
         true_yes = vig_result.get("true_yes_prob", 0)
@@ -141,8 +194,8 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         new_edge = true_no - kalshi_no
         new_relative = new_edge / kalshi_no if kalshi_no > 0 else 0
 
-        print(
-            f"  [EdgeCheck/NO] {ticker} | "
+        logger.debug(
+            f"[EdgeCheck/NO] {ticker} | "
             f"NO edge {opportunity.get('relative_edge', 0):.2%} → {new_relative:.2%} | "
             f"threshold={MIN_RELATIVE_EDGE:.2%}"
         )
@@ -150,8 +203,8 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         # YES-side: edge = fair_value - kalshi_yes_price
         original_price = opportunity.get("edge_result", {}).get("kalshi_price", 0)
 
-        print(
-            f"  [EdgeCheck/YES] {ticker} | "
+        logger.debug(
+            f"[EdgeCheck/YES] {ticker} | "
             f"scan_yes_ask={original_price:.4f} refetch_yes_ask={current_yes_price:.4f} | "
             f"delta={current_yes_price - original_price:+.4f}"
         )
@@ -164,15 +217,15 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             )
 
         if abs(current_yes_price - original_price) < 0.001:
-            print(f"  [EdgeCheck/YES] {ticker} | price unchanged → edge still valid")
+            logger.debug(f"[EdgeCheck/YES] {ticker} | price unchanged → edge still valid")
             return True, "ok"
 
         fair_value = opportunity.get("edge_result", {}).get("fair_value", 0)
         new_edge = fair_value - current_yes_price
         new_relative = new_edge / current_yes_price if current_yes_price > 0 else 0
 
-        print(
-            f"  [EdgeCheck/YES] {ticker} | "
+        logger.debug(
+            f"[EdgeCheck/YES] {ticker} | "
             f"fair={fair_value:.4f} | "
             f"edge {opportunity.get('relative_edge', 0):.2%} → {new_relative:.2%} | "
             f"threshold={MIN_RELATIVE_EDGE:.2%}"
@@ -181,8 +234,8 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
     # Vig stack series is a structural edge — threshold is 2%, not the default 15%
     edge_threshold = 0.02 if trade_type == "vig_stack_series" else MIN_RELATIVE_EDGE
     if new_relative < edge_threshold:
-        print(
-            f"  [EdgeCheck] EVAPORATED: {ticker} | "
+        logger.debug(
+            f"[EdgeCheck] EVAPORATED: {ticker} | "
             f"was {opportunity.get('relative_edge', 0):.2%}, now {new_relative:.2%}"
         )
         return False, (
@@ -312,8 +365,26 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             f"Hours to game: {hours_to_game:.0f}h. "
             f"{verdict}"
         )
+    elif opp_type in ("btc_price_edge", "eth_price_edge", "sol_price_edge",
+                      "xrp_price_edge", "doge_price_edge"):
+        spot      = opportunity.get("spot", 0)
+        threshold = opportunity.get("threshold", 0)
+        fair_value   = edge_result.get("fair_value", 0)
+        kalshi_price = edge_result.get("kalshi_price", 0)
+        spot_vs = "above threshold" if spot > threshold else "below threshold"
+        if side == "yes":
+            data_thesis = (
+                f"Spot price ${spot:,.2f} is {spot_vs} ${threshold:,.2f}. "
+                f"Model YES probability {fair_value:.1%} — YES underpriced vs Kalshi {kalshi_price:.1%}."
+            )
+        else:
+            data_thesis = (
+                f"Spot price ${spot:,.2f} is {spot_vs} ${threshold:,.2f}. "
+                f"Model YES probability {fair_value:.1%} — YES overpriced vs Kalshi {kalshi_price:.1%}. "
+                f"NO has edge — price likely to settle below threshold."
+            )
     else:
-        # live_latency_arb, btc_price_edge, etc.
+        # generic fallback
         fair_value   = edge_result.get("fair_value", 0)
         kalshi_price = edge_result.get("kalshi_price", 0)
         comparison   = "ABOVE" if fair_value > kalshi_price else "BELOW"
@@ -409,23 +480,21 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     # ------------------------------------------------------------------
     # ALL CHECKS PASSED — PLACE ORDER (or simulate in PAPER_MODE)
     # ------------------------------------------------------------------
-    import uuid as _uuid
-
     if PAPER_MODE:
-        paper_id = f"PAPER-{_uuid.uuid4().hex[:8].upper()}"
+        paper_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
         logger.info(
-            f"  📝 [PAPER] Would place: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker} "
-            f"(id={paper_id})"
+            f"  📝 [PAPER] Resting limit order: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker} "
+            f"(id={paper_id}) — will fill when market price crosses limit"
         )
         order_result = {
             "order_id": paper_id,
             "ticker": ticker,
             "side": side,
             "count": contracts,
-            "filled_count": contracts,
+            "filled_count": 0,
             "price_cents": price_cents,
             "cost_dollars": total_cost,
-            "status": "paper_filled",
+            "status": "paper_resting",
             "paper": True,
         }
     else:
@@ -489,6 +558,28 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     })
     _save_json(TRADE_HISTORY_FILE, history)
 
+    # Log to paper_trades.json (dedicated paper trading ledger)
+    if PAPER_MODE:
+        paper_trades = _load_json(PAPER_TRADES_FILE)
+        if not isinstance(paper_trades, list):
+            paper_trades = []
+        paper_trades.append({
+            "id": order_result.get("order_id", ""),
+            "ticker": ticker,
+            "type": _PAPER_TYPE_MAP.get(opp_type, opp_type),
+            "side": side,
+            "entry_price": round(price_cents / 100.0, 4),
+            "contracts": contracts,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "edge_at_entry": round(opportunity.get("edge", 0), 6),
+            "confidence": round(opportunity.get("confidence", opportunity.get("relative_edge", 0)), 4),
+            "status": "open",
+            "exit_price": None,
+            "pnl": None,
+            "resolved_at": None,
+        })
+        _save_json(PAPER_TRADES_FILE, paper_trades)
+
     # Record CLV entry — we'll compare entry price to closing line when market settles
     try:
         from bot.clv import record_clv_entry
@@ -533,6 +624,23 @@ def check_fills() -> list[dict]:
         if not order_id:
             continue
 
+        # Paper order: simulate fill when current ask crosses our limit price
+        if pos.get("paper") and order_id.startswith("PAPER-"):
+            market = get_market(pos.get("ticker", ""))
+            if "error" in market:
+                continue
+            side = pos.get("side", "yes")
+            limit_price = pos.get("price_cents", 0)
+            current_ask = market.get("yes_ask" if side == "yes" else "no_ask", 999)
+            if current_ask <= limit_price:
+                contracts = pos.get("contracts", 0)
+                pos["filled"] = contracts
+                pos["status"] = "filled"
+                logger.info(f"  📝 [PAPER] Fill simulated: {contracts}x {side.upper()} @ {limit_price}¢ on {pos.get('ticker', '?')}")
+                updates.append(pos)
+            continue
+
+        # Live order: check fill status via Kalshi API
         order = get_order(order_id)
         if "error" in order:
             continue
@@ -553,16 +661,31 @@ def check_fills() -> list[dict]:
     return updates
 
 
+def _paper_record_exit(order_id: str, exit_price: float, realized_pnl: float) -> None:
+    """Update the matching paper_trades.json record when a paper position exits early."""
+    paper_trades = _load_json(PAPER_TRADES_FILE)
+    if not isinstance(paper_trades, list):
+        return
+    for t in paper_trades:
+        if isinstance(t, dict) and t.get("id") == order_id:
+            t["status"] = "exited_early"
+            t["exit_price"] = round(exit_price, 4)
+            t["pnl"] = realized_pnl
+            t["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            break
+    _save_json(PAPER_TRADES_FILE, paper_trades)
+
+
 def exit_position(ticker: str, reason: str = "manual") -> dict:
     """
-    Sell an existing position. Used when edge evaporates.
+    Sell an existing position. Used when edge evaporates or cut-loss triggers.
 
     Args:
         ticker: Market ticker to exit
         reason: Why we're exiting
 
     Returns:
-        {success, order_result, reason}
+        {success, order_result, realized_pnl, reason}
     """
     positions = _load_json(POSITIONS_FILE)
     if not isinstance(positions, list):
@@ -583,12 +706,11 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
     if filled <= 0:
         return {"success": False, "reason": "No filled contracts to exit"}
 
-    # Get current market price for the opposite side
+    # Get current market price
     market = get_market(ticker)
     if "error" in market:
         return {"success": False, "reason": f"Market fetch failed: {market['error']}"}
 
-    # To exit, we sell on the same side
     if side == "yes":
         exit_price = market.get("yes_bid", 0)
     else:
@@ -596,6 +718,25 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
 
     if not exit_price or exit_price <= 0:
         return {"success": False, "reason": f"No bid for {side} side"}
+
+    entry_price = pos.get("price_cents", 0) / 100.0
+    realized_pnl = round((exit_price / 100.0 - entry_price) * filled, 2)
+
+    # Paper mode: simulate the sell without touching the live API
+    if PAPER_MODE or pos.get("paper"):
+        pos["status"] = "exited"
+        pos["exit_price"] = exit_price
+        pos["exit_reason"] = reason
+        pos["exited_at"] = datetime.now(timezone.utc).isoformat()
+        pos["realized_pnl"] = realized_pnl
+        _save_json(POSITIONS_FILE, positions)
+        _paper_record_exit(pos.get("order_id", ""), exit_price / 100.0, realized_pnl)
+        return {
+            "success": True,
+            "order_result": {"order_id": pos.get("order_id", ""), "status": "paper_exited", "filled_count": filled},
+            "realized_pnl": realized_pnl,
+            "reason": f"Paper exit: {reason}",
+        }
 
     order_result = place_order(
         ticker=ticker,
@@ -613,6 +754,7 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
     pos["exit_price"] = exit_price
     pos["exit_reason"] = reason
     pos["exited_at"] = datetime.now(timezone.utc).isoformat()
+    pos["realized_pnl"] = realized_pnl
     _save_json(POSITIONS_FILE, positions)
 
     return {"success": True, "order_result": order_result, "reason": f"Exited: {reason}"}
@@ -839,6 +981,23 @@ def execute_double(ticker: str) -> dict:
             direction=pos.get("direction", "above"),
             kalshi_price_cents=current_price_cents,
         )
+    elif opp_type == "series_game_edge":
+        # Derive fair value from original entry: fair_value = stored_edge + original_kalshi_price
+        # The sportsbook consensus doesn't change fast enough to re-fetch; use stored fair value.
+        original_price = pos.get("price_cents", 0) / 100.0
+        fair_value = pos.get("edge", 0) + original_price
+        new_kalshi_price = current_price_cents / 100.0
+        new_edge = fair_value - new_kalshi_price
+        new_relative = new_edge / new_kalshi_price if new_kalshi_price > 0 else 0
+        edge_result = {
+            "fair_value": round(fair_value, 4),
+            "kalshi_price": round(new_kalshi_price, 4),
+            "edge": round(new_edge, 4),
+            "relative_edge": round(new_relative, 4),
+            "self_check_passed": True,
+            "math_chain": ["series_game_edge double-down: fair value derived from original entry"],
+            "warnings": [],
+        }
     else:
         edge_result = calculate_parlay_edge(
             market_title=pos.get("title", ""),

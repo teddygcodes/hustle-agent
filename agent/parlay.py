@@ -294,10 +294,12 @@ NHL_TEAM_ALIASES: dict[str, str] = {
     "ana": "Anaheim Ducks",
     "arizona coyotes": "Arizona Coyotes",
     "coyotes": "Arizona Coyotes",
-    "utah hockey club": "Utah Hockey Club",
-    "utah hc": "Utah Hockey Club",
-    "utah": "Utah Hockey Club",
-    "uta": "Utah Hockey Club",
+    "utah mammoth": "Utah Mammoth",
+    "mammoth": "Utah Mammoth",
+    "utah hockey club": "Utah Mammoth",
+    "utah hc": "Utah Mammoth",
+    "utah": "Utah Mammoth",
+    "uta": "Utah Mammoth",
     "boston bruins": "Boston Bruins",
     "bruins": "Boston Bruins",
     "buffalo": "Buffalo Sabres",
@@ -388,7 +390,6 @@ NHL_TEAM_ALIASES: dict[str, str] = {
     "winnipeg": "Winnipeg Jets",
     "jets": "Winnipeg Jets",
     "wpg": "Winnipeg Jets",
-    "utah hockey club": "Utah Hockey Club",
     # 3-letter codes commonly used in Kalshi series tickers
     "bos": "Boston Bruins",
     "chi": "Chicago Blackhawks",
@@ -402,7 +403,7 @@ NHL_TEAM_ALIASES: dict[str, str] = {
     "sea": "Seattle Kraken",
     "stl": "St. Louis Blues",
     "tor": "Toronto Maple Leafs",
-    "uta": "Utah Hockey Club",
+    "uta": "Utah Mammoth",
     "wsh": "Washington Capitals",
 }
 

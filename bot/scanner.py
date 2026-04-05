@@ -361,6 +361,10 @@ def scan_vig_stack_series() -> list[dict]:
             ya = m.get("yes_ask")
             na = m.get("no_ask")
             if ya and ya > 0 and na and na > 0:
+                volume = m.get("volume") or 0
+                open_interest = m.get("open_interest") or 0
+                if volume < 10 and open_interest < 5:
+                    continue
                 yes_asks.append(ya)
                 valid_markets.append(m)
 
@@ -396,11 +400,6 @@ def scan_vig_stack_series() -> list[dict]:
             _today_vs = datetime.now(timezone.utc).strftime("%y%b%d").upper()
             _tp = ticker.split("-")
             if len(_tp) >= 2 and _tp[1][:7] == _today_vs:
-                continue
-
-            # Also skip contracts where yes_ask is extreme (near-certain/near-impossible)
-            # — these are either resolving or heavily directional and break the vig formula
-            if yes_ask >= 85 or yes_ask <= 15:
                 continue
 
             # NO fair value = 100¢ - (YES_ask adjusted for vig)
@@ -641,11 +640,31 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     except Exception as e:
         logger.warning("INJURIES: check error (fail-open): %s", e)
 
+    # Track every dropped candidate with reason for post-scan diagnosis
+    dropped_log: list[dict] = []
+
+    def _drop(opp: dict, reason: str) -> None:
+        dropped_log.append({
+            "ticker": opp.get("ticker", "?"),
+            "type": opp.get("type", "?"),
+            "edge_pct": round(opp.get("edge", 0) * 100, 1),
+            "confidence": opp.get("confidence", 0),
+            "reason": reason,
+        })
+        logger.debug("DROPPED %s (%s) edge=%.1f%% conf=%.2f — %s",
+                     opp.get("ticker", "?"), opp.get("type", "?"),
+                     opp.get("edge", 0) * 100, opp.get("confidence", 0), reason)
+
     # Strategy gate: drop any opp type not in ACTIVE_STRATEGIES.
     # This is the final enforcement — even if a scanner runs, it won't reach Tyler.
-    before_gate = len(all_opportunities)
-    all_opportunities = [o for o in all_opportunities if o.get("type") in ACTIVE_STRATEGIES]
-    dropped_gate = before_gate - len(all_opportunities)
+    active = []
+    for o in all_opportunities:
+        if o.get("type") in ACTIVE_STRATEGIES:
+            active.append(o)
+        else:
+            _drop(o, f"inactive_strategy:{o.get('type')}")
+    dropped_gate = len(all_opportunities) - len(active)
+    all_opportunities = active
     if dropped_gate:
         logger.info("GATE: dropped %d opportunities from inactive strategies", dropped_gate)
 
@@ -667,11 +686,16 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
             return False
         return True
 
-    before = len(all_opportunities)
-    all_opportunities = [o for o in all_opportunities if _passes_sanity(o)]
-    dropped = before - len(all_opportunities)
-    if dropped:
-        logger.info("SANITY: dropped %d opportunity/ies with failed self-checks or near-zero values", dropped)
+    sane = []
+    for o in all_opportunities:
+        if _passes_sanity(o):
+            sane.append(o)
+        else:
+            _drop(o, "failed_sanity_check")
+    dropped_sanity = len(all_opportunities) - len(sane)
+    all_opportunities = sane
+    if dropped_sanity:
+        logger.info("SANITY: dropped %d opportunity/ies with failed self-checks or near-zero values", dropped_sanity)
 
     # Apply B2B confidence penalty before ranking
     all_opportunities = [_apply_b2b_penalty(o) for o in all_opportunities]
@@ -698,6 +722,7 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
         "line_movements": line_movements,
         "games_scanned": len(all_games),
         "scan_interval": scan_interval,
+        "dropped_candidates": dropped_log,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

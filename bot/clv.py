@@ -40,7 +40,8 @@ def _load() -> list[dict]:
     f = _get_file()
     if f.exists():
         try:
-            return json.loads(f.read_text())
+            data = json.loads(f.read_text())
+            return data if isinstance(data, list) else []
         except Exception:
             return []
     return []

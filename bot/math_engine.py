@@ -394,8 +394,8 @@ _TEMP_SUFFIX = r"[°\s]*(?:degrees?\s*)?[fF]?"
 _TEMP_ABOVE_PATTERNS = [
     # "68°F or above" / "68 degrees or warmer" / "68 or above"
     (r"(\d+)" + _TEMP_SUFFIX + r"\s+or\s+(?:above|higher|more|greater|warmer|hotter)", "above"),
-    # "above 68°F" / "over 68" / "at least 68°F" / "exceed 68"
-    (r"(?:above|over|exceed|at\s+least|≥|>=)\s*(\d+)" + _TEMP_SUFFIX, "above"),
+    # "above 68°F" / "over 68" / "at least 68°F" / "exceed 68" / ">68°"
+    (r"(?:above|over|exceed|at\s+least|≥|>=|>)\s*(\d+)" + _TEMP_SUFFIX, "above"),
 ]
 
 _TEMP_BELOW_PATTERNS = [
@@ -540,6 +540,19 @@ def verify_contract_direction(
                 explanation_parts.append(f"PARSED: Team win contract — YES = {team.title()} wins")
                 break
 
+    # Check crypto price contracts: "Bitcoin price at X on date?" / "Ethereum price..."
+    # On Kalshi, YES = final price is ABOVE the threshold embedded in the ticker.
+    if not yes_means:
+        _CRYPTO_PRICE_PATTERN = re.compile(
+            r"\b(bitcoin|ethereum|solana|xrp|ripple|dogecoin|doge|btc|eth|sol)\b.{0,30}price",
+            re.IGNORECASE,
+        )
+        if _CRYPTO_PRICE_PATTERN.search(title_lower):
+            yes_means = "Crypto price settles ABOVE the strike threshold"
+            no_means  = "Crypto price settles AT OR BELOW the strike threshold"
+            contract_type = "crypto_price"
+            explanation_parts.append("PARSED: Crypto price contract — YES = price above threshold")
+
     # ------------------------------------------------------------------
     # Step 2: If we couldn't parse, check contract_details for rules
     # ------------------------------------------------------------------
@@ -651,6 +664,23 @@ def verify_contract_direction(
         else:
             thesis_direction = "ambiguous"
 
+    # Crypto price contracts — YES = above threshold
+    # Direction is determined by edge direction (model vs Kalshi), not spot position.
+    # Spot can be above/below threshold while YES still has edge — use edge language.
+    elif contract_type == "crypto_price":
+        yes_edge_signal = any(w in thesis_lower for w in
+                              ["yes underpriced", "yes has edge", "buy yes"])
+        no_edge_signal  = any(w in thesis_lower for w in
+                              ["no has edge", "yes overpriced", "buy no"])
+        if yes_edge_signal and not no_edge_signal:
+            thesis_direction = "above"
+            explanation_parts.append("THESIS: YES has edge on this crypto market → supports YES")
+        elif no_edge_signal and not yes_edge_signal:
+            thesis_direction = "below"
+            explanation_parts.append("THESIS: NO has edge on this crypto market → supports NO")
+        else:
+            thesis_direction = "ambiguous"
+
     # Rules fallback — no automatic parsing, require explicit signals
     elif contract_type == "rules_fallback":
         thesis_direction = "ambiguous"
@@ -689,6 +719,12 @@ def verify_contract_direction(
             thesis_supports_side = "no"
     elif contract_type in ("vig_stack_no", "team_win"):
         thesis_supports_side = thesis_direction  # already "yes", "no", or "ambiguous"
+    elif contract_type == "crypto_price":
+        # YES = above threshold; thesis_direction is "above" or "below"
+        if thesis_direction == "above":
+            thesis_supports_side = "yes"
+        elif thesis_direction == "below":
+            thesis_supports_side = "no"
 
     if thesis_supports_side is None:
         thesis_supports_side = "ambiguous"

@@ -5,7 +5,7 @@ Fractional Kelly with hard caps. Conservative by default.
 """
 
 import math
-from bot.config import KELLY_FRACTION, MAX_BET_FRACTION, MIN_BET_DOLLARS, MAX_BET_DOLLARS
+from bot.config import KELLY_FRACTION, MAX_BET_FRACTION, MIN_BET_DOLLARS
 
 
 def kelly_size(
@@ -15,6 +15,7 @@ def kelly_size(
     price_cents: int,
     max_fraction: float = MAX_BET_FRACTION,
     uncertainty_discount: float = 1.0,
+    confidence: float = 0.75,
 ) -> dict:
     """
     Calculate optimal bet size using fractional Kelly criterion.
@@ -28,12 +29,14 @@ def kelly_size(
         uncertainty_discount: Multiplicative discount on probability for model uncertainty.
             Use 0.85 for model-derived edges (weather, ELO) to prevent Kelly oversizing
             when the model's probability estimate may be wrong.
+        confidence: Scanner confidence score (0-1). Applied as additional probability
+            discount — high-confidence bets size slightly larger at identical edges.
 
     Returns:
         {contracts, price_cents, total_cost, max_payout, kelly_fraction, reason}
     """
-    # Apply uncertainty discount before all calculations
-    probability = probability * uncertainty_discount
+    # Apply uncertainty discount and confidence discount before all calculations
+    probability = probability * uncertainty_discount * confidence
 
     if edge <= 0 or probability <= 0 or probability >= 1 or balance <= 0 or price_cents <= 0:
         return {
@@ -75,9 +78,12 @@ def kelly_size(
     # Dollar amount to risk
     risk_dollars = balance * capped
 
+    # Dynamic cap: 5% of balance, never more than $200
+    dynamic_max = min(balance * MAX_BET_FRACTION, 200.0)
+
     # Apply dollar floor and ceiling
     risk_dollars = max(risk_dollars, MIN_BET_DOLLARS)
-    risk_dollars = min(risk_dollars, MAX_BET_DOLLARS)
+    risk_dollars = min(risk_dollars, dynamic_max)
 
     # Can't bet more than we have
     risk_dollars = min(risk_dollars, balance * max_fraction)

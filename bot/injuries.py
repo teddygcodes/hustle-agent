@@ -65,14 +65,16 @@ STARTER_MPG_THRESHOLDS: dict[str, float] = {
 # Statuses that mean the player is not playing → STALE flag
 _STALE_STATUSES = frozenset({
     "out", "ir", "il", "injured reserve",
-    "day-to-day", "dtd",
     "il-10", "il-15", "il-60",         # MLB injured lists
     "o - season",                       # NHL season-ending
-    "game time decision",               # treated as out-equivalent for safety
 })
 
 # Statuses worth showing as a warning but NOT suppressing the trade
-_WARN_STATUSES = frozenset({"doubtful", "questionable", "probable"})
+_WARN_STATUSES = frozenset({
+    "doubtful", "questionable", "probable",
+    "day-to-day", "dtd",               # player may still play
+    "game time decision",              # GTD players often play
+})
 
 
 def _get_json(url: str, timeout: int = 8) -> dict | None:

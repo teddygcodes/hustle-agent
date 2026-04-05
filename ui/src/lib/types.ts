@@ -321,6 +321,46 @@ export interface PriorEntry {
 
 export type PriorsData = Record<string, PriorEntry>;
 
+export interface PaperTrade {
+  id: string;
+  ticker: string;
+  title: string;
+  side: 'yes' | 'no';
+  contracts: number;
+  entry_price: number;   // dollars (0–1)
+  exit_price?: number;   // dollars (0–1)
+  status: 'open' | 'won' | 'lost' | 'exited_early';
+  strategy: string;
+  edge: number;
+  pnl?: number;
+  resolved_at?: string;
+  created_at: string;
+}
+
+export interface BotPosition {
+  ticker: string;
+  side: 'yes' | 'no';
+  contracts: number;
+  price_cents: number;
+  status: string;
+  strategy: string;
+  order_id: string;
+  paper?: boolean;
+  exit_price?: number;
+  exit_reason?: string;
+  exited_at?: string;
+  realized_pnl?: number;
+  created_at: string;
+}
+
+export interface BotState {
+  last_scan?: string;
+  scan_interval?: number;
+  dk_disabled?: boolean;
+  fd_disabled?: boolean;
+  active_sports?: string[];
+}
+
 export interface MemoryData {
   lessons: { text: string; timestamp: string; cycle: number }[];
   strategy_postmortems: { strategy: string; thesis: string; outcome: string; profit_delta: number; lesson: string; would_retry: boolean; cycle: number }[];

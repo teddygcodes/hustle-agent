@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
 import uuid
@@ -29,8 +30,10 @@ setup_file_logging()
 from bot.config import (
     BOT_STATE_FILE, TELEGRAM_BOT_TOKEN,
     PENDING_FILE, PENDING_MAX, PENDING_GO_WINDOW_HOURS,
-    BOT_STATE_DIR, PAPER_MODE, ACTIVE_STRATEGIES,
+    BOT_STATE_DIR, PAPER_MODE, ACTIVE_STRATEGIES, PAPER_TRADES_FILE,
+    CRYPTO_SCAN_INTERVAL,
 )
+from bot.state_io import load_json as _load_json_state
 from bot.clv import check_clv_settlements, format_clv_report
 from bot.scanner import scan_cycle
 from bot.market_maker import (
@@ -48,6 +51,7 @@ from bot.tracker import (
 from bot.notifier import TelegramNotifier, format_opportunity, format_detail
 from bot.scheduler import check_scheduled_events
 from bot.outcome_tracker import OutcomeTracker
+from bot import odds_scraper
 
 _outcome_tracker = OutcomeTracker()
 
@@ -161,6 +165,36 @@ def _market_close_timeout(opp: dict) -> float:
 # State helpers
 # ---------------------------------------------------------------------------
 
+LOCK_FILE = BOT_STATE_DIR / "bot.lock"
+
+
+def _pid_is_running(pid: int) -> bool:
+    """Return True if a process with this PID is currently alive."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _acquire_lock() -> None:
+    """Write PID lockfile, aborting if another instance is running."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+        except ValueError:
+            pid = 0
+        if pid and _pid_is_running(pid):
+            logger.error("Bot already running (PID %d). Exiting.", pid)
+            sys.exit(1)
+        logger.warning("Stale lock file (PID %d not running). Overwriting.", pid)
+    LOCK_FILE.write_text(str(os.getpid()))
+
+
+def _release_lock() -> None:
+    LOCK_FILE.unlink(missing_ok=True)
+
+
 def _load_bot_state() -> dict:
     if BOT_STATE_FILE.exists():
         return json.loads(BOT_STATE_FILE.read_text())
@@ -169,6 +203,8 @@ def _load_bot_state() -> dict:
 
 def _save_bot_state(state: dict):
     BOT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    # Merge current DK/FD disabled flags before persisting
+    state.update(odds_scraper.get_source_flags())
     tmp = BOT_STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2, default=str))
     tmp.rename(BOT_STATE_FILE)
@@ -205,6 +241,7 @@ class GlintBot:
 
     async def start(self):
         """Initialize and start the bot."""
+        _acquire_lock()
         logger.info("✨ Glint Trading Bot — Starting...")
 
         # Initialize Telegram
@@ -216,6 +253,9 @@ class GlintBot:
 
         # Update bot state — also performs watchdog staleness check
         state = _load_bot_state()
+
+        # Restore DK/FD disabled flags from previous session (12h TTL)
+        odds_scraper.load_source_flags(state)
 
         # Watchdog: if the bot was marked running but heartbeat is stale, it likely crashed
         _HEARTBEAT_STALE_MINUTES = 15
@@ -259,15 +299,48 @@ class GlintBot:
             )
             logger.info(f"Loaded {survivors} pending opportunities from disk")
 
+        # Reconcile local positions.json against Kalshi live positions.
+        # If bot crashed between placing an order and writing positions.json,
+        # the position exists on Kalshi but not locally — recover it here.
+        try:
+            from bot.config import POSITIONS_FILE
+            from agent.kalshi_client import get_positions as _kalshi_get_positions
+            _live = _kalshi_get_positions()
+            if "error" not in _live:
+                _local = json.loads(POSITIONS_FILE.read_text()) if POSITIONS_FILE.exists() else []
+                _local_tickers = {p.get("ticker") for p in _local if isinstance(p, dict)}
+                _recovered = []
+                for _pos in _live.get("positions", []):
+                    _ticker = _pos.get("ticker")
+                    if _ticker and _ticker not in _local_tickers and (_pos.get("position") or 0) != 0:
+                        logger.warning("Reconcile: Kalshi position not in local state — %s", _ticker)
+                        _recovered.append({"ticker": _ticker, "source": "kalshi_reconcile", **_pos})
+                if _recovered:
+                    _local.extend(_recovered)
+                    _tmp = POSITIONS_FILE.with_suffix(".tmp")
+                    _tmp.write_text(json.dumps(_local, indent=2, default=str))
+                    _tmp.rename(POSITIONS_FILE)
+                    await self.notifier.send_message(
+                        f"⚠️ Reconciled {len(_recovered)} position(s) missing from local state: "
+                        + ", ".join(p.get("ticker", "?") for p in _recovered)
+                    )
+                else:
+                    logger.info("Reconcile: local positions.json matches Kalshi (%d positions)", len(_local))
+        except Exception as _e:
+            logger.warning("Position reconciliation failed: %s", _e)
+
         if TELEGRAM_BOT_TOKEN:
             await self.notifier.send_message("✨ Glint is online. Scanning for edges...")
             logger.info("Telegram connected — bot is live")
         else:
             logger.warning("No Telegram token — running in console-only mode")
 
-        # Run main loop
+        # Run main loop + independent crypto loop concurrently
         try:
-            await self._main_loop()
+            await asyncio.gather(
+                self._main_loop(),
+                self._crypto_scan_loop(),
+            )
         except asyncio.CancelledError:
             logger.info("Bot cancelled")
         finally:
@@ -279,6 +352,7 @@ class GlintBot:
         state = _load_bot_state()
         state["running"] = False
         _save_bot_state(state)
+        _release_lock()
 
         await self.notifier.send_message("🛑 Glint stopped.")
         await self.notifier.stop()
@@ -537,6 +611,40 @@ class GlintBot:
             strats = ", ".join(ACTIVE_STRATEGIES) if ACTIVE_STRATEGIES else "none"
             return f"Mode: {mode}\nActive strategies: {strats}"
 
+        def handle_stats():
+            paper_trades = _load_json_state(PAPER_TRADES_FILE)
+            if not isinstance(paper_trades, list) or not paper_trades:
+                return "No paper trades yet."
+            resolved = [t for t in paper_trades if t.get("status") in ("won", "lost")]
+            open_count = sum(1 for t in paper_trades if t.get("status") == "open")
+            total = len(resolved)
+            wins = sum(1 for t in resolved if t.get("status") == "won")
+            total_pnl = sum(t.get("pnl") or 0 for t in resolved)
+            wr_str = f"{wins/total:.0%} ({wins}/{total})" if total > 0 else "n/a"
+            lines = [
+                f"PAPER STATS [PAPER MODE]" if PAPER_MODE else "PAPER STATS",
+                "",
+                f"Total trades: {len(paper_trades)} ({open_count} open)",
+                f"Resolved: {total}  |  Win rate: {wr_str}",
+                f"Total P&L: ${total_pnl:+.2f}",
+                "",
+                "By strategy:",
+            ]
+            by_type: dict = {}
+            for t in resolved:
+                s = t.get("type", "unknown")
+                d = by_type.setdefault(s, {"wins": 0, "total": 0, "pnl": 0.0})
+                d["total"] += 1
+                if t.get("status") == "won":
+                    d["wins"] += 1
+                d["pnl"] += t.get("pnl") or 0
+            for stype, d in sorted(by_type.items()):
+                wr = d["wins"] / d["total"] if d["total"] > 0 else 0
+                lines.append(f"  {stype}: {wr:.0%} ({d['total']} trades)  ${d['pnl']:+.2f}")
+            if not by_type:
+                lines.append("  (no resolved trades yet)")
+            return "\n".join(lines)
+
         # Button callback — handles inline GO/SKIP button presses
         def handle_button(action: str, opp_id: str) -> str:
             pending = _prune_pending(_load_pending())
@@ -588,6 +696,107 @@ class GlintBot:
         self.notifier.register_callback("SCAN", handle_scan)
         self.notifier.register_callback("CLV", handle_clv)
         self.notifier.register_callback("MODE", handle_mode)
+        self.notifier.register_callback("STATS", handle_stats)
+
+    async def _handle_opportunity(self, opp: dict, balance: float) -> None:
+        """Process a single opportunity: size → execute (paper) or queue (live)."""
+        _outcome_tracker.store_alert(opp)
+
+        side        = opp.get("recommended_side", "yes")
+        fair_value  = opp.get("edge_result", {}).get("fair_value", 0.5)
+        win_prob    = fair_value if side == "yes" else (1.0 - fair_value)
+        price_cents = (
+            opp.get("market", {}).get("yes_ask", 50)
+            if side == "yes"
+            else opp.get("market", {}).get("no_ask", 50)
+        )
+        opp_type = opp.get("type", "")
+        uncertainty_discount = 0.85 if opp_type in ("weather", "series_game_edge") else 1.0
+        sizing = kelly_size(
+            edge=opp.get("edge", 0),
+            probability=win_prob,
+            balance=balance,
+            price_cents=price_cents,
+            uncertainty_discount=uncertainty_discount,
+            confidence=opp.get("confidence", 0.75),
+        )
+
+        if sizing["contracts"] <= 0:
+            logger.info("Skipping %s: sizing says no trade (%s)", opp.get("ticker", "?"), sizing["reason"])
+            return
+
+        opp["sizing"] = sizing
+
+        if PAPER_MODE:
+            result = execute_trade(opp, sizing)
+            alert_lines = [format_opportunity(opp)]
+            if result["success"]:
+                order = result["order_result"]
+                contracts = order.get("count", sizing["contracts"])
+                alert_lines.append(
+                    f"\n📝 PAPER AUTO-EXECUTED — "
+                    f"{contracts}x {side.upper()} @ {price_cents}¢"
+                )
+                logger.info(
+                    "Paper auto-executed: %s | %s @ %s¢ | %s contracts | edge=%.1f%%",
+                    opp.get("ticker"), side.upper(), price_cents, contracts,
+                    opp.get("relative_edge", 0) * 100,
+                )
+            else:
+                alert_lines.append(f"\n⚠️ PAPER EXECUTION FAILED — {result['reason']}")
+                logger.warning("Paper auto-execution failed: %s — %s", opp.get("ticker"), result["reason"])
+            await self.notifier.send_message("\n".join(alert_lines))
+        else:
+            opp_id = _add_to_pending(opp)
+            opp["_opp_id"] = opp_id
+            pending_now = _load_pending()
+            queue_num = next(
+                (i + 1 for i, e in enumerate(pending_now) if e.get("opp_id") == opp_id), 1
+            )
+            opp["_queue_num"] = queue_num
+            logger.info(
+                "Edge queued #%d (%s): %s | edge=%.1f%% | side=%s",
+                queue_num, opp_id, opp.get("ticker"), opp.get("relative_edge", 0) * 100,
+                opp.get("recommended_side"),
+            )
+            await self.notifier.send_alert(opp)
+
+        try:
+            from bot.patterns import get_edge_accuracy
+            accuracy_note = get_edge_accuracy(opp)
+            if accuracy_note:
+                await self.notifier.send_message(f"📊 {accuracy_note}")
+        except Exception:
+            pass
+
+    async def _crypto_scan_loop(self):
+        """
+        Independent crypto scanner — runs every CRYPTO_SCAN_INTERVAL seconds
+        (default 5 min) decoupled from the sports scan interval.
+
+        Scans all assets (BTC, ETH, SOL, XRP, DOGE) across all timeframes
+        (15-min, hourly, daily) in parallel. In paper mode, edges auto-execute.
+        """
+        from bot.kalshi_series import scan_all_crypto_markets
+        from agent.kalshi_client import get_balance as kb
+        loop = asyncio.get_event_loop()
+        logger.info("CRYPTO LOOP: starting independent scan task (interval=%ds)", CRYPTO_SCAN_INTERVAL)
+        while self._running:
+            try:
+                opps = await loop.run_in_executor(None, scan_all_crypto_markets)
+                if opps:
+                    logger.info("CRYPTO LOOP: %d opportunities found", len(opps))
+                    balance_result = kb()
+                    balance = balance_result.get("balance_dollars", 0) if "error" not in balance_result else 0
+                    for opp in opps:
+                        try:
+                            await self._handle_opportunity(opp, balance)
+                        except Exception as e:
+                            logger.error("CRYPTO LOOP: error handling opp %s: %s",
+                                         opp.get("ticker", "?"), e)
+            except Exception as e:
+                logger.error("CRYPTO LOOP: scan error: %s", e)
+            await asyncio.sleep(CRYPTO_SCAN_INTERVAL)
 
     async def _main_loop(self):
         """Core scanning and trading loop."""
@@ -697,17 +906,43 @@ class GlintBot:
                 for a in alerts:
                     alert_type = a.get("type", "position_move")
                     if alert_type == "take_profit":
-                        await self.notifier.send_message(
-                            f"📈 TAKE PROFIT? {a['ticker']} +{a['pnl_percent']:.0%} "
-                            f"(${a['unrealized_pnl']:.2f})\nReply SELL {a['ticker']}",
-                            priority="critical",
-                        )
+                        if PAPER_MODE:
+                            exit_result = exit_position(a["ticker"], reason="auto_take_profit")
+                            if exit_result.get("success"):
+                                pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
+                                await self.notifier.send_message(
+                                    f"💰 AUTO TAKE PROFIT: {a['ticker']} +{a['pnl_percent']:.0%} "
+                                    f"(${pnl:.2f}) — locked in",
+                                    priority="critical",
+                                )
+                            else:
+                                await self.notifier.send_message(
+                                    f"📈 TAKE PROFIT FAILED: {a['ticker']} +{a['pnl_percent']:.0%} "
+                                    f"— {exit_result.get('reason')}\nReply SELL {a['ticker']}",
+                                    priority="critical",
+                                )
+                        else:
+                            await self.notifier.send_message(
+                                f"📈 TAKE PROFIT? {a['ticker']} +{a['pnl_percent']:.0%} "
+                                f"(${a['unrealized_pnl']:.2f})\nReply SELL {a['ticker']}",
+                                priority="critical",
+                            )
                     elif alert_type == "cut_loss":
-                        await self.notifier.send_message(
-                            f"📉 CUT LOSS? {a['ticker']} {a['pnl_percent']:.0%} "
-                            f"(${a['unrealized_pnl']:.2f})\nReply SELL {a['ticker']}",
-                            priority="critical",
-                        )
+                        exit_result = exit_position(a["ticker"], reason="auto_cut_loss")
+                        if exit_result.get("success"):
+                            pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
+                            await self.notifier.send_message(
+                                f"✂️ AUTO CUT: {a['ticker']} {a['pnl_percent']:.0%} "
+                                f"(${pnl:.2f}) — exited to stop bleeding",
+                                priority="critical",
+                            )
+                        else:
+                            await self.notifier.send_message(
+                                f"📉 CUT LOSS FAILED: {a['ticker']} {a['pnl_percent']:.0%} "
+                                f"(${a['unrealized_pnl']:.2f}) — {exit_result.get('reason')}\n"
+                                f"Reply SELL {a['ticker']}",
+                                priority="critical",
+                            )
                     elif alert_type == "resting_expiry":
                         await self.notifier.send_message(
                             f"⏰ Resting order {a['ticker']} unfilled for {a['age_minutes']}min",
@@ -788,64 +1023,17 @@ class GlintBot:
             balance = balance_result.get("balance_dollars", 0) if "error" not in balance_result else 0
 
             for opp in opportunities:
-                # Store every opportunity for calibration tracking (dedup handled in store_alert)
-                _outcome_tracker.store_alert(opp)
-
-                side        = opp.get("recommended_side", "yes")
-                fair_value  = opp.get("edge_result", {}).get("fair_value", 0.5)
-                win_prob    = fair_value if side == "yes" else (1.0 - fair_value)
-                price_cents = (
-                    opp.get("market", {}).get("yes_ask", 50)
-                    if side == "yes"
-                    else opp.get("market", {}).get("no_ask", 50)
-                )
-                # Model-derived edges use 0.85x uncertainty discount
-                opp_type = opp.get("type", "")
-                uncertainty_discount = 0.85 if opp_type in ("weather", "series_game_edge") else 1.0
-                sizing = kelly_size(
-                    edge=opp.get("edge", 0),
-                    probability=win_prob,
-                    balance=balance,
-                    price_cents=price_cents,
-                    uncertainty_discount=uncertainty_discount,
-                )
-
-                if sizing["contracts"] <= 0:
-                    logger.info(f"Skipping {opp['ticker']}: sizing says no trade ({sizing['reason']})")
-                    continue
-
-                opp["sizing"] = sizing
-
-                # Queue and alert — scanner does not wait for GO/SKIP
-                opp_id = _add_to_pending(opp)
-                opp["_opp_id"] = opp_id
-                pending_now = _load_pending()
-                queue_num = next(
-                    (i + 1 for i, e in enumerate(pending_now) if e.get("opp_id") == opp_id), 1
-                )
-                opp["_queue_num"] = queue_num
-                logger.info(
-                    f"Edge queued #{queue_num} ({opp_id}): {opp['ticker']} | "
-                    f"edge={opp.get('relative_edge', 0):.1%} | side={opp.get('recommended_side')}"
-                )
-                await self.notifier.send_alert(opp)
-
-                try:
-                    from bot.patterns import get_edge_accuracy
-                    accuracy_note = get_edge_accuracy(opp)
-                    if accuracy_note:
-                        await self.notifier.send_message(f"📊 {accuracy_note}")
-                except Exception:
-                    pass
+                await self._handle_opportunity(opp, balance)
 
             # ----------------------------------------------------------
             # Step 8b: OutcomeTracker — resolve settled alerts & calibration
             # ----------------------------------------------------------
             try:
-                resolved = _outcome_tracker.check_and_resolve()
+                loop = asyncio.get_event_loop()
+                resolved = await loop.run_in_executor(None, _outcome_tracker.check_and_resolve)
                 if resolved:
                     logger.info("OutcomeTracker resolved %d market(s)", resolved)
-                _outcome_tracker.log_calibration_summary()
+                await loop.run_in_executor(None, _outcome_tracker.log_calibration_summary)
             except Exception as e:
                 logger.debug(f"OutcomeTracker step skipped: {e}")
 

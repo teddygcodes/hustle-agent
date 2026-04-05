@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from bot.config import (
     BOT_STATE_FILE, MORNING_BRIEFING_HOUR, NIGHTLY_SUMMARY_HOUR,
 )
+
+RECONCILE_BALANCE_HOUR = 21  # 9pm ET — after US markets close
 
 logger = logging.getLogger("glint.scheduler")
 
@@ -76,6 +78,19 @@ async def check_scheduled_events(bot) -> None:
             _save_bot_state(state)
         except Exception as e:
             logger.error(f"Nightly summary failed: {e}")
+
+    # --- Daily balance reconciliation (9pm ET) ---
+    if (
+        current_hour == RECONCILE_BALANCE_HOUR
+        and state.get("last_balance_reconcile_date") != today_str
+    ):
+        logger.info("Running daily balance reconciliation...")
+        try:
+            await _reconcile_daily_balance(bot)
+            state["last_balance_reconcile_date"] = today_str
+            _save_bot_state(state)
+        except Exception as e:
+            logger.error(f"Balance reconciliation failed: {e}")
 
 
 async def _send_morning_briefing(bot):
@@ -203,3 +218,37 @@ async def _send_nightly_summary(bot):
                 await bot.notifier.send_photo(chart_path)
     except Exception as e:
         logger.debug(f"Equity chart not available: {e}")
+
+
+async def _reconcile_daily_balance(bot) -> None:
+    """
+    Compare Kalshi live balance to last known local balance.
+    Sends a Telegram alert if drift exceeds $0.50.
+    Runs once daily at RECONCILE_BALANCE_HOUR.
+    """
+    from agent.kalshi_client import get_balance as _kalshi_get_balance
+    result = _kalshi_get_balance()
+    if "error" in result:
+        logger.warning("Balance reconcile: Kalshi fetch failed — %s", result["error"])
+        return
+
+    live_balance = result.get("balance_dollars", 0.0)
+    state = _load_bot_state()
+    last_known = state.get("last_known_kalshi_balance")
+    state["last_known_kalshi_balance"] = live_balance
+    state["last_balance_reconcile"] = datetime.now(timezone.utc).isoformat()
+    _save_bot_state(state)
+
+    if last_known is not None:
+        delta = abs(live_balance - last_known)
+        if delta > 0.50:
+            msg = (
+                f"⚠️ Balance drift: Kalshi=${live_balance:.2f}, "
+                f"last known=${last_known:.2f}, delta=${delta:.2f}"
+            )
+            logger.warning(msg)
+            await bot.notifier.send_message(msg)
+        else:
+            logger.info("Balance reconcile: OK — Kalshi=$%.2f (delta=$%.2f)", live_balance, delta)
+    else:
+        logger.info("Balance reconcile: baseline set — Kalshi=$%.2f", live_balance)

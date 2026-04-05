@@ -26,7 +26,7 @@ from bot.config import (
     COINGECKO_BASE,
 )
 from bot.math_engine import _self_check_edge
-from bot.odds_scraper import _odds_api_fallback, fetch_consensus_odds
+from bot.odds_scraper import _odds_api_fallback, fetch_consensus_odds, fetch_therundown_odds
 from bot.injuries import check_back_to_back as _check_b2b, get_last_10 as _get_l10
 
 import logging
@@ -106,6 +106,53 @@ COINGECKO_ETH_HISTORY_URL = (
 _ETH_VOL_CACHE: tuple[float, float] | None = None
 _ETH_SPOT_CACHE: tuple[float, float] | None = None
 _ETH_CACHE_TTL = 1800  # 30 min
+
+# ---------------------------------------------------------------------------
+# Multi-asset, multi-timeframe crypto scanner
+# ---------------------------------------------------------------------------
+
+# Per-asset spot/vol caches (keyed by CoinGecko asset id)
+_CRYPTO_SPOT_CACHE: dict[str, dict] = {}
+_CRYPTO_VOL_CACHE: dict[str, dict] = {}
+_CRYPTO_CACHE_TTL = 1800  # 30 min
+
+# Asset config: coingecko_id → (fallback_vol, vol_cap_low, vol_cap_high, confidence, opp_type)
+CRYPTO_ASSETS_CONFIG: dict[str, tuple] = {
+    "bitcoin":  (0.035, 0.010, 0.12, 0.70, "btc_price_edge"),
+    "ethereum": (0.045, 0.010, 0.15, 0.68, "eth_price_edge"),
+    "solana":   (0.055, 0.015, 0.18, 0.65, "sol_price_edge"),
+    "ripple":   (0.050, 0.010, 0.15, 0.60, "xrp_price_edge"),
+    "dogecoin": (0.070, 0.020, 0.20, 0.55, "doge_price_edge"),
+}
+
+# (asset_id, timeframe) → Kalshi series ticker
+# Tickers inferred from Kalshi naming convention; fail-safe: _fetch_series_markets returns []
+CRYPTO_SERIES_MAP: dict[tuple, str] = {
+    # Daily (5pm EDT / 21:00 UTC)
+    ("bitcoin",  "daily"): "KXBTCD",
+    ("ethereum", "daily"): "KXETHD",
+    ("solana",   "daily"): "KXSOLD",
+    ("ripple",   "daily"): "KXXRPD",
+    ("dogecoin", "daily"): "KXDOGED",
+    # Hourly
+    ("bitcoin",  "hourly"): "KXBTC",
+    ("ethereum", "hourly"): "KXETH",
+    ("solana",   "hourly"): "KXSOL",
+    ("ripple",   "hourly"): "KXXRP",
+    ("dogecoin", "hourly"): "KXDOGE",
+    # 15-minute
+    ("bitcoin",  "15min"): "KXBTC15M",
+    ("ethereum", "15min"): "KXETH15M",
+    ("solana",   "15min"): "KXSOL15M",
+    ("ripple",   "15min"): "KXXRP15M",
+    ("dogecoin", "15min"): "KXDOGE15M",
+}
+
+# Active timeframes — weekly TBD (needs longer vol window)
+ACTIVE_CRYPTO_TIMEFRAMES = ["15min", "hourly", "daily"]
+
+# Min hours remaining to enter — skip markets too close to expiry to execute safely
+_TIMEFRAME_MIN_HOURS: dict[str, float] = {"15min": 0.04, "hourly": 0.10, "daily": 0.50}
 
 
 # ---------------------------------------------------------------------------
@@ -501,20 +548,18 @@ def _build_odds_api_lookup(sport: str) -> dict[str, float]:
     else:
         logger.warning("OddsAPI/%s ActionNetwork: no data", sport.upper())
 
-    # Step 2: The Odds API — fills 2-5 day horizon gaps ActionNetwork doesn't cover
-    logger.debug("OddsAPI/%s fetching from The Odds API", sport.upper())
+    # Step 2: TheRundown — free key, 20k pts/day, Pinnacle lines, fills horizon gaps
     try:
-        result = _odds_api_fallback(sport)
-        if "error" not in result:
-            raw_games = result.get("games", [])
-            _add_games_to_lookup(raw_games, lookup)
-            skipped_no_consensus = sum(1 for g in raw_games if not g.get("consensus"))
-            logger.debug("OddsAPI/%s got %d games | %d teams | %d no-consensus",
-                         sport.upper(), len(raw_games), len(lookup) // 2, skipped_no_consensus)
+        tr_result = fetch_therundown_odds(sport)
+        if "error" not in tr_result:
+            tr_games = tr_result.get("games", [])
+            _add_games_to_lookup(tr_games, lookup)
+            logger.debug("OddsAPI/%s TheRundown: %d games | %d teams",
+                         sport.upper(), len(tr_games), len(lookup) // 2)
         else:
-            logger.warning("OddsAPI/%s error: %s", sport.upper(), result['error'])
+            logger.warning("OddsAPI/%s TheRundown: %s", sport.upper(), tr_result.get("error"))
     except Exception as e:
-        logger.warning("OddsAPI/%s exception: %s", sport.upper(), e)
+        logger.warning("OddsAPI/%s TheRundown exception: %s", sport.upper(), e)
 
     # Step 3: Overlay free chain (DK/Bovada/FanDuel) — freshest same-day prices take priority
     chain_result = fetch_consensus_odds(sport)
@@ -524,6 +569,23 @@ def _build_odds_api_lookup(sport: str) -> dict[str, float]:
         source = chain_result.get("source", "free_chain")
         logger.debug("OddsAPI/%s +%s overlay: %d total teams",
                      sport.upper(), source, len(lookup) // 2)
+
+    # Step 4: The Odds API — last resort only, when all free sources returned nothing
+    if not lookup:
+        logger.warning("OddsAPI/%s all free sources empty — falling back to The Odds API (last resort)",
+                       sport.upper())
+        try:
+            result = _odds_api_fallback(sport)
+            if "error" not in result:
+                raw_games = result.get("games", [])
+                _add_games_to_lookup(raw_games, lookup)
+                skipped_no_consensus = sum(1 for g in raw_games if not g.get("consensus"))
+                logger.debug("OddsAPI/%s Odds API fallback: %d games | %d teams | %d no-consensus",
+                             sport.upper(), len(raw_games), len(lookup) // 2, skipped_no_consensus)
+            else:
+                logger.warning("OddsAPI/%s Odds API error: %s", sport.upper(), result["error"])
+        except Exception as e:
+            logger.warning("OddsAPI/%s Odds API exception: %s", sport.upper(), e)
 
     _ODDS_API_CACHE[sport] = (_time.monotonic(), lookup if lookup else {})
     if sport in _ODDS_API_GAME_MAP:
@@ -552,6 +614,24 @@ def scan_sports_series(sport: str) -> list[dict]:
 
     game_lines = _fetch_bovada_game_lines(sport)
     bovada_lookup = _build_bovada_lookup(game_lines)
+
+    # Seed _ODDS_API_GAME_MAP from Bovada lines so Elo cross-check always has game context,
+    # even when the Odds API cache is stale or empty.
+    if game_lines:
+        if sport not in _ODDS_API_GAME_MAP:
+            _ODDS_API_GAME_MAP[sport] = {}
+        for _gl in game_lines:
+            for _team, _ha in ((_gl["home_team"], "home"), (_gl["away_team"], "away")):
+                _key = _team.lower()
+                _ODDS_API_GAME_MAP[sport][_key] = {
+                    "home_team": _gl["home_team"],
+                    "away_team": _gl["away_team"],
+                    "home_away": _ha,
+                }
+                # Also add last-word key for fuzzy matching (mirrors bovada_lookup)
+                _lw = _team.split()[-1].lower()
+                if _lw not in _ODDS_API_GAME_MAP[sport]:
+                    _ODDS_API_GAME_MAP[sport][_lw] = _ODDS_API_GAME_MAP[sport][_key]
 
     # Always fetch Odds API as a supplement — covers games Bovada doesn't have yet
     # (e.g. games 48+ hours out). Cached 30 min so it doesn't burn the rate limit.
@@ -737,8 +817,9 @@ def scan_sports_series(sport: str) -> list[dict]:
                     elif books_edge > 0 and elo_edge <= 0:
                         confidence = max(0.50, confidence - 0.15)
                         elo_agrees = False
-        except Exception:
-            pass
+        except Exception as _elo_exc:
+            logger.debug("Elo cross-check failed for %s: %s", canonical, _elo_exc)
+            elo_prob = None
 
         # Derive opponent directly from Kalshi ticker (reliable — no multi-game map collision)
         opponent_team = ""
@@ -1277,6 +1358,258 @@ def scan_ethereum_series() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Generic multi-asset, multi-timeframe crypto helpers
+# ---------------------------------------------------------------------------
+
+def _prefetch_all_crypto_spots() -> None:
+    """
+    Fetch spot prices for all 5 assets in ONE CoinGecko request.
+    Call this before the ThreadPoolExecutor to warm the cache and avoid
+    15 parallel individual requests that trigger 429s.
+    """
+    all_ids = list(CRYPTO_ASSETS_CONFIG.keys())
+    # Skip assets already cached
+    now = _time.time()
+    stale = [a for a in all_ids
+             if not _CRYPTO_SPOT_CACHE.get(a) or
+             (now - _CRYPTO_SPOT_CACHE[a].get("ts", 0)) >= _CRYPTO_CACHE_TTL]
+    if not stale:
+        return
+    try:
+        import requests
+        ids_param = ",".join(stale)
+        url = f"{COINGECKO_BASE}/simple/price?ids={ids_param}&vs_currencies=usd"
+        r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        ts = _time.time()
+        for asset_id in stale:
+            price = data.get(asset_id, {}).get("usd")
+            if price:
+                _CRYPTO_SPOT_CACHE[asset_id] = {"price": float(price), "ts": ts}
+                logger.debug("CRYPTO prefetch spot %s = $%s", asset_id, price)
+    except Exception as e:
+        logger.warning("CRYPTO prefetch spot failed: %s — will use cached or fallback", e)
+
+
+def _prefetch_all_crypto_vols() -> None:
+    """
+    Fetch vol for all 5 assets SEQUENTIALLY before the ThreadPoolExecutor.
+    Avoids 5 parallel vol requests that trigger CoinGecko 429s.
+    Short sleep between requests stays within the free tier rate limit.
+    """
+    import requests
+    now = _time.time()
+    for asset_id, (fallback_vol, cap_low, cap_high, _, _) in CRYPTO_ASSETS_CONFIG.items():
+        cached = _CRYPTO_VOL_CACHE.get(asset_id, {})
+        if cached and (now - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+            continue  # already fresh
+        try:
+            url = (f"{COINGECKO_BASE}/coins/{asset_id}/market_chart"
+                   "?vs_currency=usd&days=10&interval=daily")
+            r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
+            r.raise_for_status()
+            prices = [p[1] for p in r.json().get("prices", [])]
+            returns = [math.log(prices[i] / prices[i - 1])
+                       for i in range(1, len(prices)) if prices[i - 1] > 0]
+            vol = (math.sqrt(sum(x ** 2 for x in returns) / len(returns))
+                   if returns else fallback_vol)
+            vol = max(cap_low, min(cap_high, vol))
+            _CRYPTO_VOL_CACHE[asset_id] = {"vol": vol, "ts": _time.time()}
+            logger.debug("CRYPTO prefetch vol %s = %.2f%%", asset_id, vol * 100)
+        except Exception as e:
+            logger.warning("CRYPTO prefetch vol failed for %s: %s", asset_id, e)
+        _time.sleep(1.2)   # 1.2s between vol calls — 5 calls / 6s stays under free tier
+
+
+def _get_generic_crypto_spot(asset_id: str) -> float | None:
+    """Fetch CoinGecko spot price for any asset, with 30-min cache."""
+    cached = _CRYPTO_SPOT_CACHE.get(asset_id, {})
+    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+        return cached["price"]
+    try:
+        import requests
+        url = f"{COINGECKO_BASE}/simple/price?ids={asset_id}&vs_currencies=usd"
+        r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
+        r.raise_for_status()
+        price = float(r.json()[asset_id]["usd"])
+        _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time()}
+        logger.debug("CRYPTO spot %s = $%s", asset_id, price)
+        return price
+    except Exception as e:
+        logger.warning("CRYPTO spot fetch failed for %s: %s", asset_id, e)
+        return _CRYPTO_SPOT_CACHE.get(asset_id, {}).get("price")
+
+
+def _get_generic_crypto_vol(asset_id: str, fallback: float,
+                             cap_low: float, cap_high: float) -> float:
+    """Fetch 10-day realized vol from CoinGecko for any asset, with 30-min cache."""
+    cached = _CRYPTO_VOL_CACHE.get(asset_id, {})
+    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+        return cached["vol"]
+    try:
+        import requests
+        url = (f"{COINGECKO_BASE}/coins/{asset_id}/market_chart"
+               "?vs_currency=usd&days=10&interval=daily")
+        r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
+        r.raise_for_status()
+        prices = [p[1] for p in r.json().get("prices", [])]
+        returns = [math.log(prices[i] / prices[i - 1])
+                   for i in range(1, len(prices)) if prices[i - 1] > 0]
+        vol = (math.sqrt(sum(x ** 2 for x in returns) / len(returns))
+               if returns else fallback)
+        vol = max(cap_low, min(cap_high, vol))
+        _CRYPTO_VOL_CACHE[asset_id] = {"vol": vol, "ts": _time.time()}
+        logger.debug("CRYPTO vol %s = %.2f%%", asset_id, vol * 100)
+        return vol
+    except Exception as e:
+        logger.warning("CRYPTO vol fetch failed for %s: %s", asset_id, e)
+        return _CRYPTO_VOL_CACHE.get(asset_id, {}).get("vol", fallback)
+
+
+def _extract_crypto_threshold(ticker: str) -> float | None:
+    """Extract price threshold from ticker suffix. e.g. KXBTCD-25APR05-T67000 → 67000.0"""
+    for part in ticker.split("-"):
+        if part.startswith("T") and part[1:].replace(".", "").isdigit():
+            return float(part[1:])
+    return None
+
+
+def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
+    """
+    Scan a single (asset, timeframe) pair against Kalshi markets.
+
+    Uses the market's close_time field to compute hours_remaining —
+    works for 15-min, hourly, and daily markets without hardcoded resolve times.
+    """
+    series = CRYPTO_SERIES_MAP.get((asset_id, timeframe))
+    if not series:
+        return []
+
+    markets = _fetch_series_markets(series)
+    if not markets:
+        logger.debug("CRYPTO %s/%s: no open markets for %s", asset_id, timeframe, series)
+        return []
+
+    fallback_vol, cap_low, cap_high, confidence, opp_type = CRYPTO_ASSETS_CONFIG[asset_id]
+    spot = _get_generic_crypto_spot(asset_id)
+    if not spot:
+        return []
+
+    vol = _get_generic_crypto_vol(asset_id, fallback_vol, cap_low, cap_high)
+    now_utc = datetime.now(timezone.utc)
+    min_hours = _TIMEFRAME_MIN_HOURS.get(timeframe, 0.10)
+
+    opportunities = []
+    for market in markets:
+        ticker = market.get("ticker", "")
+        yes_ask = market.get("yes_ask")
+        if not yes_ask or yes_ask <= 0:
+            continue
+
+        # Derive hours_remaining from close_time (works for any timeframe)
+        close_time = market.get("close_time") or market.get("expiration_time")
+        if not close_time:
+            continue
+        try:
+            close_dt = datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        hours_remaining = (close_dt - now_utc).total_seconds() / 3600.0
+        if hours_remaining < min_hours or hours_remaining > 200:
+            continue
+
+        threshold = _extract_crypto_threshold(ticker)
+        if threshold is None:
+            continue
+
+        scaled_vol = vol * math.sqrt(hours_remaining / 24.0)
+        if scaled_vol <= 0:
+            continue
+        log_ratio = math.log(spot / threshold)
+        z = log_ratio / scaled_vol
+        fair_value = 0.5 * math.erfc(-z / math.sqrt(2))
+        kalshi_price = yes_ask / 100.0
+        edge = fair_value - kalshi_price
+        relative_edge = edge / kalshi_price if kalshi_price > 0 else 0.0
+
+        check_ok, _ = _self_check_edge(fair_value, kalshi_price, edge)
+        if not check_ok:
+            continue
+        if kalshi_price <= 0.03 or fair_value <= 0.03:
+            continue
+        if abs(relative_edge) < MIN_RELATIVE_EDGE:
+            continue
+        # Absolute edge cap: >25% means stale pricing, near-expiry, or broken liquidity
+        if abs(edge) > 0.25:
+            logger.warning(
+                "CRYPTO %s/%s SKIP %s: edge %.1f%% exceeds 25%% cap — stale/near-expiry",
+                asset_id, timeframe, ticker, edge * 100,
+            )
+            continue
+
+        opportunities.append({
+            "type": opp_type,
+            "timeframe": timeframe,
+            "ticker": ticker,
+            "title": market.get("title", ""),
+            "market": market,
+            "edge": round(edge, 4),
+            "relative_edge": round(relative_edge, 4),
+            "confidence": confidence,
+            "recommended_side": "yes" if edge > 0 else "no",
+            "spot": round(spot, 4),
+            "threshold": threshold,
+            "fair_value": round(fair_value, 4),
+            "kalshi_price": round(kalshi_price, 4),
+            "hours_remaining": round(hours_remaining, 2),
+            "realized_vol": round(vol, 4),
+            "edge_result": {
+                "fair_value": round(fair_value, 4),
+                "kalshi_price": round(kalshi_price, 4),
+                "edge": round(edge, 4),
+                "relative_edge": round(relative_edge, 4),
+                "self_check_passed": True,   # already verified by _self_check_edge() above
+            },
+        })
+
+    return opportunities
+
+
+def scan_all_crypto_markets() -> list[dict]:
+    """
+    Scan all crypto assets across all active timeframes in parallel.
+
+    Called exclusively by the standalone _crypto_scan_loop() in main.py every 5 minutes.
+    """
+    # Warm spot + vol caches before thread pool fires — prevents 15 parallel
+    # CoinGecko calls. Spot is one batched request; vol is sequential (no batch endpoint).
+    _prefetch_all_crypto_spots()
+    _prefetch_all_crypto_vols()
+
+    tasks = [
+        (asset_id, timeframe)
+        for asset_id in CRYPTO_ASSETS_CONFIG
+        for timeframe in ACTIVE_CRYPTO_TIMEFRAMES
+        if (asset_id, timeframe) in CRYPTO_SERIES_MAP
+    ]
+    all_opps: list[dict] = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(_scan_crypto_series, a, t): (a, t) for a, t in tasks}
+        for future in as_completed(futures):
+            asset_id, timeframe = futures[future]
+            try:
+                opps = future.result()
+                if opps:
+                    logger.info("CRYPTO %s/%s: %d opportunities",
+                                asset_id.upper(), timeframe, len(opps))
+                all_opps.extend(opps)
+            except Exception as e:
+                logger.warning("CRYPTO %s/%s error: %s", asset_id, timeframe, e)
+    return all_opps
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1284,9 +1617,8 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     """
     Run all series scanners and return combined opportunities.
 
-    Sports are scanned sequentially with 0.5s gaps to avoid Kalshi 429 rate limits.
-    Bovada and Odds API calls are still fast (cached or quick), so total time is
-    ~20-30 s — acceptable given the 2-minute scan interval.
+    Sports are scanned in parallel (4 workers) with a per-worker 1s delay to
+    avoid Kalshi 429 rate limits. Wall time drops from ~20-30s to ~2-3s.
 
     Args:
         odds_by_sport: Unused — Bovada is fetched directly inside scan_sports_series.
@@ -1294,28 +1626,26 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     """
     all_opps: list[dict] = []
 
-    for sport in SPORTS_SERIES:
-        try:
-            opps = scan_sports_series(sport)
-            logger.info("Series/%s found %d opportunities", sport.upper(), len(opps))
-            all_opps.extend(opps)
-        except Exception as e:
-            logger.warning("Series/%s error: %s", sport.upper(), e)
-        _time.sleep(1.0)  # 1s gap between sports to avoid Kalshi 429
+    def _scan_one_sport(sport: str) -> list[dict]:
+        _time.sleep(1.0)  # per-worker rate-limit gap
+        return scan_sports_series(sport)
 
-    _time.sleep(1.0)  # extra gap before BTC (NBA paginator hits Kalshi hard)
-    btc_opps = scan_bitcoin_series()
-    logger.info("Series/BTC found %d opportunities", len(btc_opps))
-    all_opps.extend(btc_opps)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_scan_one_sport, sport): sport for sport in SPORTS_SERIES}
+        for future in as_completed(futures):
+            sport = futures[future]
+            try:
+                opps = future.result()
+                logger.info("Series/%s found %d opportunities", sport.upper(), len(opps))
+                all_opps.extend(opps)
+            except Exception as e:
+                logger.warning("Series/%s error: %s", sport.upper(), e)
 
     _time.sleep(1.0)
     ipl_opps = scan_ipl_series()
     logger.info("Series/IPL found %d opportunities", len(ipl_opps))
     all_opps.extend(ipl_opps)
 
-    _time.sleep(0.5)
-    eth_opps = scan_ethereum_series()
-    logger.info("Series/ETH found %d opportunities", len(eth_opps))
-    all_opps.extend(eth_opps)
+    # Crypto is handled by the independent _crypto_scan_loop in main.py — not here
 
     return all_opps

@@ -6,6 +6,7 @@ import path from 'path';
 const app = express();
 const PORT = 3001;
 const STATE_DIR = path.resolve(import.meta.dirname, '../../state');
+const BOT_STATE_DIR = path.resolve(import.meta.dirname, '../../bot/state');
 const LOGS_DIR = path.resolve(import.meta.dirname, '../../logs');
 const REPORTS_DIR = path.join(STATE_DIR, 'reports');
 
@@ -120,6 +121,11 @@ app.post('/api/proposals/:id/review', (req, res) => {
   atomicWrite(proposalsPath, proposals);
   res.json({ ok: true });
 });
+
+// Bot trading state endpoints
+app.get('/api/bot/paper-trades', (_req, res) => res.json(readJson(path.join(BOT_STATE_DIR, 'paper_trades.json'))));
+app.get('/api/bot/positions', (_req, res) => res.json(readJson(path.join(BOT_STATE_DIR, 'positions.json'))));
+app.get('/api/bot/state', (_req, res) => res.json(readJson(path.join(BOT_STATE_DIR, 'bot_state.json'), {})));
 
 app.listen(PORT, () => {
   console.log(`Hustle Agent API running on http://localhost:${PORT}`);

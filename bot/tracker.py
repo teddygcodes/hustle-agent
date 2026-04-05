@@ -7,7 +7,6 @@ Sends Telegram alerts for significant moves and daily summaries.
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 from datetime import datetime, timezone, date
@@ -20,26 +19,11 @@ from agent.kalshi_client import get_market, get_balance, get_positions as kalshi
 from bot.config import (
     POSITIONS_FILE, TRADE_HISTORY_FILE, BOT_STATE_FILE,
     POSITION_MOVE_ALERT, TAKE_PROFIT_THRESHOLD, CUT_LOSS_THRESHOLD,
+    PAPER_TRADES_FILE,
 )
+from bot.state_io import load_json as _load_json, save_json as _save_json
 
 logger = logging.getLogger("nexus.tracker")
-
-
-# ---------------------------------------------------------------------------
-# State I/O
-# ---------------------------------------------------------------------------
-
-def _load_json(path: Path) -> list | dict:
-    if path.exists():
-        return json.loads(path.read_text())
-    return [] if "positions" in str(path) or "history" in str(path) else {}
-
-
-def _save_json(path: Path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, default=str))
-    tmp.rename(path)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +199,23 @@ def resolve_trades() -> list[dict]:
         pos["payout"] = round(payout, 2)
         pos["pnl"] = round(pnl, 2)
         pos["resolved_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Update paper_trades.json if this was a paper position
+        if pos.get("paper"):
+            order_id = pos.get("order_id", "")
+            resolved_at_iso = pos["resolved_at"]
+            paper_trades = _load_json(PAPER_TRADES_FILE)
+            if isinstance(paper_trades, list):
+                for pt in paper_trades:
+                    if pt.get("id") == order_id or (
+                        not order_id and pt.get("ticker") == ticker and pt.get("status") == "open"
+                    ):
+                        pt["status"] = "won" if won else "lost"
+                        pt["exit_price"] = 1.0 if won else 0.0
+                        pt["pnl"] = round(pnl, 4)
+                        pt["resolved_at"] = resolved_at_iso
+                        break
+                _save_json(PAPER_TRADES_FILE, paper_trades)
 
         resolved.append({
             "ticker": ticker,

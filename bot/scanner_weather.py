@@ -299,6 +299,14 @@ def scan_weather_markets() -> list[dict]:
             days_ahead=days_ahead,
         )
 
+        # Cap: edges > 25% absolute are likely stale pricing or near-expiry artefacts
+        if abs(edge_result.get("edge", 0)) > 0.25:
+            logger.warning(
+                "SKIP %s: edge %.1f%% exceeds 25%% cap — likely stale price or near-expiry",
+                ticker, edge_result["edge"] * 100,
+            )
+            continue
+
         fair_value = edge_result.get("fair_value", 0)
         rel_edge = edge_result.get("relative_edge", 0)
         corrected = edge_result.get("corrected_temp", forecast_temp)

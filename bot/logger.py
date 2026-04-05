@@ -30,5 +30,6 @@ def setup_file_logging(level: int = logging.INFO):
         "[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
+    logging.getLogger().setLevel(logging.INFO)  # root must pass INFO before handlers see it
     logging.getLogger().addHandler(handler)
     _initialized = True

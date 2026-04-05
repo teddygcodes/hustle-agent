@@ -562,9 +562,19 @@ class TelegramNotifier:
         """Stop the Telegram bot."""
         if not self.app:
             return
-        await self.app.updater.stop()
-        await self.app.stop()
-        await self.app.shutdown()
+        try:
+            if self.app.updater.running:
+                await self.app.updater.stop()
+        except Exception:
+            pass
+        try:
+            await self.app.stop()
+        except Exception:
+            pass
+        try:
+            await self.app.shutdown()
+        except Exception:
+            pass
         logger.info("Telegram bot stopped")
 
     def register_callback(self, command: str, callback: Callable):
@@ -757,7 +767,6 @@ class TelegramNotifier:
         _ALIASES = {
             "DETAILS": "DETAIL",
             "STAT": "STATUS",
-            "STATS": "STATUS",
             "HIST": "HISTORY",
             "POS": "POSITIONS",
             "BAL": "BALANCE",

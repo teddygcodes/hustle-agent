@@ -190,9 +190,12 @@ def _run_bot_start(state: dict) -> list[str]:
              patch("bot.main._save_bot_state"), \
              patch("bot.main._load_pending", return_value=[]), \
              patch("bot.main._save_pending"), \
+             patch("bot.main._acquire_lock"), \
+             patch("bot.main._release_lock"), \
              patch("bot.main.TelegramNotifier", return_value=mock_notifier), \
              patch.object(GlintBot, "_register_commands"), \
-             patch.object(GlintBot, "_main_loop", new_callable=AsyncMock):
+             patch.object(GlintBot, "_main_loop", new_callable=AsyncMock), \
+             patch.object(GlintBot, "_crypto_scan_loop", new_callable=AsyncMock):
             bot = GlintBot()
             await bot.start()
         return [str(call) for call in mock_notifier.send_message.call_args_list]

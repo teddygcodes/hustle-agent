@@ -12,6 +12,7 @@ import Proposals from './pages/Proposals';
 import Health from './pages/Health';
 import Instincts from './pages/Instincts';
 import Reports from './pages/Reports';
+import Trades from './pages/Trades';
 
 export default function App() {
   return (
@@ -30,6 +31,7 @@ export default function App() {
           <Route path="health" element={<Health />} />
           <Route path="instincts" element={<Instincts />} />
           <Route path="reports" element={<Reports />} />
+          <Route path="trades" element={<Trades />} />
         </Route>
       </Routes>
     </BrowserRouter>

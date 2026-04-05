@@ -210,8 +210,7 @@ def test_kalshi_series_uses_logger_not_print(capsys):
     import bot.kalshi_series as ks
 
     with patch.object(ks, "scan_sports_series", return_value=[]), \
-         patch.object(ks, "scan_bitcoin_series", return_value=[]), \
-         patch.object(ks, "scan_ethereum_series", return_value=[]), \
+         patch.object(ks, "scan_all_crypto_markets", return_value=[]), \
          patch.object(ks, "scan_ipl_series", return_value=[]):
         ks.scan_series_markets()
 

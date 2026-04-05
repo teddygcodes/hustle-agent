@@ -40,7 +40,7 @@ MIN_RELATIVE_EDGE = 0.15       # 15% minimum relative edge to alert
 MAX_BET_FRACTION = 0.05        # 5% of balance per trade
 KELLY_FRACTION = 0.25          # 25% of full Kelly (conservative)
 MIN_BET_DOLLARS = 1.00         # Not worth execution cost below this
-MAX_BET_DOLLARS = 25.00        # Hard cap per trade
+# MAX_BET_DOLLARS removed — replaced by dynamic cap: min(balance * MAX_BET_FRACTION, 200.0) in sizing.py
 
 # ---------------------------------------------------------------------------
 # Scan Intervals (seconds)
@@ -55,7 +55,7 @@ LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant
 # Weather
 # ---------------------------------------------------------------------------
 NWS_BIAS_CORRECTION = 1.5     # Degrees F — documented NWS warm bias
-WEATHER_STD_DEV = 2.0          # Forecast uncertainty (degrees F)
+# WEATHER_STD_DEV removed — sigma is computed dynamically in math_engine.py
 
 # NWS city coordinates for Kalshi weather markets
 NWS_CITIES = {
@@ -134,6 +134,7 @@ BOVADA_SPORT_PATHS = {
     "nfl":   "football/nfl",
     "ncaab": "basketball/ncaab",
     "ufc":   "mma/ufc",
+    "ipl":   "cricket/indian-premier-league",
 }
 
 # ---------------------------------------------------------------------------
@@ -169,7 +170,7 @@ ESPN_SPORT_PATHS = {
 # ---------------------------------------------------------------------------
 _therundown_cfg = _load_json(CONFIG_DIR / "therundown.json")
 THERUNDOWN_API_KEY = _therundown_cfg.get("api_key", "")
-THERUNDOWN_BASE = "https://therundown-therundown-v1.p.rapidapi.com"
+THERUNDOWN_BASE = "https://therundown.io/api/v1"
 # Sport IDs: https://therundown.io/api/sports
 THERUNDOWN_SPORT_IDS = {
     "nba":   4,
@@ -182,8 +183,9 @@ THERUNDOWN_SPORT_IDS = {
 # ---------------------------------------------------------------------------
 # Crypto Monitoring
 # ---------------------------------------------------------------------------
-CRYPTO_ASSETS = ["bitcoin", "ethereum", "solana"]
+CRYPTO_ASSETS = ["bitcoin", "ethereum", "solana", "ripple", "dogecoin"]
 CRYPTO_CACHE_TTL = 60          # seconds between CoinGecko requests
+CRYPTO_SCAN_INTERVAL = 300     # seconds between standalone crypto scan loop runs
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 # ---------------------------------------------------------------------------
@@ -240,6 +242,7 @@ PENDING_GO_WINDOW_HOURS = 2    # Opportunity expires this many hours after marke
 # All edge detection, sizing, and alerts run normally — only execution is skipped.
 # Flip to False only after paper trading shows consistent +CLV.
 PAPER_MODE = True
+PAPER_STARTING_BALANCE = 500.0  # Simulated starting balance for paper trading ($)
 
 # ---------------------------------------------------------------------------
 # Active strategies — only these edge types trigger trades
@@ -247,7 +250,18 @@ PAPER_MODE = True
 # "weather"         — NWS bias correction (next-day markets only)
 # "vig_stack_series" — Series ladder NO edge (mechanical, no prediction)
 # Add others only after 20+ resolved paper trades with +CLV on each.
-ACTIVE_STRATEGIES = ["weather", "vig_stack_series", "series_game_edge", "ipl_game_edge", "eth_price_edge", "econ_cpi_edge"]
+ACTIVE_STRATEGIES = [
+    "weather",
+    "vig_stack_series",
+    "series_game_edge",
+    "econ_cpi_edge",
+    "ipl_game_edge",
+    "btc_price_edge",   # was missing — BTC scanner was implemented but not gated
+    "eth_price_edge",
+    "sol_price_edge",   # new
+    "xrp_price_edge",   # new
+    "doge_price_edge",  # new
+]
 
 # ---------------------------------------------------------------------------
 # Weather strategy — next-day filter
@@ -273,3 +287,4 @@ BOT_STATE_FILE = BOT_STATE_DIR / "bot_state.json"
 WATCHLIST_FILE = BOT_STATE_DIR / "watchlist.json"
 PATTERNS_FILE = BOT_STATE_DIR / "patterns.json"
 CLV_FILE = BOT_STATE_DIR / "clv.json"
+PAPER_TRADES_FILE = BOT_STATE_DIR / "paper_trades.json"
