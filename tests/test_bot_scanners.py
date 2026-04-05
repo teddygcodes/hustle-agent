@@ -190,3 +190,15 @@ def test_scanner_sports_uses_logger_not_print(capsys):
 
     captured = capsys.readouterr()
     assert captured.out == "", f"scanner_sports printed to stdout: {captured.out!r}"
+
+
+def test_scanner_morning_scan_uses_logger_not_print(capsys):
+    """morning_weather_scan must not emit any print() output."""
+    from unittest.mock import patch
+    import bot.scanner as sc
+
+    with patch.object(sc, "scan_weather_markets", return_value=[]):
+        sc.morning_weather_scan()
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"scanner morning_weather_scan printed to stdout: {captured.out!r}"
