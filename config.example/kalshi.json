@@ -1,0 +1,7 @@
+{
+  "provider": "kalshi",
+  "api_key_id": "your-kalshi-api-key-id-here",
+  "private_key_path": "kalshi-private-key.pem",
+  "environment": "production",
+  "status": "active"
+}
