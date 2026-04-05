@@ -207,7 +207,7 @@ class OutcomeTracker:
                 logger.warning("Resolution failed for %s: %s", alert['ticker'], e)
         return resolved_count
 
-    def print_calibration_summary(self):
+    def log_calibration_summary(self):
         report = self.get_calibration_report()
         if not report:
             return

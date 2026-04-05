@@ -18,6 +18,9 @@ import ssl
 import time
 import urllib.request
 
+import logging
+logger = logging.getLogger("nexus.elo")
+
 try:
     import certifi
     _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
@@ -36,6 +39,7 @@ ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_STANDINGS_PATHS: dict[str, str] = {
     "nba": "basketball/nba/standings",
     "mlb": "baseball/mlb/standings",
+    "nhl": "hockey/nhl/standings",
 }
 # ESPN v2 standings API returns different stat keys than the site API
 ESPN_STANDINGS_V2_BASE = "https://site.api.espn.com/apis/v2/sports"
@@ -72,7 +76,7 @@ def _get_json(url: str, timeout: int = 8) -> dict | None:
         with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"  [Elo] HTTP error ({url[:80]}): {e}")
+        logger.warning("Elo HTTP error (%s): %s", url[:80], e)
         return None
 
 
@@ -93,7 +97,7 @@ def _load_ratings(sport: str) -> dict[str, float]:
         mtime = os.path.getmtime(_ELO_FILE)
         age_days = (time.time() - mtime) / 86400
         if age_days > _ELO_MAX_AGE_DAYS:
-            print(f"  [Elo] Ratings file is {age_days:.0f} days old — forcing re-seed from ESPN")
+            logger.info("Elo ratings file is %.0f days old — forcing re-seed from ESPN", age_days)
             return {}
         with open(_ELO_FILE) as f:
             all_ratings: dict = json.load(f)
@@ -188,10 +192,10 @@ def _seed_from_espn(sport: str) -> dict[str, float]:
             ratings[name] = round(_DEFAULT_ELO + (win_pct - 0.5) * _SEED_SCALE, 2)
 
     if ratings:
-        print(f"  [Elo] Seeded {len(ratings)} {sport.upper()} teams from ESPN standings")
+        logger.info("Elo seeded %d %s teams from ESPN standings", len(ratings), sport.upper())
         _SEED_CACHE[sport] = (time.monotonic(), ratings)
     else:
-        print(f"  [Elo] WARNING: could not seed {sport.upper()} Elo from ESPN ({url})")
+        logger.warning("Elo could not seed %s Elo from ESPN (%s)", sport.upper(), url)
 
     return ratings
 
@@ -274,7 +278,7 @@ def update_elo(winner: str, loser: str, sport: str, k: int = 20) -> None:
     ratings[loser]  = round(l_elo + k * (0.0 - (1.0 - expected_w)), 2)
 
     _save_ratings(sport, ratings)
-    print(f"  [Elo] Updated: {winner} {ratings[winner]:.0f} / {loser} {ratings[loser]:.0f}")
+    logger.debug("Elo updated: %s %.0f / %s %.0f", winner, ratings[winner], loser, ratings[loser])
 
 
 def get_all_ratings(sport: str) -> dict[str, float]:

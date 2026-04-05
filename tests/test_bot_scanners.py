@@ -217,3 +217,19 @@ def test_kalshi_series_uses_logger_not_print(capsys):
 
     captured = capsys.readouterr()
     assert captured.out == "", f"kalshi_series printed to stdout: {captured.out!r}"
+
+
+def test_odds_scraper_uses_logger_not_print(capsys):
+    """fetch_consensus_odds must not emit any print() output."""
+    from unittest.mock import patch
+    import bot.odds_scraper as os_mod
+
+    with patch.object(os_mod, "fetch_draftkings_odds", return_value={"games": [], "error": "mocked"}), \
+         patch.object(os_mod, "fetch_bovada_odds", return_value={"games": [], "error": "mocked"}), \
+         patch.object(os_mod, "fetch_fanduel_odds", return_value={"games": [], "error": "mocked"}), \
+         patch.object(os_mod, "fetch_espn_odds", return_value={"games": [], "error": "mocked"}), \
+         patch.object(os_mod, "_odds_api_fallback", return_value={"games": [], "error": "mocked"}):
+        os_mod.fetch_consensus_odds("nba")
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"odds_scraper printed to stdout: {captured.out!r}"

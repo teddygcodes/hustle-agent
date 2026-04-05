@@ -845,7 +845,7 @@ class GlintBot:
                 resolved = _outcome_tracker.check_and_resolve()
                 if resolved:
                     logger.info("OutcomeTracker resolved %d market(s)", resolved)
-                _outcome_tracker.print_calibration_summary()
+                _outcome_tracker.log_calibration_summary()
             except Exception as e:
                 logger.debug(f"OutcomeTracker step skipped: {e}")
 

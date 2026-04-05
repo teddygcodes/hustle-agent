@@ -21,9 +21,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import logging
+
 from agent.kalshi_client import get_markets
 from bot.config import MIN_RELATIVE_EDGE, CONFIG_DIR
 from bot.math_engine import _self_check_edge
+
+logger = logging.getLogger("glint.econ_scanner")
 
 try:
     import certifi
@@ -73,7 +77,7 @@ def _get_json(url: str, timeout: int = 12, max_retries: int = 3) -> dict | list 
             if attempt < max_retries - 1:
                 _time.sleep(2 ** attempt)
             else:
-                print(f"  [EconHTTP] Error fetching {url[:80]}: {e}")
+                logger.warning("EconHTTP error fetching %s: %s", url[:80], e)
     return None
 
 
@@ -92,8 +96,7 @@ def _get_cpi_nowcast() -> Optional[float]:
 
     api_key = _load_fred_key()
     if not api_key:
-        print("  [Econ] No FRED API key — register free at fred.stlouisfed.org/docs/api/api_key.html")
-        print("  [Econ] Save key to config/fred.json: {\"api_key\": \"YOUR_KEY\"}")
+        logger.warning("Econ no FRED API key — register free at fred.stlouisfed.org/docs/api/api_key.html; save to config/fred.json")
         # Don't cache missing-key failures — retry on next cycle once key is added
         return None
 
@@ -105,7 +108,7 @@ def _get_cpi_nowcast() -> Optional[float]:
     )
     data = _get_json(url)
     if not data or "observations" not in data:
-        print(f"  [Econ] FRED API returned unexpected response — check api_key in config/fred.json")
+        logger.warning("Econ FRED API returned unexpected response — check api_key in config/fred.json")
         return None  # Don't cache API errors — retry next cycle
 
     # Build date→value dict, skipping missing "." values
@@ -119,7 +122,7 @@ def _get_cpi_nowcast() -> Optional[float]:
                 pass
 
     if not obs_by_month:
-        print(f"  [Econ] FRED returned no valid observations")
+        logger.warning("Econ FRED returned no valid observations")
         return None
 
     # Find most recent month and look up year-ago by date (handles gaps)
@@ -128,14 +131,14 @@ def _get_cpi_nowcast() -> Optional[float]:
     year_ago_month = f"{year - 1:04d}-{month:02d}"
 
     if year_ago_month not in obs_by_month:
-        print(f"  [Econ] FRED missing year-ago data ({year_ago_month}) — data not ready")
+        logger.warning("Econ FRED missing year-ago data (%s) — data not ready", year_ago_month)
         return None
 
     try:
         latest = obs_by_month[latest_month]
         year_ago = obs_by_month[year_ago_month]
         yoy_pct = ((latest - year_ago) / year_ago) * 100.0
-        print(f"  [Econ] FRED CPI: {latest_month}={latest:.3f} {year_ago_month}={year_ago:.3f} YoY={yoy_pct:.2f}%")
+        logger.debug("Econ FRED CPI: %s=%.3f %s=%.3f YoY=%.2f%%", latest_month, latest, year_ago_month, year_ago, yoy_pct)
         _CPI_CACHE = (_time.monotonic(), yoy_pct)  # Only cache successful results
         return yoy_pct
     except (ValueError, ZeroDivisionError):
@@ -172,15 +175,15 @@ def scan_econ_markets() -> list[dict]:
     """
     markets = _fetch_kalshi_econ_markets()
     if not markets:
-        print("  [Econ] No open economic markets found")
+        logger.info("Econ no open economic markets found")
         return []
 
     nowcast = _get_cpi_nowcast()
     if nowcast is None:
-        print("  [Econ] FRED CPI data unavailable — skipping")
+        logger.warning("Econ FRED CPI data unavailable — skipping")
         return []
 
-    print(f"  [Econ] {len(markets)} markets | Cleveland Fed CPI nowcast={nowcast:.2f}%")
+    logger.info("Econ %d markets | CPI nowcast=%.2f%%", len(markets), nowcast)
 
     now_utc = datetime.now(timezone.utc)
     opportunities = []

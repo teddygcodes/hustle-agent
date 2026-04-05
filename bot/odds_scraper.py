@@ -158,9 +158,9 @@ def _dk_get(url: str, timeout: int = 5) -> dict | None:
     except urllib.error.HTTPError as e:
         if e.code == 403:
             _DK_DISABLED = True
-            print("  [DK] 403 Forbidden — Akamai WAF blocking this IP. DraftKings disabled for this session.")
+            logger.warning("DK 403 Forbidden — Akamai WAF blocking this IP. DraftKings disabled for this session.")
         else:
-            logger.warning(f"DraftKings API error ({url[:80]}): {e}")
+            logger.warning("DraftKings API error (%s): %s", url[:80], e)
         return None
     except Exception as e:
         _DK_DISABLED = True  # Any failure (timeout, connection error) disables DK for this session
@@ -256,10 +256,10 @@ def fetch_draftkings_odds(sport: str) -> dict:
 
     event_group = data.get("eventGroup", data)
     events_raw = event_group.get("events", [])
-    print(f"  [DK-DEBUG] {sport.upper()}: {len(events_raw)} raw events")
+    logger.debug("DK %s: %d raw events", sport.upper(), len(events_raw))
 
     offers_by_event = _parse_dk_offers(event_group)
-    print(f"  [DK-DEBUG] {sport.upper()}: offer data for {len(offers_by_event)} event IDs")
+    logger.debug("DK %s: offer data for %d event IDs", sport.upper(), len(offers_by_event))
 
     games = []
     has_live = False
@@ -388,10 +388,7 @@ def fetch_draftkings_odds(sport: str) -> dict:
         })
 
     games_with_odds = [g for g in games if g.get("consensus")]
-    print(
-        f"  [DraftKings] {sport.upper()}: {len(games)} games, "
-        f"{len(games_with_odds)} with moneylines"
-    )
+    logger.info("DraftKings %s: %d games, %d with moneylines", sport.upper(), len(games), len(games_with_odds))
 
     return {
         "sport": sport,
@@ -447,7 +444,7 @@ def fetch_bovada_odds(sport: str) -> dict:
         return {"error": "Bovada API request failed", "games": []}
 
     raw_events = data[0].get("events", []) if data else []
-    print(f"  [Bovada-DEBUG] {sport.upper()}: {len(raw_events)} events")
+    logger.debug("Bovada %s: %d events", sport.upper(), len(raw_events))
 
     games = []
     has_live = False
@@ -586,10 +583,7 @@ def fetch_bovada_odds(sport: str) -> dict:
         })
 
     games_with_odds = [g for g in games if g.get("consensus")]
-    print(
-        f"  [Bovada] {sport.upper()}: {len(games)} games, "
-        f"{len(games_with_odds)} with moneylines"
-    )
+    logger.info("Bovada %s: %d games, %d with moneylines", sport.upper(), len(games), len(games_with_odds))
 
     return {
         "sport": sport,
@@ -633,9 +627,9 @@ def _fd_get(url: str, timeout: int = 8) -> dict | None:
     except urllib.error.HTTPError as e:
         if e.code in (403, 401):
             _FD_DISABLED = True
-            print(f"  [FD] {e.code} — FanDuel API blocked. Disabled for this session.")
+            logger.warning("FD %d — FanDuel API blocked. Disabled for this session.", e.code)
         else:
-            logger.warning(f"FanDuel API error ({url[:80]}): {e}")
+            logger.warning("FanDuel API error (%s): %s", url[:80], e)
         return None
     except Exception as e:
         logger.warning(f"FanDuel API error ({url[:80]}): {e}")
@@ -758,10 +752,7 @@ def fetch_fanduel_odds(sport: str) -> dict:
             })
 
         games_with_odds = [g for g in games if g.get("consensus")]
-        print(
-            f"  [FD] {sport.upper()}: {len(games)} games, "
-            f"{len(games_with_odds)} with moneylines"
-        )
+        logger.info("FD %s: %d games, %d with moneylines", sport.upper(), len(games), len(games_with_odds))
 
         return {
             "sport": sport,
@@ -814,13 +805,13 @@ def fetch_espn_odds(sport: str) -> dict:
     if events:
         first_comp = events[0].get("competitions", [{}])[0]
         raw_odds = first_comp.get("odds", [])
-        print(f"  [ESPN-DEBUG] {sport.upper()} scoreboard: {len(events)} events")
+        logger.debug("ESPN %s scoreboard: %d events", sport.upper(), len(events))
         if raw_odds:
-            print(f"  [ESPN-DEBUG] odds[0] keys: {sorted(raw_odds[0].keys())}")
+            logger.debug("ESPN odds[0] keys: %s", sorted(raw_odds[0].keys()))
         else:
-            print(f"  [ESPN-DEBUG] No odds in first game competition")
+            logger.debug("ESPN %s no odds in first game competition", sport.upper())
     else:
-        print(f"  [ESPN-DEBUG] No events in ESPN {sport.upper()} scoreboard response")
+        logger.debug("ESPN %s no events in scoreboard response", sport.upper())
 
     for event in events:
         competitions = event.get("competitions", [])
@@ -952,9 +943,9 @@ def fetch_therundown_odds(sport: str) -> dict:
         req = urllib.request.Request(
             url,
             headers={
-                "x-rapidapi-host": "therundown-therundown-v1.p.rapidapi.com",
-                "x-rapidapi-key": THERUNDOWN_API_KEY,
+                "X-TheRundown-Key": THERUNDOWN_API_KEY,
                 "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0",
             },
         )
         with urllib.request.urlopen(req, context=ctx, timeout=10) as resp:
@@ -1050,10 +1041,7 @@ def fetch_therundown_odds(sport: str) -> dict:
         })
 
     games_with_odds = [g for g in games if g.get("consensus")]
-    print(
-        f"  [Rundown] {sport.upper()}: {len(games)} games, "
-        f"{len(games_with_odds)} with moneylines"
-    )
+    logger.info("Rundown %s: %d games, %d with moneylines", sport.upper(), len(games), len(games_with_odds))
 
     return {
         "sport": sport,
@@ -1159,9 +1147,9 @@ def fetch_consensus_odds(sport: str) -> dict:
         return result
 
     if "error" not in result:
-        print(f"  [DK] DraftKings returned 0 odds for {sport.upper()} — trying Bovada")
+        logger.warning("DK %s returned 0 odds — trying Bovada", sport.upper())
     else:
-        print(f"  [DK] DraftKings failed for {sport.upper()}: {result.get('error')} — trying Bovada")
+        logger.warning("DK %s failed: %s — trying Bovada", sport.upper(), result.get('error'))
 
     # 3. Bovada
     result = fetch_bovada_odds(sport)
@@ -1175,9 +1163,9 @@ def fetch_consensus_odds(sport: str) -> dict:
         return result
 
     if "error" not in result:
-        print(f"  [Bovada] Bovada returned 0 odds for {sport.upper()} — trying FanDuel")
+        logger.warning("Bovada %s returned 0 odds — trying FanDuel", sport.upper())
     else:
-        print(f"  [Bovada] Bovada failed for {sport.upper()}: {result.get('error')} — trying FanDuel")
+        logger.warning("Bovada %s failed: %s — trying FanDuel", sport.upper(), result.get('error'))
 
     # 4. FanDuel
     result = fetch_fanduel_odds(sport)
@@ -1190,18 +1178,16 @@ def fetch_consensus_odds(sport: str) -> dict:
         return result
 
     if "error" not in result:
-        print(f"  [FD] FanDuel returned 0 odds for {sport.upper()} — trying ESPN")
+        logger.warning("FD %s returned 0 odds — trying ESPN", sport.upper())
     else:
-        print(f"  [FD] FanDuel failed for {sport.upper()}: {result.get('error')} — trying ESPN")
+        logger.warning("FD %s failed: %s — trying ESPN", sport.upper(), result.get('error'))
 
     # 5+6. ESPN scoreboard + pickcenter
     result = fetch_espn_odds(sport)
     if "error" not in result and result.get("games"):
         games_with_odds = [g for g in result["games"] if g.get("consensus")]
-        print(
-            f"  [ESPN] {sport.upper()}: {len(result['games'])} games, "
-            f"{len(games_with_odds)} with odds from scoreboard"
-        )
+        logger.info("ESPN %s: %d games, %d with odds from scoreboard",
+                    sport.upper(), len(result['games']), len(games_with_odds))
 
         if not games_with_odds:
             live_or_final = [
@@ -1229,7 +1215,7 @@ def fetch_consensus_odds(sport: str) -> dict:
                         ],
                     }]
             games_with_odds = [g for g in result["games"] if g.get("consensus")]
-            print(f"  [ESPN] After pickcenter: {len(games_with_odds)} games with odds")
+            logger.info("ESPN after pickcenter: %d games with odds", len(games_with_odds))
 
         # 6. Odds snapshot
         if not games_with_odds:
@@ -1242,7 +1228,7 @@ def fetch_consensus_odds(sport: str) -> dict:
                         game["bookmakers"] = saved["bookmakers"]
             games_with_odds = [g for g in result["games"] if g.get("consensus")]
             if games_with_odds:
-                print(f"  [ESPN] Recovered {len(games_with_odds)} games from snapshot")
+                logger.info("ESPN recovered %d games from snapshot", len(games_with_odds))
 
         if games_with_odds:
             result["source"] = "espn"
@@ -1264,17 +1250,17 @@ def fetch_consensus_odds(sport: str) -> dict:
             _cache_set(sport, result, has_live=has_live)
             return result
         if "error" not in result:
-            print(f"  [Rundown] TheRundown returned 0 odds for {sport.upper()} — trying Odds API")
+            logger.warning("Rundown %s returned 0 odds — trying Odds API", sport.upper())
         else:
-            print(f"  [Rundown] TheRundown failed for {sport.upper()}: {result.get('error')} — trying Odds API")
+            logger.warning("Rundown %s failed: %s — trying Odds API", sport.upper(), result.get('error'))
 
     # 9. The Odds API (last resort — 500/month free tier)
-    print(f"  [ODDS] All free sources exhausted for {sport.upper()} — falling back to Odds API")
+    logger.warning("ODDS all free sources exhausted for %s — falling back to Odds API", sport.upper())
     result = _odds_api_fallback(sport)
     if "error" in result:
-        print(f"  [ODDS] Odds API also failed for {sport.upper()}: {result.get('error')}")
+        logger.warning("ODDS Odds API also failed for %s: %s", sport.upper(), result.get('error'))
     else:
         games_with_odds = [g for g in result.get("games", []) if g.get("consensus")]
-        print(f"  [ODDS] Odds API returned {len(games_with_odds)} games with odds")
+        logger.info("ODDS Odds API returned %d games with odds", len(games_with_odds))
         _cache_set(sport, result)
     return result

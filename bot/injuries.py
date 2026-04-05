@@ -19,10 +19,13 @@ than to silently block trades when ESPN is down.
 from __future__ import annotations
 
 import json
+import logging
 import ssl
 import time
 import urllib.request
 from datetime import datetime, date, timedelta
+
+logger = logging.getLogger("nexus.injuries")
 
 try:
     import certifi
@@ -81,7 +84,7 @@ def _get_json(url: str, timeout: int = 8) -> dict | None:
         with urllib.request.urlopen(req, context=_SSL_CTX, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except Exception as e:
-        print(f"  [Injuries] HTTP error ({url[:80]}): {e}")
+        logger.warning("Injuries HTTP error (%s): %s", url[:80], e)
         return None
 
 
@@ -123,9 +126,9 @@ def _get_team_map(sport: str) -> dict[str, str]:
 
     count = sum(1 for k, v in team_map.items() if " " in k)  # only full-name keys
     if team_map:
-        print(f"  [Injuries] Loaded {count} {sport.upper()} teams from ESPN")
+        logger.debug("Injuries loaded %d %s teams from ESPN", count, sport.upper())
     else:
-        print(f"  [Injuries] WARNING: ESPN team map empty for {sport.upper()} ({url})")
+        logger.warning("Injuries ESPN team map empty for %s (%s)", sport.upper(), url)
 
     _TEAM_MAP_CACHE[sport] = (time.monotonic(), team_map)
     return team_map
@@ -254,7 +257,7 @@ def check_game_injuries(canonical_team: str, sport: str) -> dict:
             or team_map.get(canonical_team.split()[-1].lower())
         )
         if not team_id:
-            print(f"  [Injuries] No ESPN ID for {canonical_team!r} in {sport.upper()} team map")
+            logger.warning("Injuries no ESPN ID for %r in %s team map", canonical_team, sport.upper())
             return result  # unknown team — fail open
 
         result["checked"] = True
@@ -305,7 +308,7 @@ def check_game_injuries(canonical_team: str, sport: str) -> dict:
                 # Doubtful/questionable: warn but do NOT suppress
 
     except Exception as e:
-        print(f"  [Injuries] Error checking {canonical_team!r}: {e}")
+        logger.warning("Injuries error checking %r: %s", canonical_team, e)
         # fail open — better to surface a possibly-stale edge than block all trades
 
     return result
