@@ -201,6 +201,7 @@ class GlintBot:
         self.notifier = TelegramNotifier()
         self._running = False
         self._last_summary_date: str | None = None
+        self._watchdog_alert: str | None = None
 
     async def start(self):
         """Initialize and start the bot."""
@@ -213,11 +214,36 @@ class GlintBot:
         # Start Telegram polling
         await self.notifier.start_polling()
 
-        # Update bot state
+        # Update bot state — also performs watchdog staleness check
         state = _load_bot_state()
+
+        # Watchdog: if the bot was marked running but heartbeat is stale, it likely crashed
+        _HEARTBEAT_STALE_MINUTES = 15
+        last_hb = state.get("last_heartbeat")
+        if state.get("running") and last_hb:
+            try:
+                hb_time = datetime.fromisoformat(last_hb)
+                age_minutes = (datetime.now(timezone.utc) - hb_time).total_seconds() / 60
+                if age_minutes > _HEARTBEAT_STALE_MINUTES:
+                    logger.warning(
+                        "Watchdog: last heartbeat was %.0f min ago — bot likely crashed silently",
+                        age_minutes,
+                    )
+                    self._watchdog_alert = (
+                        f"⚠️ Watchdog: bot was running but last heartbeat was "
+                        f"{age_minutes:.0f} min ago. Likely crashed silently. Restarting now."
+                    )
+            except Exception:
+                pass
+
         state["running"] = True
         state["started_at"] = datetime.now(timezone.utc).isoformat()
         _save_bot_state(state)
+
+        # Send watchdog alert now that state is saved and Telegram is ready
+        if self._watchdog_alert:
+            await self.notifier.send_message(self._watchdog_alert)
+            self._watchdog_alert = None
 
         self._running = True
 
@@ -582,9 +608,11 @@ class GlintBot:
                 await asyncio.sleep(30)
                 continue
 
-            # Update bot state
+            # Update bot state (heartbeat + scan counters)
             state = _load_bot_state()
-            state["last_scan"] = datetime.now(timezone.utc).isoformat()
+            now_ts = datetime.now(timezone.utc).isoformat()
+            state["last_heartbeat"] = now_ts
+            state["last_scan"] = now_ts
             state["scan_count"] = state.get("scan_count", 0) + 1
 
             # Reset daily counter if new day
