@@ -760,6 +760,9 @@ class GlintBot:
             balance = balance_result.get("balance_dollars", 0) if "error" not in balance_result else 0
 
             for opp in opportunities:
+                # Store every opportunity for calibration tracking (dedup handled in store_alert)
+                _outcome_tracker.store_alert(opp)
+
                 side        = opp.get("recommended_side", "yes")
                 fair_value  = opp.get("edge_result", {}).get("fair_value", 0.5)
                 win_prob    = fair_value if side == "yes" else (1.0 - fair_value)
@@ -798,7 +801,6 @@ class GlintBot:
                     f"edge={opp.get('relative_edge', 0):.1%} | side={opp.get('recommended_side')}"
                 )
                 await self.notifier.send_alert(opp)
-                _outcome_tracker.store_alert(opp)
 
                 try:
                     from bot.patterns import get_edge_accuracy
@@ -814,7 +816,7 @@ class GlintBot:
             try:
                 resolved = _outcome_tracker.check_and_resolve()
                 if resolved:
-                    print(f"  [TRACKER] Resolved {resolved} market(s)")
+                    logger.info("OutcomeTracker resolved %d market(s)", resolved)
                 _outcome_tracker.print_calibration_summary()
             except Exception as e:
                 logger.debug(f"OutcomeTracker step skipped: {e}")

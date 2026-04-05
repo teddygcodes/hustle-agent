@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger("nexus.outcome_tracker")
 
@@ -50,22 +50,37 @@ class OutcomeTracker:
             conn.commit()
 
     def store_alert(self, opp: dict) -> int:
+        """
+        Store an opportunity alert. Idempotent — if an unresolved alert for this
+        ticker+strategy already exists, returns its id without inserting a duplicate.
+        """
+        ticker = opp.get("ticker", "")
+        strategy = opp.get("type", "unknown")
         market = opp.get("market", {})
         close_time = market.get("close_time") or market.get("expiration_time", "")
+
         with self._conn() as conn:
+            # Deduplication: only store first occurrence per ticker+strategy
+            existing = conn.execute(
+                "SELECT id FROM paper_alerts WHERE ticker=? AND strategy=? AND resolved=0",
+                (ticker, strategy),
+            ).fetchone()
+            if existing:
+                return existing[0]
+
             cursor = conn.execute(
                 """INSERT INTO paper_alerts
                    (ticker, strategy, edge, relative_edge, confidence, side,
                     kalshi_price, close_time, stored_at)
                    VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
-                    opp.get("ticker", ""),
-                    opp.get("type", "unknown"),
+                    ticker,
+                    strategy,
                     opp.get("edge", 0),
                     opp.get("relative_edge", 0),
                     opp.get("confidence", 0),
                     opp.get("recommended_side", "yes"),
-                    opp.get("kalshi_price", 0),
+                    opp.get("kalshi_price") or opp.get("edge_result", {}).get("kalshi_price", 0),
                     close_time,
                     datetime.now(timezone.utc).isoformat(),
                 ),
@@ -108,14 +123,32 @@ class OutcomeTracker:
         }
 
     def get_pending_resolution(self) -> list:
-        now = datetime.now(timezone.utc).isoformat()
+        """
+        Return unresolved alerts eligible for resolution check.
+        Checks two conditions (either triggers a resolution attempt):
+          1. close_time has passed (market expired)
+          2. Alert is 3+ hours old (game likely finished; Kalshi result may be set
+             even if market close_time is far in the future e.g. series markets)
+        Deduplicates by ticker+strategy so we only check each market once.
+        """
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        three_hours_ago = (now - timedelta(hours=3)).isoformat()
+
         with self._conn() as conn:
             rows = conn.execute(
-                """SELECT id, ticker, close_time FROM paper_alerts
-                   WHERE resolved=0 AND close_time != '' AND close_time < ?""",
-                (now,),
+                """SELECT id, ticker, strategy, close_time
+                   FROM paper_alerts
+                   WHERE resolved=0
+                     AND (
+                       (close_time != '' AND close_time < ?)
+                       OR stored_at < ?
+                     )
+                   GROUP BY ticker, strategy
+                   HAVING MIN(id)""",
+                (now_iso, three_hours_ago),
             ).fetchall()
-        return [{"id": r[0], "ticker": r[1], "close_time": r[2]} for r in rows]
+        return [{"id": r[0], "ticker": r[1], "strategy": r[2], "close_time": r[3]} for r in rows]
 
     def get_calibration_report(self) -> dict:
         with self._conn() as conn:
@@ -156,8 +189,20 @@ class OutcomeTracker:
                 market = data.get("market", data)
                 result = market.get("result")
                 if result in ("yes", "no"):
-                    self.record_resolution(alert["id"], result)
-                    resolved_count += 1
+                    # Resolve ALL rows for this ticker+strategy (handles pre-dedup duplicates)
+                    with self._conn() as conn:
+                        rows = conn.execute(
+                            "SELECT id, side FROM paper_alerts WHERE ticker=? AND strategy=? AND resolved=0",
+                            (alert["ticker"], alert.get("strategy", "")),
+                        ).fetchall()
+                        for row_id, side in rows:
+                            won = 1 if (side == "yes" and result == "yes") or (side == "no" and result == "no") else 0
+                            conn.execute(
+                                "UPDATE paper_alerts SET resolved=1, result=?, won=? WHERE id=?",
+                                (result, won, row_id),
+                            )
+                        conn.commit()
+                    resolved_count += len(rows)
             except Exception as e:
                 logger.warning("Resolution failed for %s: %s", alert['ticker'], e)
         return resolved_count
@@ -166,14 +211,14 @@ class OutcomeTracker:
         report = self.get_calibration_report()
         if not report:
             return
-        print("\n  [CALIBRATION] Strategy performance:")
+        logger.info("Strategy performance calibration:")
         for strategy, stats in sorted(report.items()):
-            flag = " ⚠️ UNDERPERFORMING" if stats["flagged"] else ""
+            flag = " UNDERPERFORMING" if stats["flagged"] else ""
             if stats["total"] < 10:
                 continue
             wr = f"{stats['win_rate']:.0%}" if stats["win_rate"] is not None else "n/a"
             exp = f"{stats['expected_win_rate']:.0%}"
-            print(
-                f"    {strategy}: {stats['wins']}/{stats['total']} "
-                f"({wr} actual vs {exp} expected){flag}"
+            logger.info(
+                "  %s: %s/%s (%s actual vs %s expected)%s",
+                strategy, stats["wins"], stats["total"], wr, exp, flag,
             )
