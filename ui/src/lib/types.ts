@@ -77,6 +77,66 @@ export interface PipelineItem {
   history: { from: string; to: string; at: string }[];
 }
 
+export interface DataBacking {
+  source: string;
+  data_point: string;
+  source_probability: number;
+  market_price: number;
+  edge: number;
+  edge_direction: string;
+  source_url: string;
+  retrieved_at: string;
+}
+
+export interface TransactionReport {
+  report_id: string;
+  timestamp: string;
+  type: 'expense' | 'income' | 'investment' | 'return';
+  summary: {
+    action: string;
+    amount: number;
+    outcome: 'pending' | 'won' | 'lost';
+    profit_loss: number | null;
+    balance_after: number;
+  };
+  reasoning: {
+    strategy: string;
+    thesis: string;
+    confidence_raw: number | null;
+    confidence_adjusted: number | null;
+    calibration_applied: string | null;
+    instinct_warnings: string[];
+    risk_posture_at_time: string | null;
+    exploration_mode: string | null;
+  };
+  data_backing: DataBacking | null;
+  projection: {
+    projection_id: string;
+    expected_return: number;
+    expected_profit: number;
+    roi_percent: number;
+    time_to_return_days: number;
+    verdict_raw: string;
+    verdict_adjusted: string;
+    bull_case: string;
+    bear_case: string;
+  } | null;
+  resolution: {
+    resolved_at: string;
+    actual_outcome: string;
+    actual_return: number;
+    actual_profit_loss: number;
+    prediction_delta: number;
+    notes: string | null;
+  } | null;
+  linked_ids: {
+    ledger_id: number;
+    action_id: string | null;
+    projection_id: string | null;
+    kalshi_order_id: string | null;
+  };
+}
+
 export interface Projection {
   id: string;
   timestamp: string;
@@ -96,6 +156,7 @@ export interface Projection {
   bull_case: string;
   bear_case: string;
   research_summary: string;
+  data_backing?: DataBacking;
   operational_overhead: number;
   capital_velocity_cost: number;
   verdict: string;
@@ -259,6 +320,46 @@ export interface PriorEntry {
 }
 
 export type PriorsData = Record<string, PriorEntry>;
+
+export interface PaperTrade {
+  id: string;
+  ticker: string;
+  title: string;
+  side: 'yes' | 'no';
+  contracts: number;
+  entry_price: number;   // dollars (0–1)
+  exit_price?: number;   // dollars (0–1)
+  status: 'open' | 'won' | 'lost' | 'exited_early';
+  strategy: string;
+  edge: number;
+  pnl?: number;
+  resolved_at?: string;
+  created_at: string;
+}
+
+export interface BotPosition {
+  ticker: string;
+  side: 'yes' | 'no';
+  contracts: number;
+  price_cents: number;
+  status: string;
+  strategy: string;
+  order_id: string;
+  paper?: boolean;
+  exit_price?: number;
+  exit_reason?: string;
+  exited_at?: string;
+  realized_pnl?: number;
+  created_at: string;
+}
+
+export interface BotState {
+  last_scan?: string;
+  scan_interval?: number;
+  dk_disabled?: boolean;
+  fd_disabled?: boolean;
+  active_sports?: string[];
+}
 
 export interface MemoryData {
   lessons: { text: string; timestamp: string; cycle: number }[];

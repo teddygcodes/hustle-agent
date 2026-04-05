@@ -5,16 +5,22 @@ interface Props {
   value: string;
   sub?: string;
   accent?: boolean;
+  shimmer?: boolean;
 }
 
-export function StatCard({ label, value, sub, accent }: Props) {
+export function StatCard({ label, value, sub, accent, shimmer }: Props) {
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-      <p className="text-xs text-zinc-500 mb-1">{label}</p>
-      <p className={clsx('text-xl font-semibold font-mono', accent ? 'text-emerald-400' : 'text-zinc-100')}>
+    <div className={clsx('nest-card p-4 relative overflow-hidden', shimmer && 'data-shimmer')}>
+      <p className="text-[11px] uppercase tracking-wider mb-1.5" style={{ color: 'var(--nest-text-ghost)' }}>
+        {label}
+      </p>
+      <p className={clsx(
+        'text-xl font-semibold font-mono relative z-10',
+        accent ? 'text-[var(--nest-blue)]' : 'text-[var(--nest-text-bright)]'
+      )}>
         {value}
       </p>
-      {sub && <p className="text-xs text-zinc-500 mt-1">{sub}</p>}
+      {sub && <p className="text-[11px] mt-1" style={{ color: 'var(--nest-text-dim)' }}>{sub}</p>}
     </div>
   );
 }

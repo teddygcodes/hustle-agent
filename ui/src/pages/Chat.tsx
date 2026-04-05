@@ -51,28 +51,39 @@ export default function Chat() {
                 key={i}
                 className={`flex ${m.from === 'tyler' ? 'justify-end' : 'justify-start'}`}
               >
-                <div className={`max-w-[75%] rounded-lg px-4 py-2.5 ${
+                <div className={`max-w-[75%] rounded-xl px-4 py-2.5 ${
                   m.from === 'tyler'
-                    ? 'bg-violet-600/80 text-zinc-100'
-                    : 'bg-zinc-800 text-zinc-300'
-                }`}>
+                    ? ''
+                    : ''
+                }`}
+                  style={{
+                    background: m.from === 'tyler'
+                      ? 'linear-gradient(135deg, rgba(124, 58, 237, 0.5), rgba(0, 153, 255, 0.3))'
+                      : 'var(--nest-bg-card)',
+                    border: m.from === 'tyler' ? 'none' : '1px solid var(--nest-border)',
+                    color: 'var(--nest-text)',
+                  }}>
                   <p className="text-sm whitespace-pre-wrap">{m.message}</p>
-                  <p className={`text-[10px] mt-1 ${m.from === 'tyler' ? 'text-violet-300/60' : 'text-zinc-600'}`}>
+                  <p className="text-[10px] mt-1" style={{ color: m.from === 'tyler' ? 'rgba(255,255,255,0.4)' : 'var(--nest-text-ghost)' }}>
                     {m.from === 'tyler' ? 'Tyler' : 'Agent'} &middot; {relativeTime(m.timestamp)}
                   </p>
                 </div>
               </div>
             ))}
 
-            {/* Pending inbox messages */}
             {pendingInbox.length > 0 && (
-              <div className="border-t border-zinc-800 pt-3 mt-3">
-                <p className="text-xs text-zinc-600 mb-2">Pending (agent hasn't read yet):</p>
+              <div className="pt-3 mt-3" style={{ borderTop: '1px solid var(--nest-border)' }}>
+                <p className="text-xs mb-2" style={{ color: 'var(--nest-text-ghost)' }}>Pending (agent hasn't read yet):</p>
                 {pendingInbox.map((m, i) => (
                   <div key={`inbox-${i}`} className="flex justify-end mb-2">
-                    <div className="max-w-[75%] rounded-lg px-4 py-2.5 bg-violet-600/40 text-zinc-300 border border-violet-500/20">
+                    <div className="max-w-[75%] rounded-xl px-4 py-2.5"
+                      style={{
+                        background: 'rgba(124, 58, 237, 0.15)',
+                        border: '1px solid rgba(124, 58, 237, 0.2)',
+                        color: 'var(--nest-text-muted)',
+                      }}>
                       <p className="text-sm whitespace-pre-wrap">{m.content}</p>
-                      <p className="text-[10px] text-violet-300/40 mt-1">Queued &middot; {relativeTime(m.timestamp)}</p>
+                      <p className="text-[10px] mt-1" style={{ color: 'rgba(124, 58, 237, 0.4)' }}>Queued &middot; {relativeTime(m.timestamp)}</p>
                     </div>
                   </div>
                 ))}
@@ -85,7 +96,7 @@ export default function Chat() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-zinc-800 pt-3">
+      <div className="pt-3" style={{ borderTop: '1px solid var(--nest-border)' }}>
         <div className="flex gap-2">
           <textarea
             value={message}
@@ -98,12 +109,21 @@ export default function Chat() {
             }}
             placeholder="Message your agent..."
             rows={2}
-            className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-4 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-700 resize-none"
+            className="flex-1 rounded-lg px-4 py-2.5 text-sm focus:outline-none resize-none"
+            style={{
+              background: 'var(--nest-bg-card)',
+              border: '1px solid var(--nest-border)',
+              color: 'var(--nest-text)',
+            }}
           />
           <button
             onClick={sendMessage}
             disabled={!message.trim() || sending}
-            className="px-4 bg-violet-600 hover:bg-violet-500 disabled:bg-zinc-800 disabled:text-zinc-600 text-white rounded-lg transition-colors flex items-center"
+            className="px-4 rounded-lg transition-all flex items-center disabled:opacity-30"
+            style={{
+              background: 'linear-gradient(135deg, var(--nest-purple), var(--nest-blue))',
+              color: 'white',
+            }}
           >
             <Send size={16} />
           </button>

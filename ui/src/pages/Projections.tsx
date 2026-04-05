@@ -15,7 +15,6 @@ export default function Projections() {
   const resolved = useMemo(() => items.filter(p => p.status === 'resolved'), [items]);
   const shown = tab === 'pending' ? pending : resolved;
 
-  // Accuracy stats
   const hits = resolved.filter(p => p.resolution?.hit).length;
   const hitRate = resolved.length > 0 ? (hits / resolved.length) * 100 : 0;
 
@@ -27,79 +26,81 @@ export default function Projections() {
         <EmptyState message="No projections yet. The agent runs projections before spending over $5." />
       ) : (
         <>
-          {/* Accuracy stats */}
           {resolved.length > 0 && (
             <div className="grid grid-cols-3 gap-3 mb-6">
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500">Total</p>
-                <p className="text-xl font-semibold text-zinc-100 font-mono">{items.length}</p>
+              <div className="nest-card p-4 text-center">
+                <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--nest-text-ghost)' }}>Total</p>
+                <p className="text-xl font-semibold font-mono" style={{ color: 'var(--nest-text-bright)' }}>{items.length}</p>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500">Hit Rate</p>
-                <p className="text-xl font-semibold text-emerald-400 font-mono">{hitRate.toFixed(0)}%</p>
+              <div className="nest-card p-4 text-center">
+                <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--nest-text-ghost)' }}>Hit Rate</p>
+                <p className="text-xl font-semibold font-mono text-[var(--nest-success)]">{hitRate.toFixed(0)}%</p>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 text-center">
-                <p className="text-xs text-zinc-500">Avg Confidence</p>
-                <p className="text-xl font-semibold text-zinc-100 font-mono">
+              <div className="nest-card p-4 text-center">
+                <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--nest-text-ghost)' }}>Avg Confidence</p>
+                <p className="text-xl font-semibold font-mono" style={{ color: 'var(--nest-text-bright)' }}>
                   {(items.reduce((s, p) => s + (p.confidence_calibrated || p.confidence_raw || 0), 0) / items.length).toFixed(0)}%
                 </p>
               </div>
             </div>
           )}
 
-          {/* Tabs */}
           <div className="flex gap-1 mb-4">
-            <button onClick={() => setTab('pending')} className={`text-sm px-3 py-1.5 rounded-md ${tab === 'pending' ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}>
-              Pending ({pending.length})
-            </button>
-            <button onClick={() => setTab('resolved')} className={`text-sm px-3 py-1.5 rounded-md ${tab === 'resolved' ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'}`}>
-              Resolved ({resolved.length})
-            </button>
+            {(['pending', 'resolved'] as const).map(t => (
+              <button key={t} onClick={() => setTab(t)}
+                className="text-sm px-3 py-1.5 rounded-md transition-colors"
+                style={{
+                  background: tab === t ? 'var(--nest-bg-surface)' : 'transparent',
+                  color: tab === t ? 'var(--nest-text-bright)' : 'var(--nest-text-dim)',
+                }}>
+                {t.charAt(0).toUpperCase() + t.slice(1)} ({t === 'pending' ? pending.length : resolved.length})
+              </button>
+            ))}
           </div>
 
           <div className="space-y-3">
-            {shown.map(p => (
-              <div key={p.id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+            {shown.map((p, idx) => (
+              <div key={p.id} className="nest-card p-4 animate-fade-up" style={{ animationDelay: `${idx * 50}ms` }}>
                 <div className="flex items-start justify-between mb-2">
                   <div>
-                    <p className="text-sm text-zinc-200 mb-1">{p.action}</p>
-                    <p className="text-xs text-zinc-500">{shortDate(p.timestamp)} &middot; {p.strategy_type}</p>
+                    <p className="text-sm" style={{ color: 'var(--nest-text)' }}>{p.action}</p>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--nest-text-ghost)' }}>{shortDate(p.timestamp)} &middot; {p.strategy_type}</p>
                   </div>
                   <VerdictBadge verdict={p.verdict} />
                 </div>
                 <div className="grid grid-cols-4 gap-3 mt-3 text-center text-xs">
                   <div>
-                    <p className="text-zinc-500">Cost</p>
-                    <p className="text-zinc-300 font-mono">{money(p.cost)}</p>
+                    <p style={{ color: 'var(--nest-text-ghost)' }}>Cost</p>
+                    <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{money(p.cost)}</p>
                   </div>
                   <div>
-                    <p className="text-zinc-500">Expected Return</p>
-                    <p className="text-zinc-300 font-mono">{money(p.expected_return)}</p>
+                    <p style={{ color: 'var(--nest-text-ghost)' }}>Expected Return</p>
+                    <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{money(p.expected_return)}</p>
                   </div>
                   <div>
-                    <p className="text-zinc-500">Confidence</p>
-                    <p className="text-zinc-300 font-mono">{p.confidence_calibrated || p.confidence_raw}%</p>
+                    <p style={{ color: 'var(--nest-text-ghost)' }}>Confidence</p>
+                    <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{p.confidence_calibrated || p.confidence_raw}%</p>
                   </div>
                   <div>
-                    <p className="text-zinc-500">Time</p>
-                    <p className="text-zinc-300 font-mono">{p.time_to_return_days}d</p>
+                    <p style={{ color: 'var(--nest-text-ghost)' }}>Time</p>
+                    <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{p.time_to_return_days}d</p>
                   </div>
                 </div>
                 {p.resolution && (
-                  <div className="mt-3 pt-3 border-t border-zinc-800 grid grid-cols-3 gap-3 text-center text-xs">
+                  <div className="mt-3 pt-3 grid grid-cols-3 gap-3 text-center text-xs" style={{ borderTop: '1px solid var(--nest-border)' }}>
                     <div>
-                      <p className="text-zinc-500">Actual Return</p>
-                      <p className="text-zinc-300 font-mono">{money(p.resolution.actual_return)}</p>
+                      <p style={{ color: 'var(--nest-text-ghost)' }}>Actual Return</p>
+                      <p className="font-mono" style={{ color: 'var(--nest-text)' }}>{money(p.resolution.actual_return)}</p>
                     </div>
                     <div>
-                      <p className="text-zinc-500">Profit Delta</p>
-                      <p className={`font-mono ${p.resolution.profit_delta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      <p style={{ color: 'var(--nest-text-ghost)' }}>Profit Delta</p>
+                      <p className={`font-mono ${p.resolution.profit_delta >= 0 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]'}`}>
                         {p.resolution.profit_delta >= 0 ? '+' : ''}{money(p.resolution.profit_delta)}
                       </p>
                     </div>
                     <div>
-                      <p className="text-zinc-500">Result</p>
-                      <p className={p.resolution.hit ? 'text-emerald-400' : 'text-red-400'}>{p.resolution.hit ? 'HIT' : 'MISS'}</p>
+                      <p style={{ color: 'var(--nest-text-ghost)' }}>Result</p>
+                      <p className={p.resolution.hit ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]'}>{p.resolution.hit ? 'HIT' : 'MISS'}</p>
                     </div>
                   </div>
                 )}

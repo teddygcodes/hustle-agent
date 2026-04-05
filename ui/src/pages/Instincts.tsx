@@ -7,9 +7,6 @@ import clsx from 'clsx';
 const trendArrow = (t: string) =>
   t === 'improving' ? '\u2191' : t === 'declining' ? '\u2193' : '\u2192';
 
-const trendColor = (t: string) =>
-  t === 'improving' ? 'text-emerald-400' : t === 'declining' ? 'text-red-400' : 'text-zinc-500';
-
 function pctStr(n: number) { return `${(n * 100).toFixed(0)}%`; }
 function roiStr(n: number) { return `${(n * 100).toFixed(0)}%`; }
 
@@ -30,7 +27,6 @@ export default function Instincts() {
   const totalActions = actions?.length || 0;
   const resolvedActions = actions?.filter(a => a.status !== 'pending').length || 0;
 
-  // Exploration progress
   const catCounts: Record<string, number> = {};
   (actions || []).filter(a => a.status !== 'pending').forEach(a => {
     catCounts[a.category] = (catCounts[a.category] || 0) + 1;
@@ -42,20 +38,17 @@ export default function Instincts() {
       <PageHeader title="Instincts" lastUpdated={lastUpdated} onRefresh={refresh} />
 
       {/* Mode Banner */}
-      <div className={clsx(
-        'rounded-lg border p-4 mb-6 flex items-center justify-between',
-        mode === 'exploit'
-          ? 'bg-emerald-950/30 border-emerald-800'
-          : 'bg-amber-950/30 border-amber-800'
-      )}>
+      <div className="rounded-xl p-4 mb-6 flex items-center justify-between"
+        style={{
+          background: mode === 'exploit' ? 'rgba(16, 185, 129, 0.06)' : 'rgba(245, 158, 11, 0.06)',
+          border: `1px solid ${mode === 'exploit' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
+        }}>
         <div>
-          <span className={clsx(
-            'text-xs font-bold uppercase tracking-wider',
-            mode === 'exploit' ? 'text-emerald-400' : 'text-amber-400'
-          )}>
+          <span className="text-xs font-bold uppercase tracking-wider"
+            style={{ color: mode === 'exploit' ? 'var(--nest-success)' : 'var(--nest-warning)' }}>
             {mode === 'exploit' ? 'Exploit Mode' : 'Exploration Mode'}
           </span>
-          <p className="text-sm text-zinc-400 mt-1">
+          <p className="text-sm mt-1" style={{ color: 'var(--nest-text-dim)' }}>
             {mode === 'exploit'
               ? `Leveraging ${resolvedActions} resolved actions across ${Object.keys(catScores).length} categories.`
               : `Building data: ${resolvedActions} actions resolved. Need 5+ in 3+ categories (${catsReady}/3 ready).`
@@ -63,27 +56,30 @@ export default function Instincts() {
           </p>
         </div>
         <div className="text-right">
-          <p className="text-2xl font-bold font-mono text-zinc-100">{resolvedActions}</p>
-          <p className="text-xs text-zinc-500">resolved</p>
+          <p className="text-2xl font-bold font-mono" style={{ color: 'var(--nest-text-bright)' }}>{resolvedActions}</p>
+          <p className="text-xs" style={{ color: 'var(--nest-text-ghost)' }}>resolved</p>
         </div>
       </div>
 
-      {/* Exploration Progress (explore mode only) */}
+      {/* Exploration Progress */}
       {mode === 'explore' && Object.keys(catCounts).length > 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Category Coverage</h3>
+        <div className="nest-card p-4 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Category Coverage</h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {Object.entries(catCounts).sort((a, b) => b[1] - a[1]).map(([cat, count]) => (
               <div key={cat} className="flex items-center gap-2">
                 <div className="flex-1">
                   <div className="flex justify-between text-xs mb-1">
-                    <span className="text-zinc-400">{cat}</span>
-                    <span className="text-zinc-500 font-mono">{Math.min(count, 5)}/5</span>
+                    <span style={{ color: 'var(--nest-text-dim)' }}>{cat}</span>
+                    <span className="font-mono" style={{ color: 'var(--nest-text-ghost)' }}>{Math.min(count, 5)}/5</span>
                   </div>
-                  <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--nest-bg-surface)' }}>
                     <div
-                      className={clsx('h-full rounded-full transition-all', count >= 5 ? 'bg-emerald-500' : 'bg-amber-500')}
-                      style={{ width: `${Math.min(count / 5 * 100, 100)}%` }}
+                      className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.min(count / 5 * 100, 100)}%`,
+                        background: count >= 5 ? 'var(--nest-success)' : 'var(--nest-warning)',
+                      }}
                     />
                   </div>
                 </div>
@@ -95,12 +91,12 @@ export default function Instincts() {
 
       {/* Instinct Sentences */}
       {sentences.length > 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">What Your Data Says</h3>
+        <div className="nest-card p-5 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>What Your Data Says</h3>
           <ul className="space-y-2">
             {sentences.map((s, i) => (
-              <li key={i} className="text-sm text-zinc-300 flex items-start gap-2">
-                <span className="text-violet-400 mt-0.5 shrink-0">{'\u2022'}</span>
+              <li key={i} className="text-sm flex items-start gap-2" style={{ color: 'var(--nest-text)' }}>
+                <span className="mt-0.5 shrink-0" style={{ color: 'var(--nest-blue)' }}>{'\u2022'}</span>
                 {s}
               </li>
             ))}
@@ -110,11 +106,11 @@ export default function Instincts() {
 
       {/* Category Scores Table */}
       {Object.keys(catScores).length > 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6 overflow-x-auto">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Category Performance</h3>
+        <div className="nest-card p-5 mb-6 overflow-x-auto">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Category Performance</h3>
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-zinc-500 text-xs border-b border-zinc-800">
+              <tr className="text-xs" style={{ borderBottom: '1px solid var(--nest-border)', color: 'var(--nest-text-dim)' }}>
                 <th className="text-left py-2 pr-4">Category</th>
                 <th className="text-right px-3">Win Rate</th>
                 <th className="text-right px-3">Avg ROI</th>
@@ -129,32 +125,31 @@ export default function Instincts() {
               {Object.entries(catScores)
                 .sort((a, b) => b[1].sample_size - a[1].sample_size)
                 .map(([cat, s]) => {
-                  const prior = priors?.[cat];
                   const catCal = calibration.per_category[cat];
                   return (
-                    <tr key={cat} className="border-b border-zinc-800/50">
-                      <td className="py-2 pr-4 text-zinc-200 font-medium">{cat}</td>
-                      <td className={clsx('text-right px-3 font-mono', s.win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400')}>
+                    <tr key={cat} style={{ borderBottom: '1px solid var(--nest-border-subtle)' }}>
+                      <td className="py-2 pr-4 font-medium" style={{ color: 'var(--nest-text)' }}>{cat}</td>
+                      <td className={clsx('text-right px-3 font-mono', s.win_rate >= 0.5 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]')}>
                         {pctStr(s.win_rate)}
                       </td>
-                      <td className={clsx('text-right px-3 font-mono', s.avg_roi >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      <td className={clsx('text-right px-3 font-mono', s.avg_roi >= 0 ? 'text-[var(--nest-success)]' : 'text-[var(--nest-error)]')}>
                         {roiStr(s.avg_roi)}
                       </td>
-                      <td className="text-right px-3 text-zinc-400 font-mono">{s.avg_return_time_days.toFixed(1)}d</td>
-                      <td className={clsx('text-right px-3', trendColor(s.trend))}>
+                      <td className="text-right px-3 font-mono" style={{ color: 'var(--nest-text-dim)' }}>{s.avg_return_time_days.toFixed(1)}d</td>
+                      <td className="text-right px-3" style={{ color: s.trend === 'improving' ? 'var(--nest-success)' : s.trend === 'declining' ? 'var(--nest-error)' : 'var(--nest-text-ghost)' }}>
                         {trendArrow(s.trend)} {s.trend !== 'insufficient_data' ? s.trend : '-'}
                       </td>
-                      <td className="text-right px-3 text-zinc-400 font-mono">
+                      <td className="text-right px-3 font-mono" style={{ color: 'var(--nest-text-dim)' }}>
                         {catCal ? `${catCal.toFixed(2)}x` : '-'}
                       </td>
-                      <td className="text-right px-3 text-zinc-500 font-mono">{s.sample_size}</td>
+                      <td className="text-right px-3 font-mono" style={{ color: 'var(--nest-text-ghost)' }}>{s.sample_size}</td>
                       <td className="text-right pl-3">
                         <span className={clsx(
                           'text-[10px] px-1.5 py-0.5 rounded',
                           s.sample_size >= 5 ? 'bg-emerald-900/50 text-emerald-400' :
                           s.sample_size > 0 ? 'bg-amber-900/50 text-amber-400' :
-                          'bg-zinc-800 text-zinc-500'
-                        )}>
+                          'text-[var(--nest-text-ghost)]'
+                        )} style={s.sample_size === 0 ? { background: 'var(--nest-bg-surface)' } : undefined}>
                           {s.sample_size >= 5 ? 'earned' : s.sample_size > 0 ? 'blend' : 'prior'}
                         </span>
                       </td>
@@ -168,22 +163,20 @@ export default function Instincts() {
 
       {/* Calibration Overview */}
       {calibration.overall !== 1.0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Calibration</h3>
+        <div className="nest-card p-5 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Calibration</h3>
           <div className="flex items-center gap-6">
             <div>
-              <p className="text-xs text-zinc-500">Overall Multiplier</p>
-              <p className={clsx(
-                'text-2xl font-bold font-mono',
-                calibration.overall < 0.8 ? 'text-red-400' : calibration.overall > 1.1 ? 'text-emerald-400' : 'text-zinc-200'
-              )}>
+              <p className="text-xs" style={{ color: 'var(--nest-text-ghost)' }}>Overall Multiplier</p>
+              <p className="text-2xl font-bold font-mono"
+                style={{ color: calibration.overall < 0.8 ? 'var(--nest-error)' : calibration.overall > 1.1 ? 'var(--nest-success)' : 'var(--nest-text)' }}>
                 {calibration.overall.toFixed(2)}x
               </p>
             </div>
-            <div className="text-sm text-zinc-400">
+            <div className="text-sm" style={{ color: 'var(--nest-text-dim)' }}>
               {calibration.overall < 1.0
                 ? `When you feel 80% confident, you're actually right ${(80 * calibration.overall).toFixed(0)}% of the time.`
-                : `You tend to underestimate — you hit more often than you predict.`
+                : `You tend to underestimate \u2014 you hit more often than you predict.`
               }
             </div>
           </div>
@@ -192,12 +185,11 @@ export default function Instincts() {
               {Object.entries(calibration.per_category)
                 .sort((a, b) => a[1] - b[1])
                 .map(([cat, cal]) => (
-                  <div key={cat} className={clsx(
-                    'px-3 py-1.5 rounded text-xs font-mono',
-                    cal < 0.7 ? 'bg-red-900/30 text-red-400' :
-                    cal > 1.1 ? 'bg-emerald-900/30 text-emerald-400' :
-                    'bg-zinc-800 text-zinc-400'
-                  )}>
+                  <div key={cat} className="px-3 py-1.5 rounded text-xs font-mono"
+                    style={{
+                      background: cal < 0.7 ? 'rgba(239, 68, 68, 0.1)' : cal > 1.1 ? 'rgba(16, 185, 129, 0.1)' : 'var(--nest-bg-surface)',
+                      color: cal < 0.7 ? 'var(--nest-error)' : cal > 1.1 ? 'var(--nest-success)' : 'var(--nest-text-dim)',
+                    }}>
                     {cat}: {cal.toFixed(2)}x
                   </div>
                 ))}
@@ -208,29 +200,28 @@ export default function Instincts() {
 
       {/* Dimension Heatmap */}
       {Object.keys(dimScores).length > 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6 overflow-x-auto">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Dimension Analysis</h3>
+        <div className="nest-card p-5 mb-6 overflow-x-auto">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Dimension Analysis</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {Object.entries(dimScores).map(([dim, buckets]) => (
               <div key={dim}>
-                <p className="text-xs text-zinc-500 mb-2">{dim.replace(/_/g, ' ')}</p>
+                <p className="text-xs mb-2" style={{ color: 'var(--nest-text-ghost)' }}>{dim.replace(/_/g, ' ')}</p>
                 <div className="space-y-1">
                   {Object.entries(buckets)
                     .sort((a, b) => b[1].win_rate - a[1].win_rate)
                     .map(([bucket, data]) => (
                       <div key={bucket} className="flex items-center gap-2">
-                        <span className="text-xs text-zinc-400 w-20 shrink-0">{bucket.replace(/_/g, ' ')}</span>
-                        <div className="flex-1 h-4 bg-zinc-800 rounded-sm overflow-hidden relative">
+                        <span className="text-xs w-20 shrink-0" style={{ color: 'var(--nest-text-dim)' }}>{bucket.replace(/_/g, ' ')}</span>
+                        <div className="flex-1 h-4 rounded-sm overflow-hidden relative" style={{ background: 'var(--nest-bg-surface)' }}>
                           <div
-                            className={clsx(
-                              'h-full rounded-sm',
-                              data.win_rate >= 0.6 ? 'bg-emerald-600' :
-                              data.win_rate >= 0.4 ? 'bg-amber-600' :
-                              'bg-red-600'
-                            )}
-                            style={{ width: `${data.win_rate * 100}%` }}
+                            className="h-full rounded-sm"
+                            style={{
+                              width: `${data.win_rate * 100}%`,
+                              background: data.win_rate >= 0.6 ? 'var(--nest-success)' : data.win_rate >= 0.4 ? 'var(--nest-warning)' : 'var(--nest-error)',
+                              opacity: 0.7,
+                            }}
                           />
-                          <span className="absolute inset-0 flex items-center justify-center text-[10px] text-zinc-300 font-mono">
+                          <span className="absolute inset-0 flex items-center justify-center text-[10px] font-mono" style={{ color: 'var(--nest-text)' }}>
                             {pctStr(data.win_rate)} (n={data.sample_size})
                           </span>
                         </div>
@@ -245,20 +236,19 @@ export default function Instincts() {
 
       {/* Cross Patterns */}
       {patterns.length > 0 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Cross-Patterns</h3>
+        <div className="nest-card p-5 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Cross-Patterns</h3>
           <div className="space-y-2">
             {patterns.slice(0, 10).map((p, i) => (
-              <div key={i} className="flex items-center justify-between text-sm py-1.5 border-b border-zinc-800/50 last:border-0">
-                <span className="text-zinc-300">{p.description}</span>
+              <div key={i} className="flex items-center justify-between text-sm py-1.5 last:border-0"
+                style={{ borderBottom: '1px solid var(--nest-border-subtle)' }}>
+                <span style={{ color: 'var(--nest-text)' }}>{p.description}</span>
                 <div className="flex items-center gap-3 shrink-0 ml-3">
-                  <span className={clsx(
-                    'font-mono text-xs',
-                    p.win_rate >= 0.6 ? 'text-emerald-400' : p.win_rate <= 0.35 ? 'text-red-400' : 'text-zinc-400'
-                  )}>
+                  <span className="font-mono text-xs"
+                    style={{ color: p.win_rate >= 0.6 ? 'var(--nest-success)' : p.win_rate <= 0.35 ? 'var(--nest-error)' : 'var(--nest-text-dim)' }}>
                     {pctStr(p.win_rate)}
                   </span>
-                  <span className="text-zinc-600 text-xs font-mono">
+                  <span className="text-xs font-mono" style={{ color: 'var(--nest-text-ghost)' }}>
                     sig: {p.signal_strength.toFixed(2)}
                   </span>
                 </div>
@@ -268,23 +258,23 @@ export default function Instincts() {
         </div>
       )}
 
-      {/* Priors (if still using borrowed wisdom) */}
+      {/* Priors */}
       {priors && Object.keys(priors).length > 0 && mode === 'explore' && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Base Rate Priors</h3>
+        <div className="nest-card p-5 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Base Rate Priors</h3>
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
             {Object.entries(priors).map(([cat, p]) => (
               <div key={cat} className="text-sm">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-zinc-200 font-medium">{cat}</span>
+                  <span className="font-medium" style={{ color: 'var(--nest-text)' }}>{cat}</span>
                   <span className={clsx(
                     'text-[10px] px-1.5 py-0.5 rounded',
-                    p.validated ? 'bg-emerald-900/50 text-emerald-400' : 'bg-zinc-800 text-zinc-500'
-                  )}>
+                    p.validated ? 'bg-emerald-900/50 text-emerald-400' : ''
+                  )} style={!p.validated ? { background: 'var(--nest-bg-surface)', color: 'var(--nest-text-ghost)' } : undefined}>
                     {p.source}
                   </span>
                 </div>
-                <p className="text-xs text-zinc-500">
+                <p className="text-xs" style={{ color: 'var(--nest-text-ghost)' }}>
                   {pctStr(p.win_rate)} win, {roiStr(p.avg_roi)} ROI
                 </p>
               </div>
@@ -295,21 +285,21 @@ export default function Instincts() {
 
       {/* History Timeline */}
       {history.length > 1 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-5 mb-6">
-          <h3 className="text-sm font-medium text-zinc-300 mb-3">Instinct Evolution</h3>
+        <div className="nest-card p-5 mb-6">
+          <h3 className="text-sm font-medium mb-3" style={{ color: 'var(--nest-text)' }}>Instinct Evolution</h3>
           <div className="space-y-3">
             {history.slice().reverse().slice(0, 10).map((h, i) => (
-              <div key={i} className="border-l-2 border-zinc-700 pl-3">
+              <div key={i} className="pl-3" style={{ borderLeft: '2px solid var(--nest-border)' }}>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs text-zinc-500">
+                  <span className="text-xs" style={{ color: 'var(--nest-text-ghost)' }}>
                     {new Date(h.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
                   </span>
-                  <span className="text-xs text-zinc-600 font-mono">
+                  <span className="text-xs font-mono" style={{ color: 'var(--nest-text-ghost)' }}>
                     cal: {h.overall_calibration.toFixed(2)} | {h.action_count} actions
                   </span>
                 </div>
                 {h.sentences.slice(0, 2).map((s, j) => (
-                  <p key={j} className="text-xs text-zinc-400">{s}</p>
+                  <p key={j} className="text-xs" style={{ color: 'var(--nest-text-dim)' }}>{s}</p>
                 ))}
               </div>
             ))}

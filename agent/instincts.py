@@ -9,6 +9,7 @@ Three data files:
   state/priors.json    — seed base rates (hardcoded defaults → research-validated)
   state/instincts.json — computed model from resolved actions
 """
+from __future__ import annotations
 
 import json
 import math
