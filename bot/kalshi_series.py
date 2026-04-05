@@ -114,7 +114,17 @@ _ETH_CACHE_TTL = 1800  # 30 min
 # Per-asset spot/vol caches (keyed by CoinGecko asset id)
 _CRYPTO_SPOT_CACHE: dict[str, dict] = {}
 _CRYPTO_VOL_CACHE: dict[str, dict] = {}
-_CRYPTO_CACHE_TTL = 1800  # 30 min
+_CRYPTO_SPOT_TTL = 15     # 15 sec — spot prices move fast
+_CRYPTO_VOL_TTL = 1800    # 30 min — vol is stable intraday
+
+# Binance symbol mapping (CoinGecko id → Binance trading pair)
+_BINANCE_SYMBOLS: dict[str, str] = {
+    "bitcoin": "BTCUSDT",
+    "ethereum": "ETHUSDT",
+    "solana": "SOLUSDT",
+    "ripple": "XRPUSDT",
+    "dogecoin": "DOGEUSDT",
+}
 
 # Asset config: coingecko_id → (fallback_vol, vol_cap_low, vol_cap_high, confidence, opp_type)
 CRYPTO_ASSETS_CONFIG: dict[str, tuple] = {
@@ -1363,33 +1373,51 @@ def scan_ethereum_series() -> list[dict]:
 
 def _prefetch_all_crypto_spots() -> None:
     """
-    Fetch spot prices for all 5 assets in ONE CoinGecko request.
-    Call this before the ThreadPoolExecutor to warm the cache and avoid
-    15 parallel individual requests that trigger 429s.
+    Warm cache for all 5 assets. Binance primary (individual calls, real-time),
+    CoinGecko batch fallback if Binance fails.
     """
+    import requests
     all_ids = list(CRYPTO_ASSETS_CONFIG.keys())
-    # Skip assets already cached
     now = _time.time()
     stale = [a for a in all_ids
              if not _CRYPTO_SPOT_CACHE.get(a) or
-             (now - _CRYPTO_SPOT_CACHE[a].get("ts", 0)) >= _CRYPTO_CACHE_TTL]
+             (now - _CRYPTO_SPOT_CACHE[a].get("ts", 0)) >= _CRYPTO_SPOT_TTL]
     if not stale:
         return
-    try:
-        import requests
-        ids_param = ",".join(stale)
-        url = f"{COINGECKO_BASE}/simple/price?ids={ids_param}&vs_currencies=usd"
-        r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        ts = _time.time()
-        for asset_id in stale:
-            price = data.get(asset_id, {}).get("usd")
-            if price:
-                _CRYPTO_SPOT_CACHE[asset_id] = {"price": float(price), "ts": ts}
-                logger.debug("CRYPTO prefetch spot %s = $%s", asset_id, price)
-    except Exception as e:
-        logger.warning("CRYPTO prefetch spot failed: %s — will use cached or fallback", e)
+
+    # --- Primary: Binance (one call per asset, very fast) ---
+    binance_failed = []
+    for asset_id in stale:
+        sym = _BINANCE_SYMBOLS.get(asset_id)
+        if not sym:
+            binance_failed.append(asset_id)
+            continue
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={sym}"
+            r = requests.get(url, timeout=5)
+            r.raise_for_status()
+            price = float(r.json()["price"])
+            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "binance"}
+            logger.debug("CRYPTO prefetch spot %s = $%s (binance)", asset_id, price)
+        except Exception:
+            binance_failed.append(asset_id)
+
+    # --- Fallback: CoinGecko batch for anything Binance missed ---
+    if binance_failed:
+        try:
+            ids_param = ",".join(binance_failed)
+            url = f"{COINGECKO_BASE}/simple/price?ids={ids_param}&vs_currencies=usd"
+            r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            ts = _time.time()
+            for asset_id in binance_failed:
+                price = data.get(asset_id, {}).get("usd")
+                if price:
+                    _CRYPTO_SPOT_CACHE[asset_id] = {"price": float(price), "ts": ts, "src": "coingecko"}
+                    logger.debug("CRYPTO prefetch spot %s = $%s (coingecko fallback)", asset_id, price)
+        except Exception as e:
+            logger.warning("CRYPTO prefetch spot failed: %s — will use cached or fallback", e)
 
 
 def _prefetch_all_crypto_vols() -> None:
@@ -1402,7 +1430,7 @@ def _prefetch_all_crypto_vols() -> None:
     now = _time.time()
     for asset_id, (fallback_vol, cap_low, cap_high, _, _) in CRYPTO_ASSETS_CONFIG.items():
         cached = _CRYPTO_VOL_CACHE.get(asset_id, {})
-        if cached and (now - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+        if cached and (now - cached.get("ts", 0)) < _CRYPTO_VOL_TTL:
             continue  # already fresh
         try:
             url = (f"{COINGECKO_BASE}/coins/{asset_id}/market_chart"
@@ -1423,18 +1451,35 @@ def _prefetch_all_crypto_vols() -> None:
 
 
 def _get_generic_crypto_spot(asset_id: str) -> float | None:
-    """Fetch CoinGecko spot price for any asset, with 30-min cache."""
+    """Fetch real-time spot price. Binance primary (sub-second), CoinGecko fallback."""
     cached = _CRYPTO_SPOT_CACHE.get(asset_id, {})
-    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_SPOT_TTL:
         return cached["price"]
+
+    import requests
+
+    # --- Primary: Binance REST (free, no auth, real-time) ---
+    binance_sym = _BINANCE_SYMBOLS.get(asset_id)
+    if binance_sym:
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_sym}"
+            r = requests.get(url, timeout=5)
+            r.raise_for_status()
+            price = float(r.json()["price"])
+            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "binance"}
+            logger.debug("CRYPTO spot %s = $%s (binance)", asset_id, price)
+            return price
+        except Exception as e:
+            logger.debug("CRYPTO binance spot failed for %s: %s, trying coingecko", asset_id, e)
+
+    # --- Fallback: CoinGecko ---
     try:
-        import requests
         url = f"{COINGECKO_BASE}/simple/price?ids={asset_id}&vs_currencies=usd"
         r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
         r.raise_for_status()
         price = float(r.json()[asset_id]["usd"])
-        _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time()}
-        logger.debug("CRYPTO spot %s = $%s", asset_id, price)
+        _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "coingecko"}
+        logger.debug("CRYPTO spot %s = $%s (coingecko fallback)", asset_id, price)
         return price
     except Exception as e:
         logger.warning("CRYPTO spot fetch failed for %s: %s", asset_id, e)
@@ -1445,7 +1490,7 @@ def _get_generic_crypto_vol(asset_id: str, fallback: float,
                              cap_low: float, cap_high: float) -> float:
     """Fetch 10-day realized vol from CoinGecko for any asset, with 30-min cache."""
     cached = _CRYPTO_VOL_CACHE.get(asset_id, {})
-    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_CACHE_TTL:
+    if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_VOL_TTL:
         return cached["vol"]
     try:
         import requests
@@ -1545,6 +1590,14 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
             logger.warning(
                 "CRYPTO %s/%s SKIP %s: edge %.1f%% exceeds 25%% cap — stale/near-expiry",
                 asset_id, timeframe, ticker, edge * 100,
+            )
+            continue
+        # Edge floor: crypto volatility eats thin edges before execution
+        from bot.config import CRYPTO_MIN_EDGE
+        if abs(edge) < CRYPTO_MIN_EDGE:
+            logger.debug(
+                "CRYPTO %s/%s SKIP %s: edge %.1f%% below %.0f%% floor",
+                asset_id, timeframe, ticker, abs(edge) * 100, CRYPTO_MIN_EDGE * 100,
             )
             continue
 

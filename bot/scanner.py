@@ -566,12 +566,15 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     all_opportunities.extend(weather_opps)
     logger.info("WEATHER: found %d opportunities", len(weather_opps))
 
-    # Tickers where weather model recommends BUY YES — these conflict with vig stack
-    # which always recommends BUY NO. Weather has direct NWS signal; vig stack is
-    # mechanical. Suppress vig stack on any ticker where they disagree.
+    # Tickers where weather model recommends BUY YES with strong edge (>20%) —
+    # these conflict with vig stack which always recommends BUY NO. Weather has
+    # direct NWS signal; vig stack is mechanical. Only suppress vig stack when
+    # weather edge is strong enough to trust over the structural signal.
+    _VIG_SUPPRESS_EDGE = 0.20
     _weather_yes_tickers = {
         opp["ticker"] for opp in weather_opps
         if opp.get("recommended_side") == "yes"
+        and abs(opp.get("edge", 0)) >= _VIG_SUPPRESS_EDGE
     }
 
     # Scan vig stack series (structural NO edge — no external odds, no liquidity filter)

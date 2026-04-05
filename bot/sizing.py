@@ -35,8 +35,9 @@ def kelly_size(
     Returns:
         {contracts, price_cents, total_cost, max_payout, kelly_fraction, reason}
     """
-    # Apply uncertainty discount and confidence discount before all calculations
-    probability = probability * uncertainty_discount * confidence
+    # Apply uncertainty discount only. Confidence gates trade entry (scanner level),
+    # not probability inside Kelly — double-discounting kills all mid-edge trades.
+    probability = probability * uncertainty_discount
 
     if edge <= 0 or probability <= 0 or probability >= 1 or balance <= 0 or price_cents <= 0:
         return {

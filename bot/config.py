@@ -37,6 +37,7 @@ TELEGRAM_CHAT_ID = _telegram_cfg.get("chat_id", "")
 # Trading Thresholds
 # ---------------------------------------------------------------------------
 MIN_RELATIVE_EDGE = 0.15       # 15% minimum relative edge to alert
+CRYPTO_MIN_EDGE = 0.15         # 15% minimum absolute edge for crypto (volatility floor)
 MAX_BET_FRACTION = 0.05        # 5% of balance per trade
 KELLY_FRACTION = 0.25          # 25% of full Kelly (conservative)
 MIN_BET_DOLLARS = 1.00         # Not worth execution cost below this

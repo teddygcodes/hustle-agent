@@ -106,7 +106,7 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
     if existing:
         return False, f"Already hold open position in {ticker} — skipping duplicate entry"
 
-    # Cooldown: block re-entry for 4 hours after any exit on same ticker
+    # Cooldown: block re-entry for 4 hours after any exit/resolve on same ticker
     from datetime import datetime, timezone, timedelta
     _COOLDOWN = timedelta(hours=4)
     _now = datetime.now(timezone.utc)
@@ -114,17 +114,38 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
         p for p in positions
         if isinstance(p, dict)
         and p.get("ticker") == ticker
-        and p.get("status") in ("exited", "exited_early")
-        and p.get("exited_at")
+        and p.get("status") in ("exited", "exited_early", "resolved")
+        and (p.get("exited_at") or p.get("resolved_at"))
     ]
     for p in recent_exits:
         try:
-            exited_at = datetime.fromisoformat(p["exited_at"])
+            ts = p.get("exited_at") or p.get("resolved_at")
+            exited_at = datetime.fromisoformat(ts)
             if (_now - exited_at) < _COOLDOWN:
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
         except Exception:
             pass
+
+    # Daily per-ticker loss limit: block if ticker has lost > $1.00 today
+    _DAILY_TICKER_LOSS_LIMIT = 1.00
+    _today = _now.date()
+    daily_ticker_loss = 0.0
+    for p in positions:
+        if not isinstance(p, dict) or p.get("ticker") != ticker:
+            continue
+        rpnl = p.get("realized_pnl") or p.get("unrealized_pnl") or 0
+        if rpnl >= 0:
+            continue
+        ts = p.get("exited_at") or p.get("resolved_at") or p.get("opened_at")
+        if ts:
+            try:
+                if datetime.fromisoformat(ts).date() == _today:
+                    daily_ticker_loss += abs(rpnl)
+            except Exception:
+                pass
+    if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
+        return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
     # Total exposure limit
     total_exposure = sum(p.get("cost", 0) for p in positions if isinstance(p, dict))

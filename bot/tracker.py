@@ -7,6 +7,7 @@ Sends Telegram alerts for significant moves and daily summaries.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import datetime, timezone, date
@@ -206,6 +207,17 @@ def resolve_trades() -> list[dict]:
             resolved_at_iso = pos["resolved_at"]
             paper_trades = _load_json(PAPER_TRADES_FILE)
             if isinstance(paper_trades, list):
+                # Load CLV data for sync
+                clv_entries = []
+                try:
+                    from bot.config import CLV_FILE
+                    if CLV_FILE.exists():
+                        clv_entries = json.loads(CLV_FILE.read_text())
+                        if not isinstance(clv_entries, list):
+                            clv_entries = []
+                except Exception:
+                    pass
+
                 for pt in paper_trades:
                     if pt.get("id") == order_id or (
                         not order_id and pt.get("ticker") == ticker and pt.get("status") == "open"
@@ -214,6 +226,16 @@ def resolve_trades() -> list[dict]:
                         pt["exit_price"] = 1.0 if won else 0.0
                         pt["pnl"] = round(pnl, 4)
                         pt["resolved_at"] = resolved_at_iso
+                        # Sync CLV from clv.json
+                        clv_match = next(
+                            (c for c in clv_entries if c.get("trade_id") == pt.get("id")),
+                            None,
+                        )
+                        if clv_match:
+                            if clv_match.get("clv_cents") is not None:
+                                pt["clv_cents"] = clv_match["clv_cents"]
+                            if clv_match.get("clv_relative") is not None:
+                                pt["clv_relative"] = clv_match["clv_relative"]
                         break
                 _save_json(PAPER_TRADES_FILE, paper_trades)
 

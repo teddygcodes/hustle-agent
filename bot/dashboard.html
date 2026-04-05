@@ -354,7 +354,7 @@
       <!-- CLV -->
       <div class="card d2 anim" style="padding:22px 24px;">
         <div class="section-head"><span class="section-head-title">CLV Summary</span></div>
-        <p class="label" style="margin-bottom:12px;margin-top:-8px;">Entry vs closing price (resolved)</p>
+        <p class="label" style="margin-bottom:12px;margin-top:-8px;">Closing-line value by strategy (resolved trades)</p>
         <div class="overflow-scroll">
           <table class="tbl">
             <thead><tr>
@@ -390,7 +390,7 @@
   <!-- ── OPEN POSITIONS ─────────────────── -->
   <div id="open-section" style="display:none;margin-bottom:24px;">
     <div class="card anim" style="padding:22px 24px;">
-      <div class="section-head"><span class="section-head-title">Open Positions</span></div>
+      <div class="section-head"><span class="section-head-title" id="open-positions-title">Open Positions</span></div>
       <div class="overflow-scroll">
         <table class="tbl">
           <thead><tr>
@@ -534,7 +534,7 @@ function renderStats() {
   pnlEl.textContent = fmtPnl(pnl);
   pnlEl.className = 'stat-number ' + (pnl > 0 ? 'c-green' : pnl < 0 ? 'c-red' : 'c-gold');
   document.getElementById('stat-pnl-sub').textContent =
-    'Balance ' + (balance>=0?'$':'-$') + Math.abs(balance).toFixed(2) + ' · Net ' + (netPnl>=0?'+$':'-$') + Math.abs(netPnl).toFixed(2);
+    'Realized (exits) · Balance ' + (balance>=0?'$':'-$') + Math.abs(balance).toFixed(2) + ' · Net from start ' + (netPnl>=0?'+$':'-$') + Math.abs(netPnl).toFixed(2);
   const card = document.getElementById('pnl-card');
   card.classList.toggle('card-glow-green', pnl > 0);
   card.classList.toggle('card-glow-red', pnl < 0);
@@ -618,6 +618,17 @@ function renderEquity() {
 function renderWinrateChart() {
   const byType = groupByType(paperTrades.filter(t => ['won','lost'].includes(t.status)));
   const labels = Object.keys(byType).sort();
+  if (!labels.length) {
+    const ctx = document.getElementById('winrate-chart').getContext('2d');
+    if (winrateChart) { winrateChart.destroy(); winrateChart = null; }
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.font = "13px 'Syne', sans-serif";
+    ctx.fillStyle = '#44445a';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Awaiting settled trades', ctx.canvas.width / 2, ctx.canvas.height / 2);
+    return;
+  }
   const wrs = labels.map(k => byType[k].total ? +(byType[k].wins/byType[k].total*100).toFixed(1) : 0);
   const typeColors = {
     series_game: { bar: 'rgba(91,142,224,0.55)', border: 'rgba(91,142,224,0.9)' },
@@ -705,25 +716,33 @@ function renderEdgeTable() {
 
 // ── CLV ───────────────────────────────────────────────────────────────────────
 function renderCLVTable() {
-  const res = paperTrades.filter(t => ['won','lost'].includes(t.status) && t.entry_price != null && t.exit_price != null);
+  const res = paperTrades.filter(t => ['won','lost'].includes(t.status));
   const tbody = document.getElementById('clv-table-body');
   tbody.replaceChildren();
   if (!res.length) { tbody.appendChild(emptyRow(4,'No resolved trades')); return; }
   const by = {};
   for (const t of res) {
     const tp = t.type||'unknown';
-    if (!by[tp]) by[tp] = { e: [], x: [] };
-    by[tp].e.push(t.entry_price); by[tp].x.push(t.exit_price);
+    if (!by[tp]) by[tp] = { clvs: [], entries: [], exits: [] };
+    // Prefer actual CLV from clv.json sync; fall back to exit-entry diff
+    if (t.clv_cents != null) {
+      by[tp].clvs.push(t.clv_cents);
+    } else if (t.entry_price != null && t.exit_price != null) {
+      by[tp].clvs.push((t.exit_price - t.entry_price) * 100);
+    }
+    if (t.entry_price != null) by[tp].entries.push(t.entry_price);
+    if (t.exit_price != null) by[tp].exits.push(t.exit_price);
   }
+  const hasTrueCLV = res.some(t => t.clv_cents != null);
   for (const [tp, d] of Object.entries(by).sort()) {
-    const ae = d.e.reduce((a,b)=>a+b,0)/d.e.length;
-    const ax = d.x.reduce((a,b)=>a+b,0)/d.x.length;
-    const clv = ax - ae;
+    const ae = d.entries.length ? d.entries.reduce((a,b)=>a+b,0)/d.entries.length : null;
+    const ax = d.exits.length ? d.exits.reduce((a,b)=>a+b,0)/d.exits.length : null;
+    const avgClv = d.clvs.length ? d.clvs.reduce((a,b)=>a+b,0)/d.clvs.length : null;
     appendRow(tbody, [
       { text: tp, cls: 'primary' },
-      { text: (ae*100).toFixed(1)+'¢', cls: 'mono-data', right: true },
-      { text: (ax*100).toFixed(1)+'¢', cls: 'mono-data', right: true },
-      { text: (clv>=0?'+':'')+(clv*100).toFixed(1)+'¢', cls: 'mono-data '+(clv>=0?'c-green':'c-red'), right: true },
+      { text: ae != null ? (ae*100).toFixed(1)+'¢' : '—', cls: 'mono-data', right: true },
+      { text: ax != null ? (ax*100).toFixed(1)+'¢' : '—', cls: 'mono-data', right: true },
+      { text: avgClv != null ? (avgClv>=0?'+':'')+avgClv.toFixed(1)+'¢' : 'Pending', cls: 'mono-data '+(avgClv!=null?(avgClv>=0?'c-green':'c-red'):'c-dim'), right: true },
     ]);
   }
 }
@@ -761,6 +780,7 @@ function renderOpenPositions() {
     document.getElementById('open-section').style.display = 'none'; return;
   }
   document.getElementById('open-section').style.display = 'block';
+  document.getElementById('open-positions-title').textContent = 'Open Positions (' + openPositions.length + ')';
   for (const p of openPositions) {
     const upnl = p.unrealized_pnl || 0;
     appendRow(tbody, [
