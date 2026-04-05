@@ -65,7 +65,8 @@ def test_scan_ipl_series_returns_list():
     }
 
     with patch("bot.kalshi_series._fetch_series_markets", return_value=fake_markets), \
-         patch("bot.kalshi_series._build_odds_api_lookup", return_value=fake_lookup):
+         patch("bot.kalshi_series._build_odds_api_lookup", return_value=fake_lookup), \
+         patch("bot.odds_scraper.fetch_bovada_odds", return_value={"games": []}):
         result = scan_ipl_series()
 
     assert isinstance(result, list)
