@@ -116,7 +116,7 @@ def test_eth_in_active_strategies():
 def test_get_forecast_temp_for_date_matches_correct_period():
     """Returns the temperature for the daytime period on the target date."""
     from datetime import date
-    from bot.scanner import _get_forecast_temp_for_date
+    from bot.scanner_weather import _get_forecast_temp_for_date
 
     forecast = {
         "periods": [
@@ -135,7 +135,7 @@ def test_get_forecast_temp_for_date_matches_correct_period():
 def test_get_forecast_temp_for_date_skips_night_periods():
     """Night periods are skipped even if their date matches."""
     from datetime import date
-    from bot.scanner import _get_forecast_temp_for_date
+    from bot.scanner_weather import _get_forecast_temp_for_date
 
     forecast = {
         "periods": [
@@ -150,7 +150,7 @@ def test_get_forecast_temp_for_date_skips_night_periods():
 def test_get_forecast_temp_for_date_returns_none_when_no_match():
     """Returns None when no period exists for the target date."""
     from datetime import date
-    from bot.scanner import _get_forecast_temp_for_date
+    from bot.scanner_weather import _get_forecast_temp_for_date
 
     forecast = {
         "periods": [
@@ -160,3 +160,32 @@ def test_get_forecast_temp_for_date_returns_none_when_no_match():
 
     result = _get_forecast_temp_for_date(forecast, date(2026, 4, 7))
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Logger hygiene — scanner files must not write to stdout
+# ---------------------------------------------------------------------------
+
+def test_scanner_weather_uses_logger_not_print(capsys):
+    """scanner_weather must not emit any print() output."""
+    from unittest.mock import patch
+    import bot.scanner_weather as sw
+
+    with patch.object(sw, "get_markets", return_value={"markets": []}), \
+         patch("bot.scanner_weather.requests.get", side_effect=Exception("no network")):
+        sw.scan_weather_markets()
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"scanner_weather printed to stdout: {captured.out!r}"
+
+
+def test_scanner_sports_uses_logger_not_print(capsys):
+    """scanner_sports must not emit any print() output."""
+    from unittest.mock import patch
+    import bot.scanner_sports as ss
+
+    with patch.object(ss, "get_markets", return_value={"markets": []}):
+        ss.scan_parlays("nba", odds_data={}, parlay_markets=[])
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"scanner_sports printed to stdout: {captured.out!r}"
