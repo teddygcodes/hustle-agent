@@ -13,7 +13,7 @@ import ssl
 import time as _time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from agent.kalshi_client import get_markets, get_market
 from agent.parlay import (
@@ -28,6 +28,9 @@ from bot.config import (
 from bot.math_engine import _self_check_edge
 from bot.odds_scraper import _odds_api_fallback, fetch_consensus_odds
 from bot.injuries import check_back_to_back as _check_b2b, get_last_10 as _get_l10
+
+import logging
+logger = logging.getLogger("nexus.kalshi_series")
 
 try:
     import certifi
@@ -65,8 +68,19 @@ COINGECKO_BTC_HISTORY_URL = (
     "?vs_currency=usd&days=10&interval=daily"
 )
 
+# ActionNetwork — free, no key, consensus odds from DK/FD/BetMGM/bet365
+# Covers today + tomorrow; cached 15 min (fresh enough for series scanner)
+_AN_BASE = "https://api.actionnetwork.com/web/v1/scoreboard"
+_AN_BOOK_IDS = "15,30,76,123,69"  # DraftKings, FanDuel, bet365, BetMGM, PointsBet
+_AN_SPORT_SLUGS: dict[str, str] = {
+    "nba": "nba", "mlb": "mlb", "nhl": "nhl", "ncaab": "ncaab",
+}
+_AN_CACHE: dict[str, tuple[float, list]] = {}
+_AN_CACHE_TTL = 900  # 15 min
+
 # TTL cache for Odds API lookups — 500/month free tier = ~15/day with 8h cache
-# 5 sports × 3 calls/day = 15/day = 450/month (fits within free tier with buffer)
+# With ActionNetwork covering today/tomorrow, Odds API is only needed for 2-5 day games.
+# 5 sports × 2 calls/day = 10/day = 300/month (comfortable buffer)
 _ODDS_API_CACHE: dict[str, tuple[float, dict[str, float]]] = {}
 _ODDS_API_CACHE_TTL = 28800  # 8 hours — was 1800 (30 min) which burned ~7,200 calls/month
 
@@ -174,7 +188,7 @@ def _get_json(url: str, timeout: int = 12, max_retries: int = 3) -> dict | list 
             if attempt < max_retries - 1:
                 _time.sleep(2 ** attempt)  # 1s, 2s backoff
             else:
-                print(f"  [SeriesHTTP] Error fetching {url[:80]}: {e}")
+                logger.warning("SeriesHTTP error fetching %s: %s", url[:80], e)
     return None
 
 
@@ -192,7 +206,7 @@ def _fetch_series_markets(series_ticker: str) -> list[dict]:
             kwargs["cursor"] = cursor
         result = get_markets(**kwargs)
         if "error" in result:
-            print(f"  [Series] Error fetching {series_ticker}: {result['error']}")
+            logger.warning("Series error fetching %s: %s", series_ticker, result['error'])
             break
         batch = result.get("markets", [])
         markets.extend(batch)
@@ -332,17 +346,97 @@ def _build_bovada_lookup(game_lines: list[dict]) -> dict[str, float]:
 _ODDS_API_FAIL_TTL = 300  # 5 min retry on failure vs 30 min on success
 
 
+def _fetch_action_network(sport: str) -> list[dict]:
+    """
+    Fetch upcoming games with consensus moneylines from ActionNetwork.
+    No API key required. Returns list of game dicts with 'home_team', 'away_team',
+    'commence_time', and 'consensus' {team_name: vig_free_prob}.
+    Cached 15 minutes per sport.
+    """
+    cached = _AN_CACHE.get(sport)
+    if cached and (_time.monotonic() - cached[0]) < _AN_CACHE_TTL:
+        return cached[1]
+
+    slug = _AN_SPORT_SLUGS.get(sport.lower())
+    if not slug:
+        return []
+
+    url = f"{_AN_BASE}/{slug}?period=game&bookIds={_AN_BOOK_IDS}"
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+                "Referer": "https://www.actionnetwork.com/",
+            },
+        )
+        with urllib.request.urlopen(req, context=_SSL_CTX, timeout=10) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        logger.warning("ActionNetwork/%s fetch failed: %s", sport.upper(), e)
+        _AN_CACHE[sport] = (_time.monotonic(), [])
+        return []
+
+    results = []
+    for game in data.get("games", []):
+        teams = game.get("teams", [])
+        if len(teams) < 2:
+            continue
+        away_id = game.get("away_team_id")
+        home_team = next((t["full_name"] for t in teams if t["id"] != away_id), None)
+        away_team = next((t["full_name"] for t in teams if t["id"] == away_id), None)
+        if not home_team or not away_team:
+            continue
+
+        # Build consensus from all available books
+        away_probs, home_probs = [], []
+        for odds_entry in game.get("odds", []):
+            ml_away = odds_entry.get("ml_away")
+            ml_home = odds_entry.get("ml_home")
+            if ml_away is None or ml_home is None:
+                continue
+            try:
+                def _to_implied(ml):
+                    ml = float(ml)
+                    if ml > 0:
+                        return 100.0 / (ml + 100.0)
+                    return abs(ml) / (abs(ml) + 100.0)
+                raw_a = _to_implied(ml_away)
+                raw_h = _to_implied(ml_home)
+                total = raw_a + raw_h
+                if total > 0:
+                    away_probs.append(raw_a / total)
+                    home_probs.append(raw_h / total)
+            except (TypeError, ValueError):
+                continue
+
+        if not away_probs:
+            continue
+
+        avg_away = sum(away_probs) / len(away_probs)
+        avg_home = sum(home_probs) / len(home_probs)
+        results.append({
+            "home_team": home_team,
+            "away_team": away_team,
+            "commence_time": game.get("start_time", ""),
+            "consensus": {home_team: avg_home, away_team: avg_away},
+        })
+
+    _AN_CACHE[sport] = (_time.monotonic(), results)
+    return results
+
+
 def _build_odds_api_lookup(sport: str) -> dict[str, float]:
     """
-    Build lowercase-team-name → vig-removed-prob dict for games 2-5 days out.
+    Build lowercase-team-name → vig-removed-prob dict.
 
-    This SUPPLEMENTS _build_bovada_lookup() which covers today's games.
-    The Odds API is the only free source with a 3-5 day horizon, so it is
-    always called (cached 8 hours = ~450 calls/month, within the free 500 limit).
+    Source priority:
+      1. ActionNetwork — free, no key, today + tomorrow (15 min cache)
+      2. The Odds API  — 2-5 day horizon gap-fill (8h cache, ~300 calls/month)
+      3. Free chain overlay (DK/Bovada/FanDuel) — freshest today prices
 
-    Additionally merges in fetch_consensus_odds() data (DK/Bovada/FanDuel) for
-    games where free chain has more current prices than the 8h-cached Odds API.
-
+    ActionNetwork replacing Odds API for 1-2 day games cuts monthly API usage
+    from ~450 to ~300 calls and removes the rate-limit dependency for same-day games.
     Cached per-sport for 8 hours (success) or 5 minutes (failure/empty).
     """
     cached = _ODDS_API_CACHE.get(sport)
@@ -370,7 +464,9 @@ def _build_odds_api_lookup(sport: str) -> dict[str, float]:
             if commence_raw:
                 try:
                     commence_dt = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
-                    if commence_dt <= now_utc:
+                    # Keep pre-game odds for games that started within the last 2 hours —
+                    # the series scanner has its own stale-odds check (hours_to_game < -2).
+                    if commence_dt < now_utc - timedelta(hours=2):
                         continue
                 except (ValueError, TypeError):
                     pass
@@ -396,33 +492,38 @@ def _build_odds_api_lookup(sport: str) -> dict[str, float]:
 
     lookup: dict[str, float] = {}
 
-    # Step 1: The Odds API — 3-5 day horizon (cached 8h, ~450 calls/month)
-    print(f"  [OddsAPI/{sport.upper()}] Fetching from The Odds API...")
+    # Step 1: ActionNetwork — free, no key, today + tomorrow consensus odds
+    an_games = _fetch_action_network(sport)
+    if an_games:
+        _add_games_to_lookup(an_games, lookup)
+        logger.debug("OddsAPI/%s ActionNetwork: %d games | %d teams",
+                     sport.upper(), len(an_games), len(lookup) // 2)
+    else:
+        logger.warning("OddsAPI/%s ActionNetwork: no data", sport.upper())
+
+    # Step 2: The Odds API — fills 2-5 day horizon gaps ActionNetwork doesn't cover
+    logger.debug("OddsAPI/%s fetching from The Odds API", sport.upper())
     try:
         result = _odds_api_fallback(sport)
         if "error" not in result:
             raw_games = result.get("games", [])
             _add_games_to_lookup(raw_games, lookup)
             skipped_no_consensus = sum(1 for g in raw_games if not g.get("consensus"))
-            print(
-                f"  [OddsAPI/{sport.upper()}] Got {len(raw_games)} games | "
-                f"{len(lookup)//2} teams | {skipped_no_consensus} no-consensus"
-            )
+            logger.debug("OddsAPI/%s got %d games | %d teams | %d no-consensus",
+                         sport.upper(), len(raw_games), len(lookup) // 2, skipped_no_consensus)
         else:
-            print(f"  [OddsAPI/{sport.upper()}] ERROR: {result['error']}")
+            logger.warning("OddsAPI/%s error: %s", sport.upper(), result['error'])
     except Exception as e:
-        print(f"  [OddsAPI/{sport.upper()}] Exception: {e}")
+        logger.warning("OddsAPI/%s exception: %s", sport.upper(), e)
 
-    # Step 2: Overlay free chain (DK/Bovada/FanDuel) for more current today's odds
-    # Free chain has fresher prices for games within 24h; Odds API fills the 2-5 day gap.
+    # Step 3: Overlay free chain (DK/Bovada/FanDuel) — freshest same-day prices take priority
     chain_result = fetch_consensus_odds(sport)
     chain_games = [g for g in chain_result.get("games", []) if g.get("consensus")]
     if chain_games:
         _add_games_to_lookup(chain_games, lookup, override=True)
         source = chain_result.get("source", "free_chain")
-        print(
-            f"  [OddsAPI/{sport.upper()}] +{source} overlay: {len(lookup)//2} total teams"
-        )
+        logger.debug("OddsAPI/%s +%s overlay: %d total teams",
+                     sport.upper(), source, len(lookup) // 2)
 
     _ODDS_API_CACHE[sport] = (_time.monotonic(), lookup if lookup else {})
     if sport in _ODDS_API_GAME_MAP:
@@ -446,7 +547,7 @@ def scan_sports_series(sport: str) -> list[dict]:
     alias_dict = _ALIAS_DICTS.get(sport.lower(), {})
     markets = _fetch_series_markets(series_ticker)
     if not markets:
-        print(f"  [Series/{sport.upper()}] No open markets for {series_ticker}")
+        logger.warning("Series/%s no open markets for %s", sport.upper(), series_ticker)
         return []
 
     game_lines = _fetch_bovada_game_lines(sport)
@@ -456,10 +557,8 @@ def scan_sports_series(sport: str) -> list[dict]:
     # (e.g. games 48+ hours out). Cached 30 min so it doesn't burn the rate limit.
     odds_api_lookup = _build_odds_api_lookup(sport)
 
-    print(
-        f"  [Series/{sport.upper()}] {len(markets)} open markets | "
-        f"{len(game_lines)} Bovada games | {len(odds_api_lookup)//2} Odds API teams"
-    )
+    logger.info("Series/%s %d open markets | %d Bovada games | %d Odds API teams",
+                sport.upper(), len(markets), len(game_lines), len(odds_api_lookup) // 2)
 
     now_utc = datetime.now(timezone.utc)
     opportunities = []
@@ -513,10 +612,8 @@ def scan_sports_series(sport: str) -> list[dict]:
             if prob is not None:
                 prob_source = "elo_fallback"
             else:
-                print(
-                    f"    [Series/{sport.upper()}] SKIP {ticker}: "
-                    f"no match for abbrev={abbrev!r} canonical={canonical!r} source=none"
-                )
+                logger.debug("Series/%s SKIP %s: no match for abbrev=%r canonical=%r source=none",
+                             sport.upper(), ticker, abbrev, canonical)
                 continue
 
         # Fix #5: Time-to-game edge requirement — distant games need a larger edge
@@ -555,10 +652,8 @@ def scan_sports_series(sport: str) -> list[dict]:
 
         # Skip games that have already started — odds from cache may be stale
         if game_dt and hours_to_game < 0:
-            print(
-                f"    [Series/{sport.upper()}] SKIP {ticker}: "
-                f"game started {-hours_to_game:.1f}h ago (stale odds)"
-            )
+            logger.debug("Series/%s SKIP %s: game started %.1fh ago (stale odds)",
+                         sport.upper(), ticker, -hours_to_game)
             continue
 
         # Back-to-back check for the team we're betting on
@@ -567,7 +662,7 @@ def scan_sports_series(sport: str) -> list[dict]:
             try:
                 team_b2b = _check_b2b(canonical, sport, game_dt)
                 if team_b2b:
-                    print(f"    [Series/{sport.upper()}] B2B: {canonical}")
+                    logger.debug("Series/%s B2B: %s", sport.upper(), canonical)
             except Exception:
                 pass
 
@@ -592,10 +687,8 @@ def scan_sports_series(sport: str) -> list[dict]:
 
         # Sanity cap: edges > 150% are almost certainly stale/live-game prices
         if abs(relative_edge) > 1.5:
-            print(
-                f"    [Series/{sport.upper()}] SKIP {ticker}: "
-                f"relative_edge={relative_edge:.1%} exceeds sanity cap (likely live game)"
-            )
+            logger.debug("Series/%s SKIP %s: relative_edge=%.1f%% exceeds sanity cap (likely live game)",
+                         sport.upper(), ticker, relative_edge * 100)
             continue
 
         # Confidence scales down for distant games (less reliable odds)
@@ -627,7 +720,7 @@ def scan_sports_series(sport: str) -> list[dict]:
                     try:
                         opp_b2b = _check_b2b(opp_name, sport, game_dt)
                         if opp_b2b:
-                            print(f"    [Series/{sport.upper()}] B2B (opp): {opp_name}")
+                            logger.debug("Series/%s B2B (opp): %s", sport.upper(), opp_name)
                     except Exception:
                         pass
                 home_b2b = team_b2b if is_home else opp_b2b
@@ -647,16 +740,23 @@ def scan_sports_series(sport: str) -> list[dict]:
         except Exception:
             pass
 
-        # Derive opponent from game map (populated by _build_odds_api_lookup)
+        # Derive opponent directly from Kalshi ticker (reliable — no multi-game map collision)
         opponent_team = ""
-        game_info_for_opp = _ODDS_API_GAME_MAP.get(sport, {}).get(
-            canonical.lower() if canonical else ""
-        )
-        if game_info_for_opp:
-            if game_info_for_opp["home_away"] == "home":
-                opponent_team = game_info_for_opp["away_team"]
-            else:
-                opponent_team = game_info_for_opp["home_team"]
+        try:
+            import re as _re2
+            _parts = ticker.split("-")
+            if len(_parts) >= 3:
+                _m = _re2.match(r"\d{2}[A-Z]{3}\d{2}(?:\d{4})?([A-Z]+)", _parts[1])
+                if _m:
+                    _teams = _m.group(1)
+                    _au = abbrev.upper()
+                    _opp_abbrev = _teams[len(_au):] if _teams.startswith(_au) else (
+                        _teams[:-len(_au)] if _teams.endswith(_au) else ""
+                    )
+                    if _opp_abbrev:
+                        opponent_team = _resolve_team_name(_opp_abbrev.lower(), alias_dict) or ""
+        except Exception:
+            pass
 
         # Last-10 records for both teams
         team_l10 = None
@@ -742,7 +842,7 @@ def _get_btc_realized_vol() -> float:
     # Floor at 1%, ceiling at 12% — 10-day daily window
     daily_vol = max(0.01, min(0.12, daily_vol))
 
-    print(f"  [Series/BTC] Realized 10d vol: {daily_vol:.2%} (from {len(prices)} daily closes)")
+    logger.debug("Series/BTC realized 10d vol: %.2f%% (from %d daily closes)", daily_vol * 100, len(prices))
     _BTC_VOL_CACHE = (_time.monotonic(), daily_vol)
     return daily_vol
 
@@ -774,7 +874,7 @@ def _get_eth_realized_vol() -> float:
     daily_variance = sum(r ** 2 for r in log_returns) / len(log_returns)
     daily_vol = math.sqrt(daily_variance)
     daily_vol = max(0.01, min(0.15, daily_vol))  # 1%-15%, 10-day daily window
-    print(f"  [Series/ETH] Realized 10d vol: {daily_vol:.2%}")
+    logger.debug("Series/ETH realized 10d vol: %.2f%%", daily_vol * 100)
     _ETH_VOL_CACHE = (_time.monotonic(), daily_vol)
     return daily_vol
 
@@ -821,12 +921,12 @@ def scan_bitcoin_series() -> list[dict]:
     """
     markets = _fetch_series_markets(BTC_SERIES)
     if not markets:
-        print(f"  [Series/BTC] No open markets for {BTC_SERIES}")
+        logger.warning("Series/BTC no open markets for %s", BTC_SERIES)
         return []
 
     spot = _get_btc_spot()
     if not spot:
-        print(f"  [Series/BTC] Could not fetch BTC spot price")
+        logger.warning("Series/BTC could not fetch BTC spot price")
         return []
 
     now_utc = datetime.now(timezone.utc)
@@ -835,13 +935,11 @@ def scan_bitcoin_series() -> list[dict]:
     hours_remaining = (resolve_today - now_utc).total_seconds() / 3600.0
 
     if hours_remaining < 0:
-        print(f"  [Series/BTC] All today's markets already resolved (past 21:00 UTC)")
+        logger.warning("Series/BTC all today's markets already resolved (past 21:00 UTC)")
         return []
 
-    print(
-        f"  [Series/BTC] {len(markets)} open markets | "
-        f"spot=${spot:,.0f} | hours_remaining={hours_remaining:.1f}h"
-    )
+    logger.info("Series/BTC %d open markets | spot=$%s | hours_remaining=%.1fh",
+                len(markets), f"{spot:,.0f}", hours_remaining)
 
     # Parse today's date as used in tickers (e.g. '26APR04')
     today_str = now_utc.strftime("%y%b%d").upper()
@@ -915,24 +1013,36 @@ def scan_bitcoin_series() -> list[dict]:
 
 def scan_ipl_series() -> list[dict]:
     """
-    Scan KXIPLGAME series for edges vs The Odds API consensus.
+    Scan KXIPLGAME series for edges vs consensus cricket odds.
 
-    IPL cricket — Bovada doesn't carry cricket so Odds API is the sole source.
-    Same edge/filter logic as scan_sports_series().
+    Source priority: Bovada (primary, all 10 teams) → Odds API (gap-fill).
     Returns opportunity dicts with type='ipl_game_edge'.
     """
     markets = _fetch_series_markets(IPL_SERIES)
     if not markets:
-        print(f"  [Series/IPL] No open markets for {IPL_SERIES}")
+        logger.warning("Series/IPL no open markets for %s", IPL_SERIES)
         return []
 
     odds_lookup = _build_odds_api_lookup("ipl")
-    # Debug: print exact keys in lookup so name mismatches are visible in logs
-    print(
-        f"  [Series/IPL] {len(markets)} open markets | "
-        f"{len(odds_lookup)//2} Odds API teams | "
-        f"lookup keys: {sorted(set(k for k in odds_lookup if len(k) > 4))}"
-    )
+
+    # Overlay Bovada cricket — covers all 10 IPL teams (Odds API misses ~4)
+    from bot.odds_scraper import fetch_bovada_odds as _fetch_bovada
+    bovada_result = _fetch_bovada("ipl")
+    bovada_games = [g for g in bovada_result.get("games", []) if g.get("consensus")]
+    if bovada_games:
+        now_utc = datetime.now(timezone.utc)
+        for g in bovada_games:
+            for team_name, prob in g["consensus"].items():
+                if prob and prob > 0:
+                    key = team_name.lower()
+                    odds_lookup[key] = prob
+                    odds_lookup[team_name.split()[-1].lower()] = prob
+                    odds_lookup[team_name.split()[0].lower()] = prob
+        logger.debug("Series/IPL +bovada overlay: %d total teams (%d games)",
+                     len(odds_lookup) // 2, len(bovada_games))
+
+    logger.info("Series/IPL %d open markets | %d Odds API teams",
+                len(markets), len(odds_lookup) // 2)
 
     now_utc = datetime.now(timezone.utc)
     opportunities = []
@@ -954,7 +1064,7 @@ def scan_ipl_series() -> list[dict]:
 
         canonical = IPL_TEAM_ALIASES.get(abbrev.lower())
         if not canonical:
-            print(f"    [Series/IPL] SKIP {ticker}: unknown abbrev={abbrev!r}")
+            logger.debug("Series/IPL SKIP %s: unknown abbrev=%r", ticker, abbrev)
             continue
 
         # Try exact match, last-word match, then first-word match
@@ -970,13 +1080,9 @@ def scan_ipl_series() -> list[dict]:
             if prob is not None:
                 prob_source = "elo_fallback"
             else:
-                print(
-                    f"    [Series/IPL] SKIP {ticker}: "
-                    f"no odds match for canonical={canonical!r} "
-                    f"(tried: {canonical.lower()!r}, "
-                    f"{canonical.split()[-1].lower()!r}, "
-                    f"{canonical.split()[0].lower()!r})"
-                )
+                logger.debug("Series/IPL SKIP %s: no odds match for canonical=%r (tried: %r, %r, %r)",
+                             ticker, canonical, canonical.lower(),
+                             canonical.split()[-1].lower(), canonical.split()[0].lower())
                 continue
 
         hours_to_game = 0.0
@@ -1020,10 +1126,8 @@ def scan_ipl_series() -> list[dict]:
             continue
 
         if abs(relative_edge) > 1.5:
-            print(
-                f"    [Series/IPL] SKIP {ticker}: "
-                f"relative_edge={relative_edge:.1%} exceeds sanity cap"
-            )
+            logger.debug("Series/IPL SKIP %s: relative_edge=%.1f%% exceeds sanity cap",
+                         ticker, relative_edge * 100)
             continue
 
         confidence = 0.75
@@ -1080,12 +1184,12 @@ def scan_ethereum_series() -> list[dict]:
     """
     markets = _fetch_series_markets(ETH_SERIES)
     if not markets:
-        print(f"  [Series/ETH] No open markets for {ETH_SERIES}")
+        logger.warning("Series/ETH no open markets for %s", ETH_SERIES)
         return []
 
     spot = _get_eth_spot()
     if not spot:
-        print(f"  [Series/ETH] Could not fetch ETH spot price")
+        logger.warning("Series/ETH could not fetch ETH spot price")
         return []
 
     now_utc = datetime.now(timezone.utc)
@@ -1093,14 +1197,12 @@ def scan_ethereum_series() -> list[dict]:
     hours_remaining = (resolve_today - now_utc).total_seconds() / 3600.0
 
     if hours_remaining < 0:
-        print(f"  [Series/ETH] All today's markets already resolved (past 21:00 UTC)")
+        logger.warning("Series/ETH all today's markets already resolved (past 21:00 UTC)")
         return []
 
     vol = _get_eth_realized_vol()
-    print(
-        f"  [Series/ETH] {len(markets)} open markets | "
-        f"spot=${spot:,.0f} | vol={vol:.2%} | hours_remaining={hours_remaining:.1f}h"
-    )
+    logger.info("Series/ETH %d open markets | spot=$%s | vol=%.2f%% | hours_remaining=%.1fh",
+                len(markets), f"{spot:,.0f}", vol * 100, hours_remaining)
 
     today_str = now_utc.strftime("%y%b%d").upper()
 
@@ -1195,25 +1297,25 @@ def scan_series_markets(odds_by_sport: dict | None = None) -> list[dict]:
     for sport in SPORTS_SERIES:
         try:
             opps = scan_sports_series(sport)
-            print(f"  [Series/{sport.upper()}] Found {len(opps)} opportunities")
+            logger.info("Series/%s found %d opportunities", sport.upper(), len(opps))
             all_opps.extend(opps)
         except Exception as e:
-            print(f"  [Series/{sport.upper()}] Error: {e}")
+            logger.warning("Series/%s error: %s", sport.upper(), e)
         _time.sleep(1.0)  # 1s gap between sports to avoid Kalshi 429
 
     _time.sleep(1.0)  # extra gap before BTC (NBA paginator hits Kalshi hard)
     btc_opps = scan_bitcoin_series()
-    print(f"  [Series/BTC] Found {len(btc_opps)} opportunities")
+    logger.info("Series/BTC found %d opportunities", len(btc_opps))
     all_opps.extend(btc_opps)
 
     _time.sleep(1.0)
     ipl_opps = scan_ipl_series()
-    print(f"  [Series/IPL] Found {len(ipl_opps)} opportunities")
+    logger.info("Series/IPL found %d opportunities", len(ipl_opps))
     all_opps.extend(ipl_opps)
 
     _time.sleep(0.5)
     eth_opps = scan_ethereum_series()
-    print(f"  [Series/ETH] Found {len(eth_opps)} opportunities")
+    logger.info("Series/ETH found %d opportunities", len(eth_opps))
     all_opps.extend(eth_opps)
 
     return all_opps

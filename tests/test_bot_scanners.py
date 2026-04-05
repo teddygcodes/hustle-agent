@@ -202,3 +202,18 @@ def test_scanner_morning_scan_uses_logger_not_print(capsys):
 
     captured = capsys.readouterr()
     assert captured.out == "", f"scanner morning_weather_scan printed to stdout: {captured.out!r}"
+
+
+def test_kalshi_series_uses_logger_not_print(capsys):
+    """scan_series_markets must not emit any print() output."""
+    from unittest.mock import patch
+    import bot.kalshi_series as ks
+
+    with patch.object(ks, "scan_sports_series", return_value=[]), \
+         patch.object(ks, "scan_bitcoin_series", return_value=[]), \
+         patch.object(ks, "scan_ethereum_series", return_value=[]), \
+         patch.object(ks, "scan_ipl_series", return_value=[]):
+        ks.scan_series_markets()
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"kalshi_series printed to stdout: {captured.out!r}"
