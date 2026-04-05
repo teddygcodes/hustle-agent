@@ -282,7 +282,7 @@ class GlintBot:
 
         # Send watchdog alert now that state is saved and Telegram is ready
         if self._watchdog_alert:
-            await self.notifier.send_message(self._watchdog_alert)
+            # Watchdog alert silenced
             self._watchdog_alert = None
 
         self._running = True
@@ -293,10 +293,7 @@ class GlintBot:
         if pending:
             survivors = len(pending)
             tickers = ", ".join(p.get("ticker", "?") for p in pending[:5])
-            await self.notifier.send_message(
-                f"📋 {survivors} pending opportunit{'y' if survivors == 1 else 'ies'} survived restart: {tickers}\n"
-                f"Reply LIST to see them."
-            )
+            # Pending opportunities notification silenced
             logger.info(f"Loaded {survivors} pending opportunities from disk")
 
         # Reconcile local positions.json against Kalshi live positions.
@@ -330,7 +327,7 @@ class GlintBot:
             logger.warning("Position reconciliation failed: %s", _e)
 
         if TELEGRAM_BOT_TOKEN:
-            await self.notifier.send_message("✨ Glint is online. Scanning for edges...")
+            # Startup notification silenced — bot runs quietly
             logger.info("Telegram connected — bot is live")
         else:
             logger.warning("No Telegram token — running in console-only mode")
@@ -354,7 +351,7 @@ class GlintBot:
         _save_bot_state(state)
         _release_lock()
 
-        await self.notifier.send_message("🛑 Glint stopped.")
+        # Shutdown notification silenced
         await self.notifier.stop()
         logger.info("Bot stopped")
 
@@ -698,6 +695,48 @@ class GlintBot:
         self.notifier.register_callback("MODE", handle_mode)
         self.notifier.register_callback("STATS", handle_stats)
 
+        def handle_restart(args=""):
+            """Restart the bot process (launchd/watchdog will auto-restart)."""
+            import os as _os, subprocess
+            pid = _os.getpid()
+            logger.info("RESTART command received — scheduling kill -9 %d", pid)
+            subprocess.Popen(
+                ["bash", "-c", f"sleep 2 && kill -9 {pid}"],
+                start_new_session=True,
+            )
+            return "♻️ Restarting bot... back in ~10 seconds."
+
+        def handle_stop(args=""):
+            """Stop the bot and unload launchd so it stays down."""
+            import os as _os, subprocess
+            pid = _os.getpid()
+            logger.info("STOP command received — unloading launchd and killing %d", pid)
+            subprocess.Popen(
+                ["bash", "-c",
+                 "sleep 2 "
+                 "&& launchctl unload ~/Library/LaunchAgents/com.hustle-agent.bot.plist 2>/dev/null; "
+                 f"kill -9 {pid}"],
+                start_new_session=True,
+            )
+            return "🛑 Stopping bot. Send START to bring it back (from Claude Code)."
+
+        def handle_logs(args=""):
+            """Tail the last 20 lines of bot.log."""
+            try:
+                from bot.config import BASE_DIR
+                log_file = BASE_DIR / "bot" / "logs" / "bot.log"
+                if not log_file.exists():
+                    return "No log file found."
+                lines = log_file.read_text().strip().split("\n")
+                tail = lines[-20:]
+                return "\n".join(tail)
+            except Exception as e:
+                return f"Error reading logs: {e}"
+
+        self.notifier.register_callback("RESTART", handle_restart)
+        self.notifier.register_callback("STOP", handle_stop)
+        self.notifier.register_callback("LOGS", handle_logs)
+
     async def _handle_opportunity(self, opp: dict, balance: float) -> None:
         """Process a single opportunity: size → execute (paper) or queue (live)."""
         _outcome_tracker.store_alert(opp)
@@ -745,7 +784,7 @@ class GlintBot:
             else:
                 alert_lines.append(f"\n⚠️ PAPER EXECUTION FAILED — {result['reason']}")
                 logger.warning("Paper auto-execution failed: %s — %s", opp.get("ticker"), result["reason"])
-            await self.notifier.send_message("\n".join(alert_lines))
+            # Trade notifications silenced — use /status or STATUS in Telegram
         else:
             opp_id = _add_to_pending(opp)
             opp["_opp_id"] = opp_id
@@ -759,15 +798,9 @@ class GlintBot:
                 queue_num, opp_id, opp.get("ticker"), opp.get("relative_edge", 0) * 100,
                 opp.get("recommended_side"),
             )
-            await self.notifier.send_alert(opp)
+            # GO/SKIP alerts silenced — use STATUS in Telegram
 
-        try:
-            from bot.patterns import get_edge_accuracy
-            accuracy_note = get_edge_accuracy(opp)
-            if accuracy_note:
-                await self.notifier.send_message(f"📊 {accuracy_note}")
-        except Exception:
-            pass
+        # Edge accuracy notifications silenced
 
     async def _crypto_scan_loop(self):
         """
@@ -850,8 +883,8 @@ class GlintBot:
             # ----------------------------------------------------------
             try:
                 resolved = resolve_trades()
-                for r in resolved:
-                    await self.notifier.send_resolution(r)
+                # Resolution notifications silenced — check via STATUS
+                pass
                 # Update pattern analysis after resolutions
                 if resolved:
                     try:
@@ -878,11 +911,8 @@ class GlintBot:
                     result = clv_entry.get("market_result", "?")
                     paper_tag = " [PAPER]" if clv_entry.get("paper") else ""
                     emoji = "✅" if clv_cents > 0 else "❌"
-                    await self.notifier.send_message(
-                        f"{emoji} CLV SETTLED{paper_tag}: {ticker} {side} | "
-                        f"CLV={clv_cents:+.1f}¢ | Result={result}",
-                        priority="critical",
-                    )
+                    # CLV settlement notifications silenced
+                    pass
             except Exception as e:
                 logger.error(f"CLV settlement check error: {e}")
 
@@ -891,10 +921,8 @@ class GlintBot:
             # ----------------------------------------------------------
             try:
                 fills = check_fills()
-                for f in fills:
-                    await self.notifier.send_message(
-                        f"📋 Fill update: {f.get('ticker')} — {f.get('filled')}/{f.get('contracts')} filled"
-                    )
+                # Fill notifications silenced
+                pass
             except Exception as e:
                 logger.error(f"Fill check error: {e}")
 
@@ -944,15 +972,9 @@ class GlintBot:
                                 priority="critical",
                             )
                     elif alert_type == "resting_expiry":
-                        await self.notifier.send_message(
-                            f"⏰ Resting order {a['ticker']} unfilled for {a['age_minutes']}min",
-                            priority="normal",
-                        )
+                        pass  # silenced
                     else:
-                        await self.notifier.send_message(
-                            f"⚠️ {a['ticker']} — {a['pnl_percent']:.0%} "
-                            f"(${a['unrealized_pnl']:.2f})"
-                        )
+                        pass  # position move notifications silenced
             except Exception as e:
                 logger.error(f"Position update error: {e}")
 
@@ -985,9 +1007,7 @@ class GlintBot:
                             priority="critical",
                         )
                     elif event == "mm_partial":
-                        await self.notifier.send_message(
-                            f"📋 MM PARTIAL: {ticker} — {evt['message']}"
-                        )
+                        pass  # MM partial notifications silenced
                     elif event == "mm_cancelled":
                         logger.info(f"MM pair timed out and cancelled: {ticker}")
             except Exception as e:
@@ -1010,7 +1030,7 @@ class GlintBot:
                     # Add sizing placeholder so handle_go can validate
                     mm_opp.setdefault("sizing", {"contracts": mm_opp.get("contracts_per_side", 1)})
                     _add_to_pending(mm_opp)
-                    await self.notifier.send_message(format_mm_opportunity(mm_opp))
+                    # MM opportunity notifications silenced
                     # No blocking — scanner keeps running immediately
             except Exception as e:
                 logger.error(f"MM scan error: {e}")

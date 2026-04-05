@@ -313,7 +313,7 @@ def scan_weather_markets() -> list[dict]:
         threshold_met = edge_result.get("relative_edge", 0) >= MIN_RELATIVE_EDGE
         logger.info(
             "%s | %s | NWS=%s°F corrected=%s°F | threshold=%s°F %s | "
-            "fair=%.4f kalshi=%s¢ | edge=%+.4f rel=%+.1%% | self_check=%s | threshold_met=%s",
+            "fair=%.4f kalshi=%s¢ | edge=%+.4f rel=%+.1f%% | self_check=%s | threshold_met=%s",
             ticker, matched_city, forecast_temp, corrected, threshold, direction,
             fair_value, yes_ask, edge_result.get('edge', 0), rel_edge * 100,
             'PASS' if edge_result.get('self_check_passed') else 'FAIL', threshold_met,

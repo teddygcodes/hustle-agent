@@ -54,6 +54,12 @@ def format_opportunity(opp: dict) -> str:
         "vig_stack_series":  "Series Vig Stack NO",
         "series_game_edge":  "Series Game Edge",
         "btc_price_edge":    "BTC Price Edge",
+        "eth_price_edge":    "ETH Price Edge",
+        "sol_price_edge":    "SOL Price Edge",
+        "xrp_price_edge":    "XRP Price Edge",
+        "doge_price_edge":   "DOGE Price Edge",
+        "bnb_price_edge":    "BNB Price Edge",
+        "hype_price_edge":   "HYPE Price Edge",
         "weather":           "Weather Market",
         "live_latency_arb":  "Live Latency Arb",
     }
@@ -512,6 +518,41 @@ def format_daily_summary(stats: dict) -> str:
 # Telegram Bot — command handler callbacks
 # ---------------------------------------------------------------------------
 
+_COMMANDS_HELP = """COMMANDS
+
+INFO
+  STATUS — balance, P&L, win rate, open positions
+  BALANCE — account balance
+  LIVE — open positions with current prices
+  EDGES — recent edges found
+  LOGS — last 20 lines of bot.log
+
+STATS
+  STATS — full paper trading breakdown
+  HISTORY — trade history
+  WINRATE — win rate by strategy
+  ROI — return on investment by strategy
+  CLV — closing line value report
+
+MANAGE
+  SELL [ticker] — exit a position
+  EXITALL — exit all positions
+  TRAIL [ticker] [%] — set trailing stop
+
+CONFIG
+  MODE — show paper/live mode + strategies
+  SCAN — trigger a manual scan
+
+CONTROL
+  PAUSE — pause scanning
+  RESUME — resume scanning
+  RESTART — restart the bot
+  STOP — stop the bot (start from Claude Code)
+  QUIET [hrs] — mute alerts for N hours
+  LOUD — unmute all alerts
+  COMMANDS — show this list"""
+
+
 class TelegramNotifier:
     """
     Manages Telegram bot for sending alerts and receiving commands.
@@ -729,16 +770,7 @@ class TelegramNotifier:
         self._message_ids.pop(opp_id, None)
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(
-            "✨ Glint Trading Bot active.\n\n"
-            "Alerts arrive with ✅ GO and ❌ SKIP buttons — tap to act.\n\n"
-            "Queue: LIST, PENDING\n"
-            "Info: STATUS, LIVE, EDGES, BALANCE\n"
-            "Manage: SELL [ticker], EXITALL, TRAIL [ticker] [%]\n"
-            "Stats: HISTORY, WINRATE, ROI, CLV\n"
-            "Config: MODE, SCAN\n"
-            "Control: PAUSE, RESUME, QUIET [hrs], LOUD"
-        )
+        await update.message.reply_text(_COMMANDS_HELP)
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         cb = self._command_callbacks.get("STATUS")
@@ -819,11 +851,9 @@ class TelegramNotifier:
                     await update.message.reply_text(text)
             except Exception as e:
                 await update.message.reply_text(f"Error: {e}")
+        elif command == "COMMANDS":
+            await update.message.reply_text(_COMMANDS_HELP)
         else:
-            available = sorted(self._command_callbacks.keys())
-            cmd_list = ", ".join(available)
             await update.message.reply_text(
-                f"Unknown: {command}\n\n"
-                f"Commands: {cmd_list}\n"
-                f"Also: PAUSE, RESUME, QUIET [hours], LOUD"
+                f"Unknown: {command}\n\nSend COMMANDS for full list."
             )

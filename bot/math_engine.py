@@ -544,7 +544,7 @@ def verify_contract_direction(
     # On Kalshi, YES = final price is ABOVE the threshold embedded in the ticker.
     if not yes_means:
         _CRYPTO_PRICE_PATTERN = re.compile(
-            r"\b(bitcoin|ethereum|solana|xrp|ripple|dogecoin|doge|btc|eth|sol)\b.{0,30}price",
+            r"\b(bitcoin|ethereum|solana|xrp|ripple|dogecoin|doge|btc|eth|sol|bnb|binance|hyperliquid|hype)\b.{0,30}price",
             re.IGNORECASE,
         )
         if _CRYPTO_PRICE_PATTERN.search(title_lower):

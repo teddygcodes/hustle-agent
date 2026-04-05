@@ -118,12 +118,15 @@ _CRYPTO_SPOT_TTL = 15     # 15 sec — spot prices move fast
 _CRYPTO_VOL_TTL = 1800    # 30 min — vol is stable intraday
 
 # Binance symbol mapping (CoinGecko id → Binance trading pair)
-_BINANCE_SYMBOLS: dict[str, str] = {
-    "bitcoin": "BTCUSDT",
-    "ethereum": "ETHUSDT",
-    "solana": "SOLUSDT",
-    "ripple": "XRPUSDT",
-    "dogecoin": "DOGEUSDT",
+# Coinbase pair mapping (CoinGecko id → Coinbase trading pair)
+_COINBASE_PAIRS: dict[str, str] = {
+    "bitcoin": "BTC-USD",
+    "ethereum": "ETH-USD",
+    "solana": "SOL-USD",
+    "ripple": "XRP-USD",
+    "dogecoin": "DOGE-USD",
+    "binancecoin": "BNB-USD",
+    "hyperliquid": "HYPE-USD",
 }
 
 # Asset config: coingecko_id → (fallback_vol, vol_cap_low, vol_cap_high, confidence, opp_type)
@@ -132,7 +135,9 @@ CRYPTO_ASSETS_CONFIG: dict[str, tuple] = {
     "ethereum": (0.045, 0.010, 0.15, 0.68, "eth_price_edge"),
     "solana":   (0.055, 0.015, 0.18, 0.65, "sol_price_edge"),
     "ripple":   (0.050, 0.010, 0.15, 0.60, "xrp_price_edge"),
-    "dogecoin": (0.070, 0.020, 0.20, 0.55, "doge_price_edge"),
+    "dogecoin":    (0.070, 0.020, 0.20, 0.55, "doge_price_edge"),
+    "binancecoin": (0.045, 0.010, 0.15, 0.60, "bnb_price_edge"),
+    "hyperliquid": (0.060, 0.015, 0.20, 0.55, "hype_price_edge"),
 }
 
 # (asset_id, timeframe) → Kalshi series ticker
@@ -156,6 +161,14 @@ CRYPTO_SERIES_MAP: dict[tuple, str] = {
     ("solana",   "15min"): "KXSOL15M",
     ("ripple",   "15min"): "KXXRP15M",
     ("dogecoin", "15min"): "KXDOGE15M",
+    # BNB
+    ("binancecoin", "daily"): "KXBNBD",
+    ("binancecoin", "hourly"): "KXBNB",
+    ("binancecoin", "15min"): "KXBNB15M",
+    # HYPE (Hyperliquid)
+    ("hyperliquid", "daily"): "KXHYPED",
+    ("hyperliquid", "hourly"): "KXHYPE",
+    ("hyperliquid", "15min"): "KXHYPE15M",
 }
 
 # Active timeframes — weekly TBD (needs longer vol window)
@@ -1373,8 +1386,8 @@ def scan_ethereum_series() -> list[dict]:
 
 def _prefetch_all_crypto_spots() -> None:
     """
-    Warm cache for all 5 assets. Binance primary (individual calls, real-time),
-    CoinGecko batch fallback if Binance fails.
+    Warm cache for all assets. Coinbase primary (one call per asset, no geo-block),
+    CoinGecko batch fallback.
     """
     import requests
     all_ids = list(CRYPTO_ASSETS_CONFIG.keys())
@@ -1385,33 +1398,33 @@ def _prefetch_all_crypto_spots() -> None:
     if not stale:
         return
 
-    # --- Primary: Binance (one call per asset, very fast) ---
-    binance_failed = []
+    # --- Primary: Coinbase (one call per asset, fast, no geo-block) ---
+    coinbase_failed = []
     for asset_id in stale:
-        sym = _BINANCE_SYMBOLS.get(asset_id)
-        if not sym:
-            binance_failed.append(asset_id)
+        pair = _COINBASE_PAIRS.get(asset_id)
+        if not pair:
+            coinbase_failed.append(asset_id)
             continue
         try:
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={sym}"
+            url = f"https://api.coinbase.com/v2/prices/{pair}/spot"
             r = requests.get(url, timeout=5)
             r.raise_for_status()
-            price = float(r.json()["price"])
-            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "binance"}
-            logger.debug("CRYPTO prefetch spot %s = $%s (binance)", asset_id, price)
+            price = float(r.json()["data"]["amount"])
+            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "coinbase"}
+            logger.debug("CRYPTO prefetch spot %s = $%s (coinbase)", asset_id, price)
         except Exception:
-            binance_failed.append(asset_id)
+            coinbase_failed.append(asset_id)
 
-    # --- Fallback: CoinGecko batch for anything Binance missed ---
-    if binance_failed:
+    # --- Fallback: CoinGecko batch for anything Coinbase missed ---
+    if coinbase_failed:
         try:
-            ids_param = ",".join(binance_failed)
+            ids_param = ",".join(coinbase_failed)
             url = f"{COINGECKO_BASE}/simple/price?ids={ids_param}&vs_currencies=usd"
             r = requests.get(url, headers={"User-Agent": "NexusBot/1.0"}, timeout=10)
             r.raise_for_status()
             data = r.json()
             ts = _time.time()
-            for asset_id in binance_failed:
+            for asset_id in coinbase_failed:
                 price = data.get(asset_id, {}).get("usd")
                 if price:
                     _CRYPTO_SPOT_CACHE[asset_id] = {"price": float(price), "ts": ts, "src": "coingecko"}
@@ -1451,26 +1464,26 @@ def _prefetch_all_crypto_vols() -> None:
 
 
 def _get_generic_crypto_spot(asset_id: str) -> float | None:
-    """Fetch real-time spot price. Binance primary (sub-second), CoinGecko fallback."""
+    """Fetch real-time spot price. Coinbase primary, CoinGecko fallback."""
     cached = _CRYPTO_SPOT_CACHE.get(asset_id, {})
     if cached and (_time.time() - cached.get("ts", 0)) < _CRYPTO_SPOT_TTL:
         return cached["price"]
 
     import requests
 
-    # --- Primary: Binance REST (free, no auth, real-time) ---
-    binance_sym = _BINANCE_SYMBOLS.get(asset_id)
-    if binance_sym:
+    # --- Primary: Coinbase REST (free, no auth, no geo-block) ---
+    cb_pair = _COINBASE_PAIRS.get(asset_id)
+    if cb_pair:
         try:
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_sym}"
+            url = f"https://api.coinbase.com/v2/prices/{cb_pair}/spot"
             r = requests.get(url, timeout=5)
             r.raise_for_status()
-            price = float(r.json()["price"])
-            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "binance"}
-            logger.debug("CRYPTO spot %s = $%s (binance)", asset_id, price)
+            price = float(r.json()["data"]["amount"])
+            _CRYPTO_SPOT_CACHE[asset_id] = {"price": price, "ts": _time.time(), "src": "coinbase"}
+            logger.debug("CRYPTO spot %s = $%s (coinbase)", asset_id, price)
             return price
         except Exception as e:
-            logger.debug("CRYPTO binance spot failed for %s: %s, trying coingecko", asset_id, e)
+            logger.debug("CRYPTO coinbase spot failed for %s: %s, trying coingecko", asset_id, e)
 
     # --- Fallback: CoinGecko ---
     try:
@@ -1582,6 +1595,13 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
         if not check_ok:
             continue
         if kalshi_price <= 0.03 or fair_value <= 0.03:
+            continue
+        # OTM filter: contracts < 30¢ are too far from spot — model edge evaporates
+        if kalshi_price < 0.30:
+            logger.debug(
+                "CRYPTO %s/%s SKIP %s: price %d¢ < 30¢ floor (too far OTM)",
+                asset_id, timeframe, ticker, int(kalshi_price * 100),
+            )
             continue
         if abs(relative_edge) < MIN_RELATIVE_EDGE:
             continue
