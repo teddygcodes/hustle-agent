@@ -1152,7 +1152,7 @@ def _odds_api_fallback(sport: str) -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def fetch_consensus_odds(sport: str) -> dict:
+def fetch_consensus_odds(sport: str, bypass_cache: bool = False) -> dict:
     """
     Fetch consensus odds for a sport.
 
@@ -1168,12 +1168,18 @@ def fetch_consensus_odds(sport: str) -> dict:
     9. The Odds API         (last resort — 500 req/month free tier)
 
     Returns the same format as agent/sports_data.get_odds().
+
+    Args:
+        bypass_cache: If True, skip cache lookup (used by LiveGameWatcher for
+                      10-second polling — the default 120s cache would defeat
+                      the purpose of fast polling).
     """
     # 1. Cache
-    cached = _cache_get(sport)
-    if cached:
-        logger.debug(f"Cache hit for {sport}")
-        return cached
+    if not bypass_cache:
+        cached = _cache_get(sport)
+        if cached:
+            logger.debug(f"Cache hit for {sport}")
+            return cached
 
     def _has_real_odds(result: dict) -> bool:
         return "error" not in result and bool(

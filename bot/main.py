@@ -31,11 +31,13 @@ from bot.config import (
     BOT_STATE_FILE, TELEGRAM_BOT_TOKEN,
     PENDING_FILE, PENDING_MAX, PENDING_GO_WINDOW_HOURS,
     BOT_STATE_DIR, PAPER_MODE, ACTIVE_STRATEGIES, PAPER_TRADES_FILE,
-    CRYPTO_SCAN_INTERVAL,
+    CRYPTO_SCAN_INTERVAL, CRYPTO_ENABLED,
+    LIVE_POLL_INTERVAL,
 )
 from bot.state_io import load_json as _load_json_state
 from bot.clv import check_clv_settlements, format_clv_report
 from bot.scanner import scan_cycle
+from bot.daily_log import update_daily_log
 from bot.market_maker import (
     scan_market_making_opportunities, format_mm_opportunity,
     execute_mm_pair, check_mm_fills,
@@ -51,6 +53,7 @@ from bot.tracker import (
 from bot.notifier import TelegramNotifier, format_opportunity, format_detail
 from bot.scheduler import check_scheduled_events
 from bot.outcome_tracker import OutcomeTracker
+from bot.position_monitor import recheck_open_edges, scan_related_markets
 from bot import odds_scraper
 
 _outcome_tracker = OutcomeTracker()
@@ -197,7 +200,11 @@ def _release_lock() -> None:
 
 def _load_bot_state() -> dict:
     if BOT_STATE_FILE.exists():
-        return json.loads(BOT_STATE_FILE.read_text())
+        try:
+            return json.loads(BOT_STATE_FILE.read_text())
+        except json.JSONDecodeError:
+            logger.warning("bot_state.json corrupt — resetting to defaults")
+            return {}
     return {}
 
 
@@ -238,18 +245,20 @@ class GlintBot:
         self._running = False
         self._last_summary_date: str | None = None
         self._watchdog_alert: str | None = None
+        self._active_watchers: dict[str, tuple] = {}  # query -> (LiveGameWatcher, asyncio.Task)
 
     async def start(self):
         """Initialize and start the bot."""
         _acquire_lock()
         logger.info("✨ Glint Trading Bot — Starting...")
 
-        # Initialize Telegram
-        await self.notifier.initialize()
-        self._register_commands()
-
-        # Start Telegram polling
-        await self.notifier.start_polling()
+        # Initialize Telegram — non-fatal if SSL/network fails
+        try:
+            await self.notifier.initialize()
+            self._register_commands()
+            await self.notifier.start_polling()
+        except Exception as e:
+            logger.warning("Telegram init failed (%s) — running without notifications", e)
 
         # Update bot state — also performs watchdog staleness check
         state = _load_bot_state()
@@ -332,12 +341,14 @@ class GlintBot:
         else:
             logger.warning("No Telegram token — running in console-only mode")
 
-        # Run main loop + independent crypto loop concurrently
+        # Run main loop + crypto loop + live match scanner concurrently
+        tasks = [self._main_loop(), self._live_scan_loop()]
+        if CRYPTO_ENABLED:
+            tasks.append(self._crypto_scan_loop())
+        else:
+            logger.info("CRYPTO LOOP: disabled (CRYPTO_ENABLED=False)")
         try:
-            await asyncio.gather(
-                self._main_loop(),
-                self._crypto_scan_loop(),
-            )
+            await asyncio.gather(*tasks)
         except asyncio.CancelledError:
             logger.info("Bot cancelled")
         finally:
@@ -613,33 +624,44 @@ class GlintBot:
             if not isinstance(paper_trades, list) or not paper_trades:
                 return "No paper trades yet."
             resolved = [t for t in paper_trades if t.get("status") in ("won", "lost")]
+            exited = [t for t in paper_trades if t.get("status") == "exited_early"]
             open_count = sum(1 for t in paper_trades if t.get("status") == "open")
-            total = len(resolved)
+            total_settled = len(resolved)
             wins = sum(1 for t in resolved if t.get("status") == "won")
-            total_pnl = sum(t.get("pnl") or 0 for t in resolved)
-            wr_str = f"{wins/total:.0%} ({wins}/{total})" if total > 0 else "n/a"
+            settled_pnl = sum(t.get("pnl") or 0 for t in resolved)
+            exited_pnl = sum(t.get("pnl") or 0 for t in exited)
+            total_pnl = settled_pnl + exited_pnl
+            wr_str = f"{wins/total_settled:.0%} ({wins}/{total_settled})" if total_settled > 0 else "n/a"
             lines = [
                 f"PAPER STATS [PAPER MODE]" if PAPER_MODE else "PAPER STATS",
                 "",
                 f"Total trades: {len(paper_trades)} ({open_count} open)",
-                f"Resolved: {total}  |  Win rate: {wr_str}",
+                f"Settled: {total_settled}  |  Win rate: {wr_str}",
+                f"Exited early: {len(exited)}  |  Exit P&L: ${exited_pnl:+.2f}",
+                f"Settled P&L: ${settled_pnl:+.2f}",
                 f"Total P&L: ${total_pnl:+.2f}",
                 "",
                 "By strategy:",
             ]
+            # Include both resolved and exited in strategy breakdown
             by_type: dict = {}
-            for t in resolved:
+            for t in resolved + exited:
                 s = t.get("type", "unknown")
-                d = by_type.setdefault(s, {"wins": 0, "total": 0, "pnl": 0.0})
-                d["total"] += 1
-                if t.get("status") == "won":
-                    d["wins"] += 1
+                d = by_type.setdefault(s, {"wins": 0, "settled": 0, "exited": 0, "pnl": 0.0})
+                if t.get("status") in ("won", "lost"):
+                    d["settled"] += 1
+                    if t.get("status") == "won":
+                        d["wins"] += 1
+                else:
+                    d["exited"] += 1
                 d["pnl"] += t.get("pnl") or 0
             for stype, d in sorted(by_type.items()):
-                wr = d["wins"] / d["total"] if d["total"] > 0 else 0
-                lines.append(f"  {stype}: {wr:.0%} ({d['total']} trades)  ${d['pnl']:+.2f}")
+                total_s = d["settled"] + d["exited"]
+                wr = d["wins"] / d["settled"] if d["settled"] > 0 else 0
+                wr_part = f"{wr:.0%} win" if d["settled"] > 0 else "no settlements"
+                lines.append(f"  {stype}: {total_s} trades ({wr_part})  ${d['pnl']:+.2f}")
             if not by_type:
-                lines.append("  (no resolved trades yet)")
+                lines.append("  (no closed trades yet)")
             return "\n".join(lines)
 
         # Button callback — handles inline GO/SKIP button presses
@@ -737,13 +759,72 @@ class GlintBot:
         self.notifier.register_callback("STOP", handle_stop)
         self.notifier.register_callback("LOGS", handle_logs)
 
+        # ------------------------------------------------------------------ #
+        # WATCH / UNWATCH — Live game targeting
+        # ------------------------------------------------------------------ #
+
+        async def handle_watch(args=""):
+            """WATCH <game_query> — start a live game watcher."""
+            query = args.strip()
+            if not query:
+                return "Usage: WATCH <team or game>  (e.g. WATCH lakers  or  WATCH cubs)"
+
+            if query.lower() in self._active_watchers:
+                return f"Already watching '{query}'. Send UNWATCH first to restart."
+
+            from bot.live_watcher import LiveGameWatcher
+            from agent.kalshi_client import get_balance as kb
+
+            balance_result = kb()
+            balance = (
+                balance_result.get("balance_dollars", 0)
+                if "error" not in balance_result else 0
+            )
+            watcher = LiveGameWatcher(query, self.notifier, balance=balance)
+            task = asyncio.create_task(self._run_watcher(query, watcher))
+            self._active_watchers[query.lower()] = (watcher, task)
+            return f"Watching: {query}\nPolling every {LIVE_POLL_INTERVAL}s. Send UNWATCH to stop."
+
+        async def handle_unwatch(args=""):
+            """UNWATCH — stop all active game watchers."""
+            if not self._active_watchers:
+                return "No active watchers."
+            stopped = []
+            for key, (watcher, task) in list(self._active_watchers.items()):
+                watcher.stop()
+                task.cancel()
+                stopped.append(key)
+            self._active_watchers.clear()
+            return f"Stopped: {', '.join(stopped)}"
+
+        async def handle_recap(args=""):
+            from bot.live_watcher import get_daily_recap
+            date_str = args.strip() if args.strip() else None
+            return get_daily_recap(date_str)
+
+        async def handle_analyze(args=""):
+            from bot.live_watcher import analyze_ticks
+            date_str = args.strip() if args.strip() else None
+            return analyze_ticks(date_str)
+
+        self.notifier.register_callback("WATCH", handle_watch)
+        self.notifier.register_callback("UNWATCH", handle_unwatch)
+        self.notifier.register_callback("RECAP", handle_recap)
+        self.notifier.register_callback("ANALYZE", handle_analyze)
+
     async def _handle_opportunity(self, opp: dict, balance: float) -> None:
         """Process a single opportunity: size → execute (paper) or queue (live)."""
         _outcome_tracker.store_alert(opp)
 
         side        = opp.get("recommended_side", "yes")
         fair_value  = opp.get("edge_result", {}).get("fair_value", 0.5)
-        win_prob    = fair_value if side == "yes" else (1.0 - fair_value)
+        opp_type    = opp.get("type", "")
+        # For vig_stack trades, fair_value is already from the NO perspective
+        # (probability that NO wins). Don't flip it.
+        if opp_type in ("vig_stack_no", "vig_stack_series"):
+            win_prob = fair_value
+        else:
+            win_prob = fair_value if side == "yes" else (1.0 - fair_value)
         price_cents = (
             opp.get("market", {}).get("yes_ask", 50)
             if side == "yes"
@@ -824,12 +905,105 @@ class GlintBot:
                     for opp in opps:
                         try:
                             await self._handle_opportunity(opp, balance)
+                            # Track crypto trade count in bot state
+                            try:
+                                state = _load_bot_state()
+                                state.setdefault("crypto_trades_today", 0)
+                                state.setdefault("crypto_pnl_session", 0.0)
+                                state["crypto_trades_today"] += 1
+                                _save_bot_state(state)
+                            except Exception:
+                                pass
                         except Exception as e:
                             logger.error("CRYPTO LOOP: error handling opp %s: %s",
                                          opp.get("ticker", "?"), e)
             except Exception as e:
                 logger.error("CRYPTO LOOP: scan error: %s", e)
             await asyncio.sleep(CRYPTO_SCAN_INTERVAL)
+
+    async def _run_watcher(self, query: str, watcher) -> None:
+        """
+        Run a LiveGameWatcher to completion and clean up.
+        Called as an asyncio task from handle_watch().
+        """
+        try:
+            summary = await watcher.start()
+            await self.notifier.send_message(summary)
+        except asyncio.CancelledError:
+            watcher.stop()
+        except Exception as e:
+            # Don't silently swallow watcher crashes — log and alert
+            logger.error(
+                "LiveGameWatcher CRASHED for '%s': %s", query, e, exc_info=True,
+            )
+            try:
+                await self.notifier.send_message(
+                    f"⚠️ Watcher crashed: {query}\n{type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
+            # Allow scanner to restart this match by removing from _recently_watched
+            from bot.live_watcher import _recently_watched
+            event_ticker = getattr(watcher, "_match_event_ticker", None)
+            if event_ticker:
+                _recently_watched.discard(event_ticker)
+        finally:
+            self._active_watchers.pop(query, None)
+
+    async def _live_scan_loop(self):
+        """
+        Periodically scan Kalshi for live 1v1 matches (tennis, UFC, etc.)
+        and auto-start momentum watchers for matches with clear leaders.
+        """
+        from bot.live_watcher import scan_live_matches, LIVE_SCAN_INTERVAL
+
+        await asyncio.sleep(15)  # let the bot fully initialize first
+
+        while self._running:
+            try:
+                balance = self._get_paper_balance() if PAPER_MODE else 0.0
+                new_watchers = await scan_live_matches(
+                    self.notifier, self._active_watchers, balance=balance,
+                )
+                for query_key, watcher in new_watchers:
+                    task = asyncio.create_task(self._run_watcher(query_key, watcher))
+                    self._active_watchers[query_key] = (watcher, task)
+                    logger.info("Auto-started momentum watcher: %s", query_key)
+
+                if new_watchers:
+                    await self.notifier.send_message(
+                        f"Auto-scan: started {len(new_watchers)} new live watcher(s)\n"
+                        + "\n".join(f"  • {q}" for q, _ in new_watchers)
+                    )
+            except Exception as e:
+                logger.error("LIVE SCAN LOOP error: %s", e)
+
+            await asyncio.sleep(LIVE_SCAN_INTERVAL)
+
+    def _get_paper_balance(self) -> float:
+        """Compute current paper balance from paper_trades.json."""
+        import json, pathlib
+        from bot.config import PAPER_STARTING_BALANCE, PAPER_TRADES_FILE
+        pt_file = pathlib.Path(PAPER_TRADES_FILE)
+        if not pt_file.exists():
+            return PAPER_STARTING_BALANCE
+        try:
+            trades = json.loads(pt_file.read_text())
+            balance = PAPER_STARTING_BALANCE
+            for t in trades:
+                if not isinstance(t, dict):
+                    continue
+                entry_cost = t.get("contracts", 0) * t.get("entry_price", 0.0)
+                status = t.get("status", "open")
+                if status in ("open", "won", "lost", "exited_early"):
+                    balance -= entry_cost
+                if status == "won":
+                    balance += t.get("contracts", 0) * 1.0
+                elif status == "exited_early":
+                    balance += t.get("contracts", 0) * t.get("exit_price", 0.0)
+            return round(balance, 2)
+        except Exception:
+            return PAPER_STARTING_BALANCE
 
     async def _main_loop(self):
         """Core scanning and trading loop."""
@@ -877,6 +1051,14 @@ class GlintBot:
 
             scan_interval = scan_result.get("scan_interval", 1800)
             opportunities = scan_result.get("opportunities", [])
+
+            # ----------------------------------------------------------
+            # Step 3b: Update daily performance log
+            # ----------------------------------------------------------
+            try:
+                update_daily_log()
+            except Exception as e:
+                logger.debug("Daily log update error: %s", e)
 
             # ----------------------------------------------------------
             # Step 4: Check for resolved positions + update patterns
@@ -979,6 +1161,60 @@ class GlintBot:
                 logger.error(f"Position update error: {e}")
 
             # ----------------------------------------------------------
+            # Step 6b: Position monitor — edge recheck + related markets
+            # ----------------------------------------------------------
+            try:
+                edge_alerts = recheck_open_edges()
+                for ea in edge_alerts:
+                    alert_type = ea.get("type", "")
+                    ticker = ea.get("ticker", "?")
+                    if alert_type == "edge_flipped":
+                        entry_e = ea.get("entry_edge", 0)
+                        curr_e = ea.get("current_edge", 0)
+                        opp_type = ea.get("opp_type", "")
+                        # Vig stack trades have structural edge (YES sum > 100¢).
+                        # Individual contract price moves don't invalidate the edge —
+                        # it only goes away if the entire ladder's vig collapses.
+                        # Do NOT auto-exit on recalculated edge flips.
+                        if opp_type in ("vig_stack_no", "vig_stack_series"):
+                            logger.info("Edge-flip SKIPPED for %s (vig_stack — structural edge, hold to settlement)", ticker)
+                            continue
+                        if PAPER_MODE:
+                            exit_result = exit_position(ticker, reason="edge_flipped")
+                            if exit_result.get("success"):
+                                pnl = exit_result.get("realized_pnl", 0)
+                                await self.notifier.send_message(
+                                    f"🔄 EDGE FLIPPED — auto-exited {ticker}\n"
+                                    f"Entry edge: {entry_e:+.1%} → Now: {curr_e:+.1%}\n"
+                                    f"P&L: ${pnl:+.2f}",
+                                    priority="critical",
+                                )
+                            else:
+                                logger.warning("Edge-flip exit failed for %s: %s",
+                                               ticker, exit_result.get("reason"))
+                        else:
+                            await self.notifier.send_message(
+                                f"⚠️ EDGE FLIPPED: {ticker}\n"
+                                f"Entry edge: {entry_e:+.1%} → Now: {curr_e:+.1%}\n"
+                                f"Reply SELL {ticker} to exit",
+                                priority="critical",
+                            )
+                    elif alert_type == "edge_degraded":
+                        logger.info("Edge degraded: %s (entry=%.1f%% now=%.1f%%)",
+                                    ticker,
+                                    ea.get("entry_edge", 0) * 100,
+                                    ea.get("current_edge", ea.get("price_move", 0)) * 100)
+
+                # Related market scan — find sibling props on same events
+                related = scan_related_markets()
+                for rel in related:
+                    _add_to_pending(rel)
+                if related:
+                    logger.info("RELATED: added %d sibling markets to pending", len(related))
+            except Exception as e:
+                logger.error(f"Position monitor error: {e}")
+
+            # ----------------------------------------------------------
             # Step 7: Check trailing stops
             # ----------------------------------------------------------
             try:
@@ -1038,9 +1274,12 @@ class GlintBot:
             # ----------------------------------------------------------
             # Step 8: Alert on opportunities — fire and forget, no blocking
             # ----------------------------------------------------------
-            from agent.kalshi_client import get_balance as kb
-            balance_result = kb()
-            balance = balance_result.get("balance_dollars", 0) if "error" not in balance_result else 0
+            if PAPER_MODE:
+                balance = self._get_paper_balance()
+            else:
+                from agent.kalshi_client import get_balance as kb
+                balance_result = kb()
+                balance = balance_result.get("balance_dollars", 0) if "error" not in balance_result else 0
 
             for opp in opportunities:
                 await self._handle_opportunity(opp, balance)

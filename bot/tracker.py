@@ -20,7 +20,7 @@ from agent.kalshi_client import get_market, get_balance, get_positions as kalshi
 from bot.config import (
     POSITIONS_FILE, TRADE_HISTORY_FILE, BOT_STATE_FILE,
     POSITION_MOVE_ALERT, TAKE_PROFIT_THRESHOLD, CUT_LOSS_THRESHOLD,
-    PAPER_TRADES_FILE,
+    PAPER_TRADES_FILE, BOT_STATE_DIR,
 )
 from bot.state_io import load_json as _load_json, save_json as _save_json
 
@@ -94,6 +94,16 @@ def update_positions() -> list[dict]:
             })
             logger.info(f"Take profit alert: {ticker} +{pnl_percent:.0%}")
         elif pnl_percent <= CUT_LOSS_THRESHOLD:
+            # Suppress repeat cut-loss alerts within 30 minutes
+            last_attempt = pos.get("cut_loss_attempted_at")
+            if last_attempt:
+                try:
+                    last_dt = datetime.fromisoformat(last_attempt)
+                    if (datetime.now(timezone.utc) - last_dt).total_seconds() < 1800:
+                        continue  # Already tried recently — don't spam
+                except Exception:
+                    pass
+            pos["cut_loss_attempted_at"] = datetime.now(timezone.utc).isoformat()
             alerts.append({
                 "type": "cut_loss",
                 "ticker": ticker,
@@ -119,23 +129,77 @@ def update_positions() -> list[dict]:
                 "contracts": filled,
             })
 
-    # Check resting orders that have been unfilled for >30 minutes
+    # Check resting orders: auto-cancel on settled markets, alert on stale on active markets
+    cancelled_stale = []
+    _now_utc = datetime.now(timezone.utc)
     for pos in positions:
-        if pos.get("status") == "resting":
-            opened_at = pos.get("opened_at", "")
-            if opened_at:
+        if pos.get("status") != "resting":
+            continue
+
+        ticker = pos.get("ticker", "")
+        opened_at = pos.get("opened_at", "")
+        order_id = pos.get("order_id", "")
+
+        market_settled = False
+        try:
+            mkt = get_market(ticker)
+            m = mkt.get("market", mkt) if isinstance(mkt, dict) else {}
+            yes_ask = m.get("yes_ask", 50) or 50
+            market_settled = (m.get("status") == "inactive") or yes_ask >= 97 or yes_ask <= 3
+        except Exception as e:
+            logger.debug("Resting sweep: market fetch failed for %s: %s", ticker, e)
+
+        if market_settled:
+            if order_id and not str(order_id).startswith("PAPER-"):
                 try:
-                    opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
-                    age_minutes = (datetime.now(timezone.utc) - opened).total_seconds() / 60
-                    if age_minutes > 30:
-                        alerts.append({
-                            "type": "resting_expiry",
-                            "ticker": pos.get("ticker", ""),
-                            "title": pos.get("title", ""),
-                            "age_minutes": round(age_minutes),
-                        })
-                except (ValueError, TypeError):
-                    pass
+                    from agent.kalshi_client import cancel_order as _cancel_order
+                    _cancel_order(order_id)
+                except Exception as e:
+                    logger.warning("Failed to cancel Kalshi order %s: %s", order_id, e)
+            pos["status"] = "cancelled_stale"
+            pos["cancelled_at"] = _now_utc.isoformat()
+            pos["cancel_reason"] = "market_settled_unfilled"
+            logger.info("Cancelled stale resting order: %s (%s)", ticker, order_id or "no-id")
+            cancelled_stale.append({"ticker": ticker, "order_id": order_id})
+            continue
+
+        if opened_at:
+            try:
+                opened = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
+                age_minutes = (_now_utc - opened).total_seconds() / 60
+                if age_minutes > 30:
+                    alerts.append({
+                        "type": "resting_expiry",
+                        "ticker": ticker,
+                        "title": pos.get("title", ""),
+                        "age_minutes": round(age_minutes),
+                    })
+            except (ValueError, TypeError):
+                pass
+
+    if cancelled_stale:
+        paper_trades = _load_json(PAPER_TRADES_FILE)
+        if isinstance(paper_trades, list):
+            stale_ids = {x["order_id"] for x in cancelled_stale if x["order_id"]}
+            stale_tickers = {x["ticker"] for x in cancelled_stale}
+            changed = False
+            for pt in paper_trades:
+                if not isinstance(pt, dict) or pt.get("status") != "open":
+                    continue
+                pt_id = pt.get("id", "")
+                pt_ticker = pt.get("ticker", "")
+                if (pt_id and pt_id in stale_ids) or (not pt_id and pt_ticker in stale_tickers):
+                    pt["status"] = "cancelled_stale"
+                    pt["cancelled_at"] = _now_utc.isoformat()
+                    pt["cancel_reason"] = "market_settled_unfilled"
+                    changed = True
+            if changed:
+                _save_json(PAPER_TRADES_FILE, paper_trades)
+        alerts.append({
+            "type": "stale_orders_cancelled",
+            "count": len(cancelled_stale),
+            "tickers": [x["ticker"] for x in cancelled_stale],
+        })
 
     _save_json(POSITIONS_FILE, positions)
     return alerts
@@ -252,6 +316,7 @@ def resolve_trades() -> list[dict]:
             "canonical_team": pos.get("canonical_team", ""),
             "opponent_team": pos.get("opponent_team", ""),
             "sport": pos.get("sport", ""),
+            "resolved_at": resolved_at_iso,
         })
 
         # Update Elo ratings after each resolved sports game
@@ -288,7 +353,66 @@ def resolve_trades() -> list[dict]:
                     break
         _save_json(TRADE_HISTORY_FILE, history)
 
+        # Log to strategy audit (append-only settlement log)
+        try:
+            _log_settlements_to_audit(resolved)
+        except Exception as e:
+            logger.debug("Strategy audit log failed: %s", e)
+
     return resolved
+
+
+def _log_settlements_to_audit(resolved: list[dict]):
+    """Append each settlement to strategy_audit.json for ongoing tracking."""
+    audit_path = BOT_STATE_DIR / "strategy_audit.json"
+    if not audit_path.exists():
+        return
+    audit = json.loads(audit_path.read_text())
+    strategies = audit.get("strategies", {})
+
+    # Also maintain a flat settlement log at the top level
+    if "settlement_log" not in audit:
+        audit["settlement_log"] = []
+
+    for r in resolved:
+        opp_type = r.get("opp_type", "unknown")
+        pnl = r.get("pnl", 0)
+        won = r.get("result") == "won"
+        filled = r.get("contracts", 0)
+
+        # Skip ghost trades (filled=0)
+        if filled <= 0:
+            continue
+
+        # Append to flat log
+        audit["settlement_log"].append({
+            "ticker": r.get("ticker", ""),
+            "strategy": opp_type,
+            "result": r.get("result", ""),
+            "pnl": pnl,
+            "contracts": filled,
+            "sport": r.get("sport", ""),
+            "resolved_at": r.get("resolved_at", datetime.now(timezone.utc).isoformat()),
+        })
+
+        # Update strategy totals
+        if opp_type in strategies:
+            s = strategies[opp_type]
+            s["real_trades"] = s.get("real_trades", 0) + 1
+            s["real_pnl"] = round(s.get("real_pnl", 0) + pnl, 2)
+            if won:
+                s.setdefault("real_wins", 0)
+                s["real_wins"] += 1
+            else:
+                s.setdefault("real_losses", 0)
+                s["real_losses"] += 1
+            total = s.get("real_trades", 0)
+            wins = s.get("real_wins", 0)
+            s["real_wr"] = f"{wins}/{total} ({wins/total*100:.0f}%)" if total else "0%"
+
+    audit["_meta"]["last_updated"] = datetime.now(timezone.utc).isoformat()
+    audit_path.write_text(json.dumps(audit, indent=2))
+    logger.info("Strategy audit updated: %d settlements logged", len(resolved))
 
 
 # ---------------------------------------------------------------------------

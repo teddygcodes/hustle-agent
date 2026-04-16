@@ -33,6 +33,7 @@ from bot.config import (
     MM_MAX_CONTRACTS_PER_SIDE,
     MM_POSITIONS_FILE,
     WEATHER_SERIES_TICKERS,
+    INDEX_RANGE_SERIES_TICKERS,
 )
 
 logger = logging.getLogger("glint.market_maker")
@@ -79,6 +80,9 @@ def scan_market_making_opportunities(
     open_pairs = _load_mm_positions()
     active_tickers = {p["ticker"] for p in open_pairs if p.get("status") == "open"}
     excluded = exclude_tickers or set()
+    _telem = {"markets_scanned": 0, "already_active": 0, "excluded": 0, "no_quote": 0,
+              "spread_too_tight": 0, "price_out_of_range": 0, "too_close_to_expiry": 0,
+              "buy_gte_sell": 0, "surfaced": 0}
 
     if len(active_tickers) >= MM_MAX_OPEN_PAIRS:
         logger.info(f"MM at capacity ({len(active_tickers)}/{MM_MAX_OPEN_PAIRS} pairs) — skipping scan")
@@ -86,7 +90,7 @@ def scan_market_making_opportunities(
 
     now = datetime.now(timezone.utc)
 
-    for series_ticker in WEATHER_SERIES_TICKERS:
+    for series_ticker in list(WEATHER_SERIES_TICKERS) + list(INDEX_RANGE_SERIES_TICKERS):
         try:
             result = get_markets(series_ticker=series_ticker, status="open", limit=100)
         except Exception as e:
@@ -97,30 +101,36 @@ def scan_market_making_opportunities(
             continue
 
         for market in result.get("markets", []):
+            _telem["markets_scanned"] += 1
             ticker = market.get("ticker", "")
             if ticker in active_tickers:
+                _telem["already_active"] += 1
                 continue  # Already have an open MM pair here
 
             # Skip markets flagged as directionally mispriced (large weather edge)
             # — market-making on these exposes us to adverse selection
             if ticker in excluded:
                 logger.debug(f"MM skip {ticker}: flagged by weather edge scanner")
+                _telem["excluded"] += 1
                 continue
 
             yes_bid = market.get("yes_bid", 0) or 0
             yes_ask = market.get("yes_ask", 0) or 0
 
             if yes_bid <= 0 or yes_ask <= 0:
+                _telem["no_quote"] += 1
                 continue
 
             spread = yes_ask - yes_bid
 
             if spread < MM_MIN_SPREAD_CENTS:
+                _telem["spread_too_tight"] += 1
                 continue
 
             # Skip near-certain or heavily one-sided outcomes — these are either
             # near-resolved or directionally mispriced (adverse selection risk)
             if yes_ask > 80 or yes_ask < 20:
+                _telem["price_out_of_range"] += 1
                 continue
 
             # Check time to close
@@ -134,6 +144,7 @@ def scan_market_making_opportunities(
                     pass
 
             if hours_to_close is not None and hours_to_close < MM_MIN_HOURS_TO_CLOSE:
+                _telem["too_close_to_expiry"] += 1
                 continue  # Too close to expiry
 
             # Target prices: one tick better than best bid/ask
@@ -142,6 +153,7 @@ def scan_market_making_opportunities(
 
             # Sanity: buy must be below sell
             if buy_price >= sell_price:
+                _telem["buy_gte_sell"] += 1
                 continue
 
             target_capture = sell_price - buy_price  # cents per contract
@@ -174,6 +186,10 @@ def scan_market_making_opportunities(
 
     # Sort by target capture (widest spread first)
     opportunities.sort(key=lambda x: x["spread_cents"], reverse=True)
+    _telem["surfaced"] = len(opportunities)
+    drops = {k: v for k, v in _telem.items() if k not in ("markets_scanned", "surfaced") and v > 0}
+    logger.info("MM_TELEMETRY: markets=%d surfaced=%d drops=%s",
+                _telem["markets_scanned"], _telem["surfaced"], drops or "none")
     return opportunities
 
 

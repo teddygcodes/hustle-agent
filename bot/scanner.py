@@ -24,10 +24,12 @@ from bot.config import (
     ACTIVE_SPORTS, LINE_MOVEMENT_THRESHOLD,
     MIN_RELATIVE_EDGE, SCAN_INTERVAL_IDLE, SCAN_INTERVAL_PREGAME,
     SCAN_INTERVAL_LIVE, ODDS_SNAPSHOTS_FILE, BOT_STATE_FILE,
-    WEATHER_SERIES_TICKERS, ACTIVE_STRATEGIES,
+    WEATHER_SERIES_TICKERS, INDEX_RANGE_SERIES_TICKERS, ACTIVE_STRATEGIES,
+    SPORTS_FUTURES_TICKERS,
 )
 from bot.math_engine import _self_check_edge
 from bot.kalshi_series import scan_series_markets
+from bot.scanner_weather import _fetch_nws_forecast, NWS_CITIES, _get_forecast_temp_for_date
 import bot.kalshi_series as _kalshi_series_mod
 from bot.price_monitor import PriceMonitor
 from bot.scanner_weather import scan_weather_markets
@@ -324,6 +326,87 @@ def _cap_correlated_vig_stack(vig_stack_opps: list[dict]) -> list[dict]:
 # Vig Stack Series Scanner (structural NO edge — no external odds needed)
 # ---------------------------------------------------------------------------
 
+# Map Kalshi series ticker prefixes to NWS city keys for forecast filtering.
+_SERIES_TO_NWS: dict[str, str] = {
+    "KXHIGHNY":  "NYC",
+    "KXHIGHAUS": "Austin",
+    "KXHIGHCHI": "Chicago",
+    "KXHIGHDEN": "Denver",
+    "KXHIGHMIA": "Miami",
+    "KXHIGHBOS": "Boston",
+    "KXHIGHDC":  "DC",
+    "KXHIGHSF":  "SF",
+    "KXHIGHLA":  "LA",
+    "KXHIGHSEA": "Seattle",
+    "KXHIGHPHO": "Phoenix",
+    "KXHIGHDAL": "Dallas",
+    "KXHIGHATL": "Atlanta",
+    "KXHIGHPHL": "Philadelphia",
+    "KXHIGHLV":  "Las Vegas",
+    "KXHIGHPDX": "Portland",
+    "KXHIGHMIN": "Minneapolis",
+    "KXHIGHNSH": "Nashville",
+}
+
+
+def _parse_weather_bucket(ticker: str) -> tuple[float, float] | None:
+    """Parse a weather ticker into (low, high) temperature range.
+
+    Examples:
+        KXHIGHNY-26APR15-B89.5  → (89.0, 90.0)   "between" bucket
+        KXHIGHCHI-26APR15-T73   → (73.0, 999.0)   "threshold" (≥73°F)
+
+    Returns None if the ticker can't be parsed.
+    """
+    parts = ticker.split("-")
+    if len(parts) < 3:
+        return None
+    bucket_part = parts[-1]  # e.g. "B89.5" or "T73"
+    try:
+        if bucket_part.startswith("B"):
+            low = float(bucket_part[1:])
+            # Kalshi "B89.5" means the range 89–90°F (integer boundaries)
+            # low is the x.5 midpoint → bucket is int(low) to int(low)+1
+            return (float(int(low)), float(int(low) + 1))
+        elif bucket_part.startswith("T"):
+            threshold = float(bucket_part[1:])
+            return (threshold, 999.0)  # ≥ threshold
+    except ValueError:
+        pass
+    return None
+
+
+def _fetch_vig_stack_forecasts() -> dict[str, float]:
+    """Fetch NWS forecasts for all weather series cities.
+
+    Returns {series_ticker: forecast_high_F} for tomorrow's daytime high.
+    Only includes cities where a forecast was successfully fetched.
+    """
+    import re
+    forecasts: dict[str, float] = {}
+    _now = datetime.now(timezone.utc)
+
+    for series_ticker, nws_city in _SERIES_TO_NWS.items():
+        if nws_city not in NWS_CITIES:
+            continue
+        lat, lon = NWS_CITIES[nws_city]
+        fc = _fetch_nws_forecast(nws_city, lat, lon)
+        if not fc:
+            continue
+
+        # Find the next daytime high (skip "Tonight" periods)
+        for period in fc.get("periods", []):
+            name = period.get("name", "").lower()
+            if "night" in name:
+                continue
+            temp = period.get("temperature")
+            if temp is not None:
+                forecasts[series_ticker] = float(temp)
+                break
+
+    return forecasts
+
+
 def scan_vig_stack_series() -> list[dict]:
     """
     Scan Kalshi series ladders for structural NO edges caused by vig stacking.
@@ -339,8 +422,42 @@ def scan_vig_stack_series() -> list[dict]:
     Wide-spread thin markets are NOT filtered out — thin markets are the opportunity.
     """
     opportunities = []
+    # Telemetry: count drops by reason per sub-type (series vs futures).
+    # Lets us see in logs WHY dark scanners are silent.
+    _telem: dict[str, dict[str, int]] = {
+        "series": {"checked": 0, "surfaced": 0, "low_liquidity": 0, "no_vig": 0,
+                   "market_closed": 0, "forecast_in_bucket": 0, "no_price_too_low": 0,
+                   "edge_below_threshold": 0, "self_check_failed": 0},
+        "futures": {"checked": 0, "surfaced": 0, "low_liquidity": 0, "no_vig": 0,
+                    "market_closed": 0, "forecast_in_bucket": 0, "no_price_too_low": 0,
+                    "edge_below_threshold": 0, "self_check_failed": 0},
+    }
 
-    for series_ticker in WEATHER_SERIES_TICKERS:
+    # Weather series: filter CLOSED markets (observed temp → no vig edge left).
+    # Old approach used UTC date matching, but that breaks across timezones:
+    # at 9 PM ET (= Apr 15 UTC), Apr 15 weather markets got filtered even though
+    # the temperature hasn't been observed yet (closes ~11 PM ET = Apr 16 UTC).
+    # New approach: check close_time — if market hasn't closed, outcome is unknown.
+    _now_utc = datetime.now(timezone.utc)
+    _weather_set = set(WEATHER_SERIES_TICKERS)
+
+    # Fetch NWS forecasts to avoid betting NO on the bucket the temp will
+    # actually land in. Vig math gives structural edge, but forecast tells
+    # us WHICH contracts are likely to lose. Skip those → higher win rate.
+    _nws_forecasts = _fetch_vig_stack_forecasts()
+    if _nws_forecasts:
+        logger.info("VigStack NWS forecasts: %s",
+                     ", ".join(f"{k.replace('KXHIGH','')}={v:.0f}°F"
+                               for k, v in sorted(_nws_forecasts.items())))
+
+    _futures_set = set(SPORTS_FUTURES_TICKERS)
+    all_series = (list(WEATHER_SERIES_TICKERS) + list(INDEX_RANGE_SERIES_TICKERS)
+                  + list(SPORTS_FUTURES_TICKERS))
+
+    for series_ticker in all_series:
+        is_weather = series_ticker in _weather_set
+        is_futures = series_ticker in _futures_set
+
         try:
             result = get_markets(series_ticker=series_ticker, status="open", limit=100)
         except Exception as e:
@@ -354,117 +471,173 @@ def scan_vig_stack_series() -> list[dict]:
         if len(markets) < 2:
             continue  # Need at least 2 contracts to have a meaningful series
 
-        # Collect YES ask prices for all contracts in series
-        yes_asks = []
-        valid_markets = []
-        for m in markets:
-            ya = m.get("yes_ask")
-            na = m.get("no_ask")
-            if ya and ya > 0 and na and na > 0:
-                volume = m.get("volume") or 0
-                open_interest = m.get("open_interest") or 0
-                if volume < 10 and open_interest < 5:
+        # For index series, only count range (B) contracts — threshold (T) contracts overlap
+        # Sports futures have no B/T prefix — each contract is a team, all mutually exclusive
+        if not is_weather and not is_futures:
+            markets = [m for m in markets if "-B" in m.get("ticker", "")]
+
+        # Group by event (date/time) for index series — each event is a separate ladder
+        # Weather and sports futures: all contracts in series are one ladder
+        if not is_weather and not is_futures:
+            by_event: dict[str, list] = {}
+            for m in markets:
+                parts = m.get("ticker", "").split("-")
+                ev = "-".join(parts[:2]) if len(parts) >= 2 else "unknown"
+                by_event.setdefault(ev, []).append(m)
+            event_groups = list(by_event.values())
+        else:
+            event_groups = [markets]  # Weather/futures: all contracts are one ladder
+
+        _sub = "futures" if is_futures else "series"
+        for event_markets in event_groups:
+            # Collect YES ask prices for all contracts in this event
+            yes_asks = []
+            valid_markets = []
+            for m in event_markets:
+                ya = m.get("yes_ask")
+                na = m.get("no_ask")
+                if ya and ya > 0 and na and na > 0:
+                    volume = m.get("volume") or 0
+                    open_interest = m.get("open_interest") or 0
+                    if volume < 10 and open_interest < 5:
+                        _telem[_sub]["low_liquidity"] += 1
+                        continue
+                    yes_asks.append(ya)
+                    valid_markets.append(m)
+
+            if len(valid_markets) < 2:
+                continue
+
+            # Sum of YES asks in cents
+            yes_sum = sum(yes_asks)
+            yes_sum_prob = yes_sum / 100.0  # convert to probability
+
+            # Only worth scanning if there's meaningful vig (>5% excess)
+            if yes_sum_prob < 1.05:
+                _telem[_sub]["no_vig"] += len(valid_markets)
+                continue
+
+            vig_factor = yes_sum_prob  # = sum/100 — the multiplier inflating each YES price
+            vig_excess_cents = yes_sum - 100  # excess cents above par
+
+            logger.debug("VigStack/%s %d contracts | YES sum=%s¢ (%.1f%%) | vig_excess=%s¢",
+                         series_ticker, len(valid_markets), yes_sum, yes_sum_prob * 100, vig_excess_cents)
+
+            for market in valid_markets:
+                ticker = market.get("ticker", "")
+                title = market.get("title", "")
+                yes_ask = market.get("yes_ask")
+                no_ask = market.get("no_ask")
+                _telem[_sub]["checked"] += 1
+
+                # Skip CLOSED weather contracts — once the temperature is
+                # observed the prices snap to 0/100¢ and vig disappears.
+                if is_weather:
+                    close_str = market.get("close_time") or market.get("expiration_time", "")
+                    if close_str:
+                        try:
+                            close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
+                            if close_dt <= _now_utc:
+                                _telem[_sub]["market_closed"] += 1
+                                continue  # Market closed — outcome known
+                        except (ValueError, TypeError):
+                            pass  # Can't parse — let it through, better to over-scan
+
+                # NWS FORECAST FILTER: skip NO bets where the forecast
+                # says the temperature will land IN this bucket.
+                if is_weather and series_ticker in _nws_forecasts:
+                    forecast_temp = _nws_forecasts[series_ticker]
+                    bucket = _parse_weather_bucket(ticker)
+                    if bucket:
+                        lo, hi = bucket
+                        if lo - 2 <= forecast_temp <= hi + 2:
+                            logger.info(
+                                "VigStack FORECAST SKIP: %s — NWS=%s°F lands near "
+                                "bucket %.0f–%.0f°F (±2° margin)",
+                                ticker, forecast_temp, lo, hi,
+                            )
+                            _telem[_sub]["forecast_in_bucket"] += 1
+                            continue
+
+                # NO fair value = 100¢ - (YES_ask adjusted for vig)
+                yes_fair_cents = yes_ask / vig_factor
+                no_fair_cents = 100.0 - yes_fair_cents
+
+                no_ask_prob = no_ask / 100.0
+                no_fair_prob = no_fair_cents / 100.0
+                no_edge = no_fair_prob - no_ask_prob
+                relative_no_edge = no_edge / no_ask_prob if no_ask_prob > 0 else 0.0
+
+                # Skip near-zero-price NO contracts (YES near-certain)
+                if no_ask_prob < 0.03:
+                    _telem[_sub]["no_price_too_low"] += 1
                     continue
-                yes_asks.append(ya)
-                valid_markets.append(m)
 
-        if len(valid_markets) < 2:
-            continue
+                # Vig stack series edge is purely structural (no prediction risk).
+                VIG_STACK_MIN_EDGE = 0.02
+                if relative_no_edge < VIG_STACK_MIN_EDGE:
+                    _telem[_sub]["edge_below_threshold"] += 1
+                    continue
 
-        # Sum of YES asks in cents
-        yes_sum = sum(yes_asks)
-        yes_sum_prob = yes_sum / 100.0  # convert to probability
+                # Self-checks
+                check_ok, check_msg = _self_check_edge(no_fair_prob, no_ask_prob, no_edge)
+                if not check_ok:
+                    _telem[_sub]["self_check_failed"] += 1
+                    continue
 
-        # Only worth scanning if there's meaningful vig (>5% excess)
-        if yes_sum_prob < 1.05:
-            continue
+                math_chain = [
+                    f"Series: {series_ticker} | {len(valid_markets)} contracts",
+                    f"YES sum: {yes_sum}¢ ({yes_sum_prob:.3f}) — vig_factor={vig_factor:.4f}",
+                    f"This contract YES_ask={yes_ask}¢",
+                    f"YES_fair = {yes_ask}¢ / {vig_factor:.4f} = {yes_fair_cents:.2f}¢",
+                    f"NO_fair = 100 - {yes_fair_cents:.2f} = {no_fair_cents:.2f}¢",
+                    f"NO_ask = {no_ask}¢ | Edge = {no_edge:.4f} ({relative_no_edge:.1%} relative)",
+                    check_msg,
+                ]
 
-        vig_factor = yes_sum_prob  # = sum/100 — the multiplier inflating each YES price
-        vig_excess_cents = yes_sum - 100  # excess cents above par
+                logger.debug("VigStack/%s YES_ask=%s¢ YES_fair=%.1f¢ NO_fair=%.1f¢ NO_ask=%s¢ edge=%+.1f%%",
+                             ticker, yes_ask, yes_fair_cents, no_fair_cents, no_ask, relative_no_edge * 100)
 
-        logger.debug("VigStack/%s %d contracts | YES sum=%s¢ (%.1f%%) | vig_excess=%s¢",
-                     series_ticker, len(valid_markets), yes_sum, yes_sum_prob * 100, vig_excess_cents)
+                # Sports futures: slightly lower confidence (months to resolve,
+                # capital tied up longer) and tag as sub-type for reporting
+                _conf = 0.85 if is_futures else 0.90
+                _type = "vig_stack_futures" if is_futures else "vig_stack_series"
 
-        for market in valid_markets:
-            ticker = market.get("ticker", "")
-            title = market.get("title", "")
-            yes_ask = market.get("yes_ask")
-            no_ask = market.get("no_ask")
-
-            # Skip today's contracts — the vig stack model assumes prices reflect
-            # structural vig inflation. Today's markets are priced by observed temperature,
-            # not by vig, so the math produces fake 1000%+ "edges".
-            # Use ticker date (e.g. "26APR04") rather than hours_to_close because US
-            # weather markets close at ~midnight local time = up to 5am UTC, which
-            # can be >8h from an 8pm UTC scan.
-            _today_vs = datetime.now(timezone.utc).strftime("%y%b%d").upper()
-            _tp = ticker.split("-")
-            if len(_tp) >= 2 and _tp[1][:7] == _today_vs:
-                continue
-
-            # NO fair value = 100¢ - (YES_ask adjusted for vig)
-            yes_fair_cents = yes_ask / vig_factor
-            no_fair_cents = 100.0 - yes_fair_cents
-
-            no_ask_prob = no_ask / 100.0
-            no_fair_prob = no_fair_cents / 100.0
-            no_edge = no_fair_prob - no_ask_prob
-            relative_no_edge = no_edge / no_ask_prob if no_ask_prob > 0 else 0.0
-
-            # Skip near-zero-price NO contracts (YES near-certain)
-            if no_ask_prob < 0.03:
-                continue
-
-            # Vig stack series edge is purely structural (no prediction risk).
-            # Use a lower threshold than directional trades: 2% is actionable here
-            # because the math self-check guarantees the edge is real.
-            VIG_STACK_MIN_EDGE = 0.02
-            if relative_no_edge < VIG_STACK_MIN_EDGE:
-                continue
-
-            # Self-checks
-            check_ok, check_msg = _self_check_edge(no_fair_prob, no_ask_prob, no_edge)
-            if not check_ok:
-                continue
-
-            math_chain = [
-                f"Series: {series_ticker} | {len(valid_markets)} contracts",
-                f"YES sum: {yes_sum}¢ ({yes_sum_prob:.3f}) — vig_factor={vig_factor:.4f}",
-                f"This contract YES_ask={yes_ask}¢",
-                f"YES_fair = {yes_ask}¢ / {vig_factor:.4f} = {yes_fair_cents:.2f}¢",
-                f"NO_fair = 100 - {yes_fair_cents:.2f} = {no_fair_cents:.2f}¢",
-                f"NO_ask = {no_ask}¢ | Edge = {no_edge:.4f} ({relative_no_edge:.1%} relative)",
-                check_msg,
-            ]
-
-            logger.debug("VigStack/%s YES_ask=%s¢ YES_fair=%.1f¢ NO_fair=%.1f¢ NO_ask=%s¢ edge=%+.1f%%",
-                         ticker, yes_ask, yes_fair_cents, no_fair_cents, no_ask, relative_no_edge * 100)
-
-            opportunities.append({
-                "type": "vig_stack_series",
-                "ticker": ticker,
-                "title": title,
-                "market": market,
-                "series_ticker": series_ticker,
-                "edge": round(no_edge, 4),
-                "relative_edge": round(relative_no_edge, 4),
-                "confidence": 0.90,  # Purely mechanical — no prediction needed
-                "recommended_side": "no",
-                "yes_sum_cents": yes_sum,
-                "vig_factor": round(vig_factor, 4),
-                "no_fair_cents": round(no_fair_cents, 2),
-                "no_ask_cents": no_ask,
-                "edge_result": {
-                    "fair_value": round(no_fair_prob, 4),
-                    "kalshi_price": round(no_ask_prob, 4),
+                _telem[_sub]["surfaced"] += 1
+                opportunities.append({
+                    "type": _type,
+                    "ticker": ticker,
+                    "title": title,
+                    "market": market,
+                    "series_ticker": series_ticker,
                     "edge": round(no_edge, 4),
                     "relative_edge": round(relative_no_edge, 4),
-                    "confidence": 0.90,
-                    "self_check_passed": True,
-                    "math_chain": math_chain,
-                    "warnings": [],
-                },
-            })
+                    "confidence": _conf,
+                    "recommended_side": "no",
+                    "yes_sum_cents": yes_sum,
+                    "vig_factor": round(vig_factor, 4),
+                    "no_fair_cents": round(no_fair_cents, 2),
+                    "no_ask_cents": no_ask,
+                    "edge_result": {
+                        "fair_value": round(no_fair_prob, 4),
+                        "kalshi_price": round(no_ask_prob, 4),
+                        "edge": round(no_edge, 4),
+                        "relative_edge": round(relative_no_edge, 4),
+                        "confidence": _conf,
+                        "self_check_passed": True,
+                        "math_chain": math_chain,
+                        "warnings": [],
+                    },
+                })
+
+    # Report telemetry: one info line per sub-type. Critical for diagnosing
+    # WHY vig_stack_futures never fires despite being in ACTIVE_STRATEGIES.
+    for sub, t in _telem.items():
+        if t["checked"] == 0 and t["surfaced"] == 0:
+            continue  # nothing was scanned for this sub-type; skip quietly
+        drops = {k: v for k, v in t.items() if k not in ("checked", "surfaced") and v > 0}
+        logger.info("VIG_STACK_TELEMETRY/%s: checked=%d surfaced=%d drops=%s",
+                    sub, t["checked"], t["surfaced"], drops or "none")
 
     return opportunities
 
@@ -590,6 +763,17 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     vig_stack_opps = _cap_correlated_vig_stack(vig_stack_opps)
     all_opportunities.extend(vig_stack_opps)
     logger.info("VIG_STACK: found %d structural vig stack opportunities", len(vig_stack_opps))
+
+    # Scan cross-market sports arb (monotonicity, championship≤series, high-vig games)
+    # Always runs — these are structural arbs, no strategy flag needed
+    logger.info("SPORTS_ARB: scanning cross-market consistency")
+    try:
+        from bot.scanner_sports_arb import scan_sports_arb
+        sports_arb_opps = scan_sports_arb()
+        all_opportunities.extend(sports_arb_opps)
+        logger.info("SPORTS_ARB: found %d total cross-market opportunities", len(sports_arb_opps))
+    except Exception as e:
+        logger.warning("SPORTS_ARB: error: %s", e)
 
     # Scan Kalshi series tickers (individual game markets + BTC)
     # Only run if these types are in ACTIVE_STRATEGIES

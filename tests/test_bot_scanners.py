@@ -90,9 +90,10 @@ def test_scan_series_markets_calls_ipl():
     assert any(o["type"] == "ipl_game_edge" for o in result)
 
 
-def test_ipl_in_active_strategies():
+def test_ipl_not_in_active_strategies():
+    """ipl_game_edge disabled — no resolved data, no proven edge."""
     from bot.config import ACTIVE_STRATEGIES
-    assert "ipl_game_edge" in ACTIVE_STRATEGIES
+    assert "ipl_game_edge" not in ACTIVE_STRATEGIES
 
 
 def test_scan_ethereum_series_no_markets_returns_empty():

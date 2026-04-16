@@ -158,10 +158,10 @@ class TestDailyTickerLossLimit:
 # ---------------------------------------------------------------------------
 
 class TestCryptoEdgeFloor:
-    def test_crypto_min_edge_is_15_percent(self):
-        """CRYPTO_MIN_EDGE should be 0.15 (15%)."""
+    def test_crypto_min_edge_is_8_percent(self):
+        """CRYPTO_MIN_EDGE should be 0.08 (8%) — lowered to capture hourly/15min edges."""
         from bot.config import CRYPTO_MIN_EDGE
-        assert CRYPTO_MIN_EDGE == 0.15
+        assert CRYPTO_MIN_EDGE == 0.08
 
     def test_crypto_min_edge_exists_in_config(self):
         """The constant must exist and be importable."""

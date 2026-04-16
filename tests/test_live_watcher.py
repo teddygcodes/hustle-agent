@@ -1,0 +1,206 @@
+"""Tests for Live Game Watcher (WATCH command)."""
+
+from unittest.mock import patch, MagicMock
+
+
+# ---------------------------------------------------------------------------
+# Task 1: Config constants
+# ---------------------------------------------------------------------------
+
+def test_live_watch_config():
+    from bot.config import LIVE_POLL_INTERVAL, LIVE_WATCH_EDGE_THRESHOLD
+    assert LIVE_POLL_INTERVAL == 10
+    assert 0.05 <= LIVE_WATCH_EDGE_THRESHOLD <= 0.20
+
+
+# ---------------------------------------------------------------------------
+# Task 2: Notifier methods
+# ---------------------------------------------------------------------------
+
+def test_notifier_has_edit_message_method():
+    from bot.notifier import TelegramNotifier
+    import inspect
+    assert hasattr(TelegramNotifier, "edit_message_by_id")
+    assert inspect.iscoroutinefunction(TelegramNotifier.edit_message_by_id)
+
+
+def test_notifier_has_send_message_get_id():
+    from bot.notifier import TelegramNotifier
+    import inspect
+    assert hasattr(TelegramNotifier, "send_message_get_id")
+    assert inspect.iscoroutinefunction(TelegramNotifier.send_message_get_id)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: LiveGameWatcher class
+# ---------------------------------------------------------------------------
+
+MOCK_ESPN_ODDS = {
+    "games": [{
+        "home_team": "Los Angeles Lakers",
+        "away_team": "Denver Nuggets",
+        "status": "STATUS_IN_PROGRESS",
+        "consensus": {"Los Angeles Lakers": 0.72, "Denver Nuggets": 0.28},
+    }]
+}
+
+
+def test_live_watcher_class_exists():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    assert hasattr(watcher, "start")
+    assert hasattr(watcher, "stop")
+
+
+def test_find_game_returns_live_game():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "lakers"
+    watcher.sport = "nba"
+    with patch("bot.odds_scraper.fetch_consensus_odds", return_value=MOCK_ESPN_ODDS):
+        result = watcher._find_game()
+    assert result is not None
+    assert "Los Angeles Lakers" in (result.get("home_team") or result.get("away_team"))
+
+
+def test_find_game_returns_none_when_no_match():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "patriots"
+    watcher.sport = "nba"
+    with patch("bot.odds_scraper.fetch_consensus_odds", return_value=MOCK_ESPN_ODDS):
+        result = watcher._find_game()
+    assert result is None
+
+
+def test_compute_edge_positive():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    # espn says 72% win, kalshi asks 55c
+    edge, rel = watcher._compute_edge(espn_prob=0.72, kalshi_ask_cents=55, side="yes")
+    assert abs(edge - 0.17) < 0.01
+    assert abs(rel - (0.17 / 0.55)) < 0.01
+
+
+def test_compute_edge_no_side():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    # espn says 72% for YES, so NO team = 28%
+    edge, rel = watcher._compute_edge(espn_prob=0.72, kalshi_ask_cents=30, side="no")
+    # NO fair value = 1 - 0.72 = 0.28, kalshi = 0.30
+    assert edge < 0  # kalshi overpriced for NO
+
+
+def test_format_status_card_with_score():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "lakers"
+    watcher.sport = "nba"
+    watcher.bets_placed = []
+    watcher.exits = []
+    watcher.ticker = "KXNBAGAME-26APR05LALDEN-LAL"
+
+    card = watcher._format_status_card(
+        home_team="Los Angeles Lakers",
+        away_team="Denver Nuggets",
+        home_score=87, away_score=79,
+        period_label="Q3", clock="5:32",
+        espn_prob=0.72, kalshi_ask_cents=55,
+        edge=0.17, relative_edge=0.309,
+        last_update_secs=3,
+    )
+    assert "87" in card
+    assert "79" in card
+    assert "Q3" in card
+    assert "5:32" in card
+    assert "72%" in card
+    assert "55c" in card
+    assert "31%" in card   # relative edge display
+
+
+def test_status_card_shows_bet_placed():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "lakers"
+    watcher.sport = "nba"
+    watcher.bets_placed = [{"side": "yes", "contracts": 15, "price_cents": 55, "ticker": "X", "order_id": "P"}]
+    watcher.exits = []
+    watcher.ticker = "KXNBAGAME-26APR05LALDEN-LAL"
+
+    card = watcher._format_status_card(
+        home_team="Los Angeles Lakers", away_team="Denver Nuggets",
+        home_score=87, away_score=79, period_label="Q3", clock="5:32",
+        espn_prob=0.72, kalshi_ask_cents=55,
+        edge=0.17, relative_edge=0.309, last_update_secs=3,
+    )
+    assert "15" in card
+    assert "YES" in card.upper()
+
+
+# ---------------------------------------------------------------------------
+# Exit logic
+# ---------------------------------------------------------------------------
+
+def test_status_card_shows_exited_position():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "lakers"
+    watcher.sport = "nba"
+    watcher.bets_placed = []
+    watcher.exits = [{"side": "yes", "contracts": 10, "price_cents": 55,
+                       "ticker": "X", "order_id": "P", "reason": "edge reversed to -3.0%", "pnl": -1.50}]
+    watcher.ticker = "KXNBAGAME-26APR05LALDEN-LAL"
+
+    card = watcher._format_status_card(
+        home_team="Los Angeles Lakers", away_team="Denver Nuggets",
+        home_score=87, away_score=79, period_label="Q3", clock="5:32",
+        espn_prob=0.48, kalshi_ask_cents=55,
+        edge=-0.07, relative_edge=-0.127, last_update_secs=120,
+    )
+    assert "EXITED" in card
+    assert "reversed" in card
+
+
+def test_session_summary_includes_exits():
+    from bot.live_watcher import LiveGameWatcher
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.query = "lakers"
+    watcher.bets_placed = []
+    watcher.exits = [{"side": "yes", "contracts": 10, "price_cents": 55,
+                       "ticker": "X", "order_id": "P", "reason": "edge faded", "pnl": 2.30}]
+    summary = watcher._format_session_summary("Los Angeles Lakers", "Denver Nuggets")
+    assert "EXITED" in summary
+    assert "+$2.30" in summary
+    assert "Session P&L" in summary
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Cache bypass
+# ---------------------------------------------------------------------------
+
+def test_fetch_consensus_odds_has_bypass_param():
+    """fetch_consensus_odds must accept bypass_cache keyword."""
+    import inspect
+    from bot.odds_scraper import fetch_consensus_odds
+    sig = inspect.signature(fetch_consensus_odds)
+    assert "bypass_cache" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# Task 5: WATCH/UNWATCH integration
+# ---------------------------------------------------------------------------
+
+def test_glintbot_has_active_watchers():
+    from bot.main import GlintBot
+    import inspect
+    src = inspect.getsource(GlintBot.__init__)
+    assert "_active_watchers" in src
+
+
+def test_watch_command_registered():
+    """WATCH and UNWATCH must be registered as command callbacks."""
+    from bot.main import GlintBot
+    import inspect
+    src = inspect.getsource(GlintBot._register_commands)
+    assert "WATCH" in src
+    assert "UNWATCH" in src

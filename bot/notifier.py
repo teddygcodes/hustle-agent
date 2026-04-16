@@ -52,6 +52,7 @@ def format_opportunity(opp: dict) -> str:
     type_labels = {
         "vig_stack_no":      "Sports Parlay (vig stack)",
         "vig_stack_series":  "Series Vig Stack NO",
+        "vig_stack_futures": "Sports Futures Vig Stack",
         "series_game_edge":  "Series Game Edge",
         "btc_price_edge":    "BTC Price Edge",
         "eth_price_edge":    "ETH Price Edge",
@@ -101,7 +102,7 @@ def format_opportunity(opp: dict) -> str:
         lines.append(f"Threshold: {threshold}°F ({direction})")
 
     # Vig stack series details
-    if opp_type == "vig_stack_series":
+    if opp_type in ("vig_stack_series", "vig_stack_futures"):
         yes_sum = opp.get("yes_sum_cents", 0)
         vig_factor = opp.get("vig_factor", 1.0)
         no_fair = opp.get("no_fair_cents", 0)
@@ -571,6 +572,9 @@ class TelegramNotifier:
         self._message_ids: dict[str, int] = {}  # opp_id -> telegram message_id
         self._paused = False
         self._quiet_until: Optional[datetime] = None
+        self._flood_until: float = 0.0  # unix timestamp when flood ban expires
+        self._send_times: list[float] = []  # timestamps of recent sends for rate limiting
+        self._RATE_LIMIT = 20  # max messages per 60 seconds
 
     async def initialize(self):
         """Build and initialize the Telegram application."""
@@ -657,6 +661,44 @@ class TelegramNotifier:
             return False
         return True
 
+    # -- Flood control --
+
+    def _check_flood(self) -> bool:
+        """Return True if we're currently flood-banned or rate-limited."""
+        import time
+        now = time.time()
+        if self._flood_until and now < self._flood_until:
+            return True
+        # Self-imposed rate limit: max N messages per 60s
+        cutoff = now - 60
+        self._send_times = [t for t in self._send_times if t > cutoff]
+        if len(self._send_times) >= self._RATE_LIMIT:
+            logger.debug("[RATE] Self-rate-limited: %d msgs in last 60s", len(self._send_times))
+            return True
+        return False
+
+    def _record_send(self):
+        """Record a successful send for rate limiting."""
+        import time
+        self._send_times.append(time.time())
+
+    def _handle_flood_error(self, e: Exception):
+        """Parse Telegram flood control error and set cooldown."""
+        import time, re
+        err_str = str(e)
+        # Extract retry-after seconds from error message
+        m = re.search(r'[Rr]etry in (\d+)', err_str)
+        if m:
+            retry_secs = int(m.group(1))
+        else:
+            retry_secs = 300  # default 5 min if we can't parse
+        self._flood_until = time.time() + retry_secs
+        logger.warning(
+            "Telegram flood control: backing off for %ds (until %s)",
+            retry_secs,
+            datetime.fromtimestamp(self._flood_until).strftime("%H:%M:%S"),
+        )
+
     # -- Sending messages --
 
     async def send_message(self, text: str, priority: str = "normal"):
@@ -675,14 +717,63 @@ class TelegramNotifier:
         if not self.app or not TELEGRAM_CHAT_ID:
             logger.info(f"[DRY] Would send: {text[:100]}...")
             return
+        if self._check_flood():
+            logger.debug("[FLOOD] Skipping send: %s...", text[:60])
+            return
         try:
             await self.app.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
                 parse_mode=None,  # Plain text for reliability
             )
+            self._record_send()
         except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            if "flood" in str(e).lower() or "429" in str(e):
+                self._handle_flood_error(e)
+            else:
+                logger.error(f"Failed to send Telegram message: {e}")
+
+    async def edit_message_by_id(self, message_id: int, text: str) -> bool:
+        """Edit a previously sent message in-place (for live status card)."""
+        if not self.app or not TELEGRAM_CHAT_ID:
+            return False
+        if self._check_flood():
+            return False
+        try:
+            await self.app.bot.edit_message_text(
+                chat_id=TELEGRAM_CHAT_ID,
+                message_id=message_id,
+                text=text,
+                parse_mode=None,
+            )
+            return True
+        except Exception as e:
+            if "flood" in str(e).lower() or "429" in str(e):
+                self._handle_flood_error(e)
+            else:
+                logger.debug("edit_message_by_id failed (msg_id=%s): %s", message_id, e)
+            return False
+
+    async def send_message_get_id(self, text: str) -> int | None:
+        """Send a message and return its message_id (for live status card init)."""
+        if not self.app or not TELEGRAM_CHAT_ID:
+            return None
+        if self._check_flood():
+            logger.debug("[FLOOD] Skipping send_message_get_id: %s...", text[:60])
+            return None
+        try:
+            msg = await self.app.bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=text,
+            )
+            self._record_send()
+            return msg.message_id
+        except Exception as e:
+            if "flood" in str(e).lower() or "429" in str(e):
+                self._handle_flood_error(e)
+            else:
+                logger.warning("send_message_get_id failed: %s", e)
+            return None
 
     async def send_photo(self, photo_path):
         """Send a photo (e.g. equity chart) to the configured chat."""

@@ -25,11 +25,13 @@ from bot.config import (
     MAX_POSITION_PERCENT, MAX_TOTAL_EXPOSURE, MIN_RELATIVE_EDGE,
     POSITIONS_FILE, TRADE_HISTORY_FILE, BOT_STATE_FILE,
     TRAILING_STOP_MIN_HOLD, PAPER_MODE, MAX_PRICE_MOVE_CENTS,
+    PRICE_MOVE_CENTS_BY_STRATEGY,
     PAPER_TRADES_FILE, PAPER_STARTING_BALANCE,
 )
 
 _PAPER_TYPE_MAP = {
     "vig_stack_series": "vig_stack",
+    "vig_stack_futures": "vig_stack",
     "series_game_edge": "series_game",
     "econ_cpi_edge": "econ",
 }
@@ -74,6 +76,13 @@ def _check_balance(cost_dollars: float) -> tuple[bool, float, str]:
         balance = round(balance, 2)
         if balance < cost_dollars:
             return False, balance, f"Insufficient paper balance: ${balance:.2f} < ${cost_dollars:.2f}"
+        # Reserve guard: keep 10% of starting balance liquid
+        min_reserve = PAPER_STARTING_BALANCE * 0.10
+        if balance - cost_dollars < min_reserve:
+            return False, balance, (
+                f"Reserve guard: ${balance:.2f} - ${cost_dollars:.2f} = "
+                f"${balance - cost_dollars:.2f} would breach ${min_reserve:.0f} reserve"
+            )
         return True, balance, "ok"
 
     result = get_balance()
@@ -97,6 +106,7 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
     positions = _load_json(POSITIONS_FILE)
 
     # Dedup: block re-entry if we already hold an open position in this ticker
+    # But first: auto-close orphaned positions whose markets have settled
     existing = [
         p for p in positions
         if isinstance(p, dict)
@@ -104,7 +114,79 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
         and p.get("status") in ("resting", "filled", "partial")
     ]
     if existing:
-        return False, f"Already hold open position in {ticker} — skipping duplicate entry"
+        # Check if market actually settled — if so, close the orphan
+        try:
+            from agent.kalshi_client import get_market as _gm
+            mkt = _gm(ticker)
+            m = mkt.get("market", mkt)
+            if m.get("status") == "inactive" or (m.get("yes_ask", 50) >= 97 or m.get("yes_ask", 50) <= 3):
+                # Market settled — auto-close the orphaned position
+                yes_settled_high = m.get("yes_ask", 50) >= 97
+                settled_yes_price = 1.0 if yes_settled_high else 0.0
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for p in existing:
+                    entry = p.get("price_cents", 50) / 100.0
+                    side = p.get("side", "yes")
+                    contracts = p.get("contracts", 1)
+                    if side == "yes":
+                        p_pnl = (settled_yes_price - entry) * contracts
+                    else:
+                        p_pnl = ((1.0 - settled_yes_price) - entry) * contracts
+                    # Use "resolved" status so the 4-hour cooldown check catches it
+                    p["status"] = "resolved"
+                    p["unrealized_pnl"] = round(p_pnl, 4)
+                    p["resolved_at"] = now_iso
+                    logger.info(
+                        "Auto-closed orphaned position: %s side=%s (pnl=$%.2f)",
+                        ticker, side, p_pnl,
+                    )
+                _save_json(POSITIONS_FILE, positions)
+                # Also close in paper_trades.json if paper mode
+                if PAPER_MODE:
+                    _pt = _load_json(PAPER_TRADES_FILE)
+                    for t in (_pt if isinstance(_pt, list) else []):
+                        if not isinstance(t, dict):
+                            continue
+                        if t.get("ticker") != ticker or t.get("status") != "open":
+                            continue
+                        t_entry = t.get("entry_price", 0.5)
+                        t_side = t.get("side", "yes")
+                        t_contracts = t.get("contracts", 1)
+                        if t_side == "yes":
+                            t_pnl = (settled_yes_price - t_entry) * t_contracts
+                            t_exit = settled_yes_price
+                        else:
+                            t_pnl = ((1.0 - settled_yes_price) - t_entry) * t_contracts
+                            t_exit = 1.0 - settled_yes_price  # NO payout
+                        t["status"] = "won" if t_pnl > 0 else "lost"
+                        t["pnl"] = round(t_pnl, 2)
+                        t["exit_price"] = round(t_exit, 4)
+                        t["resolved_at"] = now_iso
+                    _save_json(PAPER_TRADES_FILE, _pt)
+                # Position cleared — allow new entry
+            else:
+                return False, f"Already hold open position in {ticker} — skipping duplicate entry"
+        except Exception as e:
+            logger.debug("Orphan check failed for %s: %s", ticker, e)
+            return False, f"Already hold open position in {ticker} — skipping duplicate entry"
+
+    # Block betting on the opposing team in the same game event
+    ticker_parts = ticker.rsplit("-", 1)
+    if len(ticker_parts) == 2 and "GAME" in ticker_parts[0]:
+        game_key = ticker_parts[0]
+        same_game = [
+            p for p in positions
+            if isinstance(p, dict)
+            and p.get("status") in ("resting", "filled", "partial")
+            and p.get("ticker", "").startswith(game_key + "-")
+            and p.get("ticker") != ticker
+        ]
+        if same_game:
+            held_team = same_game[0]["ticker"].rsplit("-", 1)[1]
+            return False, (
+                f"SAME GAME: already hold {held_team} in {game_key} — "
+                f"blocking opposite-side bet"
+            )
 
     # Cooldown: block re-entry for 4 hours after any exit/resolve on same ticker
     from datetime import datetime, timezone, timedelta
@@ -124,8 +206,8 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
             if (_now - exited_at) < _COOLDOWN:
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Cooldown date parse failed for %s: %s", ticker, e)
 
     # Daily per-ticker loss limit: block if ticker has lost > $1.00 today
     _DAILY_TICKER_LOSS_LIMIT = 1.00
@@ -147,8 +229,14 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
-    # Total exposure limit
-    total_exposure = sum(p.get("cost", 0) for p in positions if isinstance(p, dict))
+    # Total exposure limit — only count ACTIVE positions that actually filled
+    # Exclude: ghost resting orders (filled=0), exited positions, resolved positions
+    total_exposure = sum(
+        p.get("cost", 0) for p in positions
+        if isinstance(p, dict)
+        and p.get("filled", 0) > 0
+        and p.get("status") in ("filled", "partial")
+    )
     if (total_exposure + cost_dollars) > balance * MAX_TOTAL_EXPOSURE:
         return False, (
             f"Total exposure too high: ${total_exposure + cost_dollars:.2f} > "
@@ -169,6 +257,12 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
     ticker = opportunity.get("ticker", "")
     trade_type = opportunity.get("type", "")
 
+    # Momentum trades are pure price-action — no "edge" to re-verify.
+    # The dip-buy signal was validated at tick time; re-checking against a
+    # model fair_value that doesn't exist would just block every trade.
+    if trade_type == "live_momentum":
+        return True, "ok (momentum — price-action only)"
+
     market = get_market(ticker)
     if "error" in market:
         return False, f"Could not re-fetch market: {market['error']}"
@@ -180,7 +274,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
 
     current_yes_price = current_yes_ask / 100.0
 
-    if trade_type in ("vig_stack_no", "vig_stack_series"):
+    if trade_type in ("vig_stack_no", "vig_stack_series", "vig_stack_futures"):
         # NO-side vig stack: track yes_ask movement using the yes_ask stored
         # in the market dict at scan time (most accurate baseline).
         # Do NOT derive from no_ask — bid/ask spread creates phantom movement.
@@ -198,11 +292,12 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             f"delta={current_yes_price - original_yes_price:+.4f}"
         )
 
-        # 3¢ kill switch: if price moved more than MAX_PRICE_MOVE_CENTS, abort
+        # Kill switch: per-strategy threshold (vig_stack tolerates more drift — structural edge)
+        kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_yes_price) * 100
-        if move_cents > MAX_PRICE_MOVE_CENTS:
+        if move_cents > kill_cents:
             return False, (
-                f"Price moved {move_cents:.1f}¢ since alert (max {MAX_PRICE_MOVE_CENTS}¢) — market in motion, aborting"
+                f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
 
         if abs(current_yes_price - original_yes_price) < 0.001:
@@ -230,11 +325,12 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             f"delta={current_yes_price - original_price:+.4f}"
         )
 
-        # 3¢ kill switch
+        # Kill switch: per-strategy threshold
+        kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_price) * 100
-        if move_cents > MAX_PRICE_MOVE_CENTS:
+        if move_cents > kill_cents:
             return False, (
-                f"Price moved {move_cents:.1f}¢ since alert (max {MAX_PRICE_MOVE_CENTS}¢) — market in motion, aborting"
+                f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
 
         if abs(current_yes_price - original_price) < 0.001:
@@ -253,7 +349,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         )
 
     # Vig stack series is a structural edge — threshold is 2%, not the default 15%
-    edge_threshold = 0.02 if trade_type == "vig_stack_series" else MIN_RELATIVE_EDGE
+    edge_threshold = 0.02 if trade_type in ("vig_stack_series", "vig_stack_futures") else MIN_RELATIVE_EDGE
     if new_relative < edge_threshold:
         logger.debug(
             f"[EdgeCheck] EVAPORATED: {ticker} | "
@@ -307,9 +403,20 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     # ------------------------------------------------------------------
     edge_result = opportunity.get("edge_result", {})
     opp_type = opportunity.get("type", "unknown")
+    direction_check = None  # May be skipped for structural trades
 
-    # Build data thesis from edge calculation
-    if opp_type == "weather":
+    # Vig stack series: purely structural edge (buy NO because YES sum > 100¢).
+    # No directional thesis to verify — skip direction check entirely.
+    if opp_type in ("vig_stack_series", "vig_stack_futures"):
+        checks.append({
+            "name": "contract_direction",
+            "passed": True,
+            "confidence": "high",
+            "explanation": f"{opp_type} — structural NO edge, no directional thesis needed",
+            "warnings": [],
+        })
+        logger.info(f"  ✅ Direction check skipped ({opp_type} — structural edge)")
+    elif opp_type == "weather":
         city = opportunity.get("city", "?")
         forecast = opportunity.get("forecast_temp", "?")
         threshold = opportunity.get("threshold", "?")
@@ -426,29 +533,31 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                    else "YES underpriced — no NO edge.")
             )
 
-    direction_check = verify_contract_direction(
-        contract_title=title,
-        data_thesis=data_thesis,
-        intended_side=side,
-    )
+    # Skip direction check if already handled above (e.g. vig_stack_series)
+    if not any(c.get("name") == "contract_direction" for c in checks):
+        direction_check = verify_contract_direction(
+            contract_title=title,
+            data_thesis=data_thesis,
+            intended_side=side,
+        )
 
-    checks.append({
-        "name": "contract_direction",
-        "passed": direction_check["direction_correct"],
-        "confidence": direction_check["confidence"],
-        "explanation": direction_check["explanation"],
-        "warnings": direction_check["warnings"],
-    })
+        checks.append({
+            "name": "contract_direction",
+            "passed": direction_check["direction_correct"],
+            "confidence": direction_check["confidence"],
+            "explanation": direction_check["explanation"],
+            "warnings": direction_check["warnings"],
+        })
 
-    if not direction_check["direction_correct"]:
-        logger.warning(f"DIRECTION CHECK FAILED: {direction_check['explanation']}")
-        return {
-            "success": False,
-            "checks": checks,
-            "reason": f"Direction check failed: {direction_check['warnings']}",
-        }
+        if not direction_check["direction_correct"]:
+            logger.warning(f"DIRECTION CHECK FAILED: {direction_check['explanation']}")
+            return {
+                "success": False,
+                "checks": checks,
+                "reason": f"Direction check failed: {direction_check['warnings']}",
+            }
 
-    logger.info(f"  ✅ Direction check passed ({direction_check['confidence']})")
+        logger.info(f"  ✅ Direction check passed ({direction_check['confidence']})")
 
     # ------------------------------------------------------------------
     # CHECK 2: Balance
@@ -503,19 +612,30 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     # ------------------------------------------------------------------
     if PAPER_MODE:
         paper_id = f"PAPER-{uuid.uuid4().hex[:8].upper()}"
-        logger.info(
-            f"  📝 [PAPER] Resting limit order: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker} "
-            f"(id={paper_id}) — will fill when market price crosses limit"
-        )
+        # Check if limit price meets or exceeds current ask — if so, fill immediately
+        # (simulates a marketable limit order, which is what momentum/watcher trades are)
+        current_market = get_market(ticker)
+        current_ask = current_market.get(f"{side}_ask", 999) if "error" not in current_market else 999
+        immediate_fill = (price_cents >= current_ask and current_ask > 0)
+        if immediate_fill:
+            logger.info(
+                f"  📝 [PAPER] Instant fill: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker} "
+                f"(id={paper_id}) — limit {price_cents}¢ ≥ ask {current_ask}¢"
+            )
+        else:
+            logger.info(
+                f"  📝 [PAPER] Resting limit order: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker} "
+                f"(id={paper_id}) — will fill when market price crosses limit"
+            )
         order_result = {
             "order_id": paper_id,
             "ticker": ticker,
             "side": side,
             "count": contracts,
-            "filled_count": 0,
+            "filled_count": contracts if immediate_fill else 0,
             "price_cents": price_cents,
             "cost_dollars": total_cost,
-            "status": "paper_resting",
+            "status": "paper_filled" if immediate_fill else "paper_resting",
             "paper": True,
         }
     else:
@@ -555,6 +675,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         "canonical_team": opportunity.get("canonical_team", ""),
         "opponent_team": opportunity.get("opponent_team", ""),
         "sport": opportunity.get("sport", ""),
+        "event_ticker": opportunity.get("market", {}).get("event_ticker", ""),
         "opened_at": datetime.now(timezone.utc).isoformat(),
         "status": "filled" if filled == contracts else "partial" if filled > 0 else "resting",
         "paper": PAPER_MODE,
@@ -738,6 +859,23 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
         exit_price = market.get("no_bid", 0)
 
     if not exit_price or exit_price <= 0:
+        if PAPER_MODE or pos.get("paper"):
+            # No bid = worthless. Exit at 0 in paper mode rather than
+            # retrying every cycle and spamming Telegram.
+            entry_price = pos.get("price_cents", 0) / 100.0
+            realized_pnl = round(-entry_price * filled, 2)
+            pos["status"] = "exited"
+            pos["exit_price"] = 0
+            pos["exit_reason"] = f"{reason}_no_bid"
+            pos["exited_at"] = datetime.now(timezone.utc).isoformat()
+            pos["realized_pnl"] = realized_pnl
+            _save_json(POSITIONS_FILE, positions)
+            _paper_record_exit(pos.get("order_id", ""), 0.0, realized_pnl)
+            return {
+                "success": True,
+                "realized_pnl": realized_pnl,
+                "reason": f"Paper exit at $0 (no bid): {reason}",
+            }
         return {"success": False, "reason": f"No bid for {side} side"}
 
     entry_price = pos.get("price_cents", 0) / 100.0

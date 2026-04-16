@@ -37,8 +37,9 @@ TELEGRAM_CHAT_ID = _telegram_cfg.get("chat_id", "")
 # Trading Thresholds
 # ---------------------------------------------------------------------------
 MIN_RELATIVE_EDGE = 0.15       # 15% minimum relative edge to alert
-CRYPTO_MIN_EDGE = 0.15         # 15% minimum absolute edge for crypto (volatility floor)
-MAX_BET_FRACTION = 0.05        # 5% of balance per trade
+CRYPTO_MIN_EDGE = 0.08         # 8% minimum absolute edge — captures hourly/15min edges
+CRYPTO_MIN_RELATIVE_EDGE = 0.10  # 10% relative edge for crypto (vs 15% for sports)
+MAX_BET_FRACTION = 0.05        # 5% of balance per trade — conservative until edge proven
 KELLY_FRACTION = 0.25          # 25% of full Kelly (conservative)
 MIN_BET_DOLLARS = 1.00         # Not worth execution cost below this
 # MAX_BET_DOLLARS removed — replaced by dynamic cap: min(balance * MAX_BET_FRACTION, 200.0) in sizing.py
@@ -50,7 +51,198 @@ SCAN_INTERVAL_IDLE = 1800      # 30 min — no live games
 SCAN_INTERVAL_PREGAME = 600    # 10 min — games starting within 1 hour
 SCAN_INTERVAL_LIVE = 120       # 2 min — live games in progress
 ODDS_API_MONTHLY_LIMIT = 450   # Buffer from 500 free tier limit
+
+# ---------------------------------------------------------------------------
+# Live game watcher (WATCH command)
+# ---------------------------------------------------------------------------
+LIVE_POLL_INTERVAL        = 10    # seconds between ticks while watching a game
+LIVE_WATCH_EDGE_THRESHOLD = 0.10  # 10% relative edge to auto-bet in watch mode
+LIVE_TAKE_PROFIT_CENTS   = 12    # sell when up 12¢ from entry — backtested sweet spot
+LIVE_PROFIT_TARGET       = 0.50  # 50% gain activates trailing stop (fallback)
+LIVE_TRAILING_STOP       = 0.25  # sell if price drops 25% from peak after target hit
+LIVE_HARD_PROFIT_TARGET  = 1.00  # 100% gain — take profit immediately (safety)
+LIVE_STOP_LOSS_CENTS     = 30   # exit if position drops 30¢ from entry
+LIVE_NEAR_SETTLE_CENTS   = 93   # exit if price >= 93¢ (match almost over, lock in win)
 LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant
+
+# Momentum mode (WATCH on 1v1 matches — tennis, UFC, etc.)
+MOMENTUM_LEADER_MIN      = 0.70  # v6: DATA AUDIT — 43 real trades prove entries <70c lose money.
+                                 #   <70c: 23 trades, -$67.77 (-$2.95/trade, 22% WR)
+                                 #   ≥70c: 20 trades, +$15.50 (+$0.78/trade, 55% WR)
+                                 # Below 70c, "leader" isn't leading strongly enough for reversion.
+MOMENTUM_MAX_LOSS_DOLLARS = 5.00  # HARD CAP: exit if unrealized loss exceeds $5
+                                  # Data: 7 trades lost >$10, totaling -$127. Capping at $5
+                                  # would have turned -$104 total into +$2.84.
+MOMENTUM_DIP_BUY         = 0.04  # buy when leader dips 4+ cents from recent high
+MOMENTUM_DIP_MAX         = 0.08  # SKIP dips > 8¢ — those are set changes (0% win rate)
+                                 # Data: dips ≤8¢ = 75% win rate; dips 11+¢ = 0% win rate
+MOMENTUM_PRICE_WINDOW    = 12    # track last N ticks for recent high (~2 min at 10s)
+MOMENTUM_UW_DEPTH_CENTS  = 99    # DISABLED — underwater exit killed profits on 100% of trades
+                                 # Data: every UW exit recovered to TP. SL handles risk.
+MOMENTUM_UW_TICKS        = 999   # DISABLED — set impossibly high so it never triggers
+MOMENTUM_MAX_ENTRIES     = 3     # max entries per match (re-entry after exit allowed)
+MOMENTUM_REENTRY_COOLDOWN = 5    # ticks (~50s) cooldown after exit before re-entry
+MOMENTUM_SCALE_SMALL_DIP = 1.0   # 1x on min-threshold dips — they qualify but aren't special
+MOMENTUM_SCALE_MED_DIP   = 1.2   # 1.2x on medium dips — bigger dip = better bounce
+MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% win, +3.67c avg
+
+# ---------------------------------------------------------------------------
+# Sport Instincts — situational awareness thresholds
+# ---------------------------------------------------------------------------
+# These encode the "feel" a veteran bettor has: when to sit on your hands,
+# when to size down, when the game situation makes price moves meaningless.
+INSTINCT_NBA_GARBAGE_LEAD    = 20   # points ahead in Q4 = garbage time (bench players)
+INSTINCT_NBA_GARBAGE_CLOCK   = 300  # seconds left in Q4 when garbage kicks in
+INSTINCT_NBA_CLUTCH_MARGIN   = 5    # within 5 pts in Q4 = clutch time (max volatility)
+INSTINCT_NHL_EMPTY_NET_CLOCK = 150  # seconds left in P3 — goalie likely pulled if trailing
+INSTINCT_MLB_HIGH_LEV_OUTS   = 2    # 2 outs + RISP = high-leverage AB (hard block)
+INSTINCT_CLUTCH_TRAIL_WIDEN  = 1.5  # widen trailing stop by 50% in clutch/empty-net
+INSTINCT_CLUTCH_SIZE_FACTOR  = 0.5  # halve position size in high-volatility situations
+
+# ---------------------------------------------------------------------------
+# Conviction Entry — "read the game, buy without a dip"
+# ---------------------------------------------------------------------------
+# Sometimes there IS no dip. The team is dominating, the price just keeps
+# climbing, and waiting for a pullback means watching free money leave.
+# Conviction entry buys when the game state says the price is too low —
+# even without a dip — based on win probability edge + momentum + trend.
+#
+# REQUIREMENTS (ALL must be true):
+#   1. Win prob model says fair value is significantly above Kalshi price
+#   2. Our team has positive momentum (scoring, lead growing)
+#   3. Price is in the "value zone" — not already at 85¢+
+#   4. Enough ticks have passed to read the game (not tick 1)
+#   5. Sport has a reliable win prob model (NBA, NHL — NOT tennis/UFC)
+CONVICTION_ENABLED           = True
+CONVICTION_MIN_WP_EDGE       = 0.08  # win_prob must be 8%+ above Kalshi price
+CONVICTION_MIN_MOMENTUM      = 0.15  # positive momentum required (our team scoring)
+CONVICTION_MIN_LEAD_TREND    = 0.0   # lead must not be shrinking
+CONVICTION_MIN_PRICE         = 68    # DATA: 60-67¢ entries are flat/negative. 68¢+ is where edge starts.
+CONVICTION_MAX_PRICE         = 82    # don't conviction-buy above 82¢ (not enough upside)
+CONVICTION_MIN_TICKS         = 12    # wait ~2 min to read the game first
+CONVICTION_MIN_COMPLETION    = 0.50  # DATA: Q3+ is the sweet spot. 253 candidates, +2.8c/trade, 79% hit.
+                                     # Was 0.25 — too loose. <50% completion = flat/negative returns.
+CONVICTION_SIZE_FACTOR       = 0.7   # 70% of normal size (less confident than dip entry)
+CONVICTION_EXCLUDED_SPORTS   = ["mlb", "tennis", "ufc"]  # DATA: MLB 12% hit rate for conviction. Stick to NBA/NHL.
+
+# Dip Quality Score (DQS) — composite score 0.0-1.0 determining dip buyability
+# Only buy when DQS >= threshold. Score is weighted average of:
+#   - Score differential (is the team actually ahead?)
+#   - Game stage (late game dips on leaders = highest quality)
+#   - Price level (stronger leader = more likely to revert)
+#   - Volatility (dip must exceed recent noise)
+MOMENTUM_DQS_THRESHOLD   = 0.40  # minimum dip quality score to buy (0-1 scale) — lowered from 0.45
+MOMENTUM_DQS_TRAIL_STOP  = 6     # trailing stop: 6¢ from peak — DATA v4: only positive trail value (+0.28c/trade)
+                                 # 4c too tight (noise), 8c too wide (gives back gains)
+
+# Sport-specific tuning — different scoring dynamics need different thresholds
+# format: {min_dip_cents, max_dip_cents, max_entry_price, score_diff_weight}
+SPORT_PROFILES = {
+    # =====================================================================
+    # v6 — DATA AUDIT of 43 real trades (Apr 9-14, verified from logs)
+    #
+    # KEY FINDING: Entry price is the #1 predictor of profit/loss.
+    #   <70c entries: 23 trades, -$67.77, 22% WR — MONEY PIT
+    #   ≥70c entries: 20 trades, +$15.50, 55% WR — PROFITABLE
+    #   Below 70c, the "leader" isn't leading strongly enough to revert.
+    #   MOMENTUM_LEADER_MIN raised to 0.70 to enforce this globally.
+    #
+    # #2 FINDING: SL slippage is catastrophic (avg 21c vs 12-15c config)
+    #   10-second ticks cause gaps. Tightened SL to 10c across the board.
+    #
+    # #3 FINDING: Trailing stop IS the edge (+$67.75 from TP exits)
+    #   Keep trail_stop. Avg TP gain = +15.2c.
+    #
+    # #4 FINDING: Position sizing amplifies losses
+    #   Max 20 contracts across all sports.
+    #
+    # CORRECTED P&L (from logs, not buggy paper_trades.json):
+    #   NHL:    4 trades, +$9.30, 75% WR — BEST SPORT
+    #   UFC:    3 trades, -$3.81 (MUR -37c gap killed it)
+    #   Tennis: 17 trades, -$38.97 (but 70c+ entries = -$6.83)
+    #   MLB:    13 trades, -$11.85 — DISABLED
+    #   NBA:    5 trades, -$3.98 (LAL +$4.80 was only 70c+ entry)
+    # =====================================================================
+    "nba": {
+        # DATA: 5 trades, 1W/4L, -$3.98. LAL at 77c was the only win.
+        # DEN/GSW/POR/HOU all underwater — all entered via UW exit (disabled).
+        # DQS still required for NBA. Only enter at 70c+ (via LEADER_MIN).
+        "min_dip": 5,
+        "max_dip": 20,
+        "max_entry": 88,
+        "min_score_diff": 3,
+        "periods": 4,
+        "late_game_period": 4,
+        "take_profit": 12,
+        "stop_loss": 10,     # TIGHTENED: 15 → 10. Avg SL was -15c, need to cut faster
+        "trail_stop": 4,
+        "max_contracts": 20,  # NEW: cap position size
+    },
+    "nhl": {
+        # DATA: 4 trades, 3W/1L, +$9.30. BEST SPORT.
+        # ANA +$4.32, NSH +$2.40, CAR +$5.16. Only loss: MIN at 68c (underwater exit).
+        # All wins at 70c+. NHL leaders are extremely sticky.
+        "min_dip": 4,
+        "max_dip": 15,
+        "max_entry": 88,     # RAISED: was 80. CAR entered at 82c = best trade.
+        "min_score_diff": 1,
+        "periods": 3,
+        "late_game_period": 3,
+        "take_profit": 15,
+        "stop_loss": 10,     # TIGHTENED: 15 → 10
+        "trail_stop": 8,
+        "max_contracts": 20,
+    },
+    "mlb": {
+        # DATA: 13 trades, 6W/7L, -$11.85. DISABLED.
+        # Wins only happen at 70c+. Too many reversals, long games.
+        "min_dip": 99,
+        "max_dip": 100,
+        "max_entry": 50,
+        "min_score_diff": 99,
+        "periods": 9,
+        "late_game_period": 7,
+        "take_profit": 10,
+        "stop_loss": 15,
+        "disabled": True,
+    },
+    "tennis": {
+        # DATA: 17 trades, 5W/12L, -$38.97. BUT:
+        #   <70c: 13 trades, -$42.06 — disaster
+        #   ≥70c: 4 trades, -$6.83 (KOT -4.96, FIC -0.08, VIR +4.56, DUC +5.25)
+        # At 70c+: 50% WR, trail stop locks in gains.
+        # LEADER_MIN=70c now enforces this. skip_dqs=True for speed.
+        "min_dip": 5,
+        "max_dip": 20,
+        "max_entry": 88,
+        "min_score_diff": 0,
+        "periods": 3,
+        "late_game_period": 3,
+        "take_profit": 10,
+        "stop_loss": 10,     # TIGHTENED: 12 → 10. KOT dropped 16c through 12c SL.
+        "skip_dqs": True,
+        "max_contracts": 20,
+    },
+    "ufc": {
+        # DATA: 3 trades, 2W/1L, -$3.81. PAD +5.60, GAM +4.65, MUR -14.06.
+        # MUR: 37c crash in 3 min (KO). SL can't help with instant crashes.
+        # Tight SL + small positions are the only defense.
+        "min_dip": 5,       # LOOSENED: 10 → 5. PAD entered at 63c dip.
+        "max_dip": 15,
+        "max_entry": 85,     # RAISED: 70 → 85. GAM entered at 78c.
+        "min_score_diff": 0,
+        "periods": 5,
+        "late_game_period": 4,
+        "take_profit": 12,
+        "stop_loss": 10,     # TIGHTENED: 15 → 10
+        "skip_dqs": True,
+        "max_contracts": 10,  # REDUCED: 15 → 10. KO risk.
+    },
+}
+
+# ATP/WTA variants all use tennis profile
+for _alias in ("atp", "atp_challenger", "wta", "wta_challenger"):
+    SPORT_PROFILES[_alias] = SPORT_PROFILES["tennis"]
 
 # ---------------------------------------------------------------------------
 # Weather
@@ -90,11 +282,26 @@ WEATHER_SERIES_TICKERS = [
     "KXHIGHNSH",  # Nashville
 ]
 
+# Kalshi index range series — range (between) contracts, mutually exclusive like weather
+# These have structural vig (YES sum > 100¢) and the vig_stack math applies.
+INDEX_RANGE_SERIES_TICKERS = [
+    "KXINX",      # S&P 500 daily close — 25¢+ range contracts with 20-40% vig excess
+]
+
+# Kalshi sports futures — championship/winner markets are mutually exclusive
+# (exactly one team wins). YES sum > 100¢ = structural vig, same math as weather.
+# NBA 17% vig (20 teams), NHL 22% vig (25 teams), MLB 6% vig (30 teams).
+SPORTS_FUTURES_TICKERS = [
+    "KXNBA",      # NBA Championship — 17% vig, $63M+ volume
+    "KXNHL",      # NHL Stanley Cup — 22% vig, $21M+ volume
+    "KXMLB",      # MLB World Series — 6% vig, $9.7M+ volume
+]
+
 # ---------------------------------------------------------------------------
 # Risk Limits
 # ---------------------------------------------------------------------------
 MAX_POSITION_PERCENT = 0.20    # Max 20% of balance in one market
-MAX_TOTAL_EXPOSURE = 0.50      # Max 50% of balance deployed
+MAX_TOTAL_EXPOSURE = 1.00      # Disabled for now — was 0.50
 POSITION_MOVE_ALERT = 0.20     # Alert if position moves 20% against
 TAKE_PROFIT_THRESHOLD = 0.50   # +50% unrealized → alert to take profit
 CUT_LOSS_THRESHOLD = -0.30     # -30% unrealized → alert to cut loss
@@ -184,9 +391,10 @@ THERUNDOWN_SPORT_IDS = {
 # ---------------------------------------------------------------------------
 # Crypto Monitoring
 # ---------------------------------------------------------------------------
+CRYPTO_ENABLED = False          # DISABLED — 0W/7L, -$5.83. No edge found in crypto markets.
 CRYPTO_ASSETS = ["bitcoin", "ethereum", "solana", "ripple", "dogecoin"]
 CRYPTO_CACHE_TTL = 60          # seconds between CoinGecko requests
-CRYPTO_SCAN_INTERVAL = 300     # seconds between standalone crypto scan loop runs
+CRYPTO_SCAN_INTERVAL = 180     # 3 minutes — capture more transient crypto edge
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 # ---------------------------------------------------------------------------
@@ -222,7 +430,7 @@ NWS_CITIES.update({
 # ---------------------------------------------------------------------------
 # Market Making
 # ---------------------------------------------------------------------------
-MM_MIN_SPREAD_CENTS = 6        # Minimum spread to attempt market making
+MM_MIN_SPREAD_CENTS = 4        # Minimum spread to attempt market making (was 6 — weather ladders usually 3-5¢)
 MM_MIN_HOURS_TO_CLOSE = 4      # Don't MM markets closing in < 4h
 MM_MAX_OPEN_PAIRS = 10         # Max concurrent MM pairs
 MM_CANCEL_AFTER_HOURS = 2      # Cancel unfilled pair after 2h
@@ -252,17 +460,19 @@ PAPER_STARTING_BALANCE = 500.0  # Simulated starting balance for paper trading (
 # "vig_stack_series" — Series ladder NO edge (mechanical, no prediction)
 # Add others only after 20+ resolved paper trades with +CLV on each.
 ACTIVE_STRATEGIES = [
-    "weather",
-    "vig_stack_series",
-    "series_game_edge",
-    "econ_cpi_edge",
-    "ipl_game_edge",
-    "btc_price_edge",   # was missing — BTC scanner was implemented but not gated
-    "eth_price_edge",
-    "sol_price_edge",   # new
-    "xrp_price_edge",   # new
-    "doge_price_edge",  # new
+    "vig_stack_series",       # 79% WR (159/201) — structural arb, best strategy
+    "vig_stack_futures",      # Same math as vig_stack_series, applied to championship/futures
+    "sports_monotonicity_arb", # Riskless arb — spread/total threshold violations
+    "sports_consistency_arb",  # Riskless arb — championship > series violations
 ]
+# Disabled (data-driven, 2026-04-14 audit):
+#   btc_price_edge: 33% WR in paper (-$35.06), model overestimates intraday vol
+#   eth_price_edge: 0% WR in paper (-$3.14), same vol model issue
+#   sol_price_edge: 0% WR in paper (-$4.38), same issue
+#   series_game_edge: 26% WR (-$30.95), sportsbook odds already efficient
+#   weather: 17% WR (-$4.41), NWS bias model too imprecise
+#   live_momentum: 52% WR but avg_loss 2x avg_win = -$104 total (runs separately via watcher)
+#   xrp/doge/bnb: all losing, crypto disabled
 
 # ---------------------------------------------------------------------------
 # Weather strategy — next-day filter
@@ -276,7 +486,20 @@ WEATHER_MIN_HOURS_TO_CLOSE = 8
 # ---------------------------------------------------------------------------
 # Cancel a GO if the Kalshi price has moved more than this many cents
 # since the alert was sent. Market is in motion — don't chase.
+#
+# Default (3¢) is tuned for price-action strategies where price IS the signal.
+# Per-strategy overrides in PRICE_MOVE_CENTS_BY_STRATEGY: vig_stack's edge is
+# structural (ladder math) — a few cents of drift on long-duration futures
+# doesn't invalidate it. Strict 3¢ was silencing vig_stack_futures entirely.
 MAX_PRICE_MOVE_CENTS = 3
+
+PRICE_MOVE_CENTS_BY_STRATEGY = {
+    "vig_stack_series": 8,    # weather/index ladders — structural edge survives small drift
+    "vig_stack_futures": 8,   # championship ladders — price drifts between scans, but ladder math unchanged
+    "sports_monotonicity_arb": 5,  # riskless by construction — let through reasonable drift
+    "sports_consistency_arb": 5,
+    "market_maker": 2,        # MM places tight both-sides; big move = re-quote, don't chase
+}
 
 # ---------------------------------------------------------------------------
 # State file paths

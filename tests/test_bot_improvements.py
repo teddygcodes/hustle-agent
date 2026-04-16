@@ -145,9 +145,10 @@ def test_econ_scanner_edge_detected_when_nowcast_diverges():
     assert result[0]["relative_edge"] >= 0.15
 
 
-def test_econ_in_active_strategies():
+def test_econ_not_in_active_strategies():
+    """econ_cpi_edge disabled — no resolved data, no proven edge."""
     from bot.config import ACTIVE_STRATEGIES
-    assert "econ_cpi_edge" in ACTIVE_STRATEGIES
+    assert "econ_cpi_edge" not in ACTIVE_STRATEGIES
 
 
 # ---------------------------------------------------------------------------

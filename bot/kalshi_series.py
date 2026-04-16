@@ -51,6 +51,17 @@ SPORTS_SERIES: dict[str, str] = {
     "ncaab": "KXNCAAMBGAME",
 }
 
+# Head-to-head match series (1v1 markets — tennis, UFC, etc.)
+MATCH_SERIES: dict[str, str] = {
+    "atp":            "KXATPMATCH",
+    "atp_challenger": "KXATPCHALLENGERMATCH",
+    "wta":            "KXWTAMATCH",
+    "wta_challenger": "KXWTACHALLENGERMATCH",
+    "ufc":            "KXUFCFIGHT",
+    "ipl":            "KXIPLGAME",
+    "f1":             "KXF1RACE",
+}
+
 # Alias dicts: lowercase abbrev → canonical team name (matches Bovada names)
 _ALIAS_DICTS: dict[str, dict[str, str]] = {
     "nba":   NBA_TEAM_ALIASES,
@@ -1565,6 +1576,14 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
         if not yes_ask or yes_ask <= 0:
             continue
 
+        # Spread filter: skip illiquid markets (wide spread eats edge)
+        yes_bid = market.get("yes_bid", 0)
+        spread = yes_ask - yes_bid if yes_bid else yes_ask
+        if spread > 8:  # 8¢ spread = too wide
+            logger.debug("CRYPTO %s/%s SKIP %s: spread %d¢ > 8¢ cap",
+                         asset_id, timeframe, ticker, spread)
+            continue
+
         # Derive hours_remaining from close_time (works for any timeframe)
         close_time = market.get("close_time") or market.get("expiration_time")
         if not close_time:
@@ -1582,6 +1601,12 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
             continue
 
         scaled_vol = vol * math.sqrt(hours_remaining / 24.0)
+        # Intraday discount: GBM overestimates short-term move probability
+        # because daily vol includes overnight gaps and news-driven jumps that
+        # don't repeat intraday. Discount vol for contracts < 12h remaining.
+        if hours_remaining < 12:
+            intraday_discount = 0.65 + 0.35 * (hours_remaining / 12.0)  # 0.65 at 0h → 1.0 at 12h
+            scaled_vol *= intraday_discount
         if scaled_vol <= 0:
             continue
         log_ratio = math.log(spot / threshold)
@@ -1591,19 +1616,41 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
         edge = fair_value - kalshi_price
         relative_edge = edge / kalshi_price if kalshi_price > 0 else 0.0
 
+        # Confidence boost for near-ATM contracts (model most accurate at 40-60¢)
+        atm_proximity = 1.0 - 2.0 * abs(kalshi_price - 0.50)  # 1.0 at 50¢, 0.0 at edges
+        adj_confidence = confidence
+        if atm_proximity > 0.6:
+            adj_confidence = min(confidence + 0.05, 0.85)
+
         check_ok, _ = _self_check_edge(fair_value, kalshi_price, edge)
         if not check_ok:
             continue
+
+        # --- Filter chain with diagnostic logging for hourly/15-min ---
+        is_intraday = timeframe != "daily"
+
         if kalshi_price <= 0.03 or fair_value <= 0.03:
+            if is_intraday:
+                logger.info("CRYPTO %s/%s DIAG %s: near-zero (fv=%.2f kp=%.2f)",
+                            asset_id, timeframe, ticker, fair_value, kalshi_price)
             continue
         # OTM filter: contracts < 30¢ are too far from spot — model edge evaporates
         if kalshi_price < 0.30:
-            logger.debug(
-                "CRYPTO %s/%s SKIP %s: price %d¢ < 30¢ floor (too far OTM)",
-                asset_id, timeframe, ticker, int(kalshi_price * 100),
-            )
+            if is_intraday:
+                logger.info("CRYPTO %s/%s DIAG %s: OTM floor (kp=%.0f¢)",
+                            asset_id, timeframe, ticker, kalshi_price * 100)
+            else:
+                logger.debug(
+                    "CRYPTO %s/%s SKIP %s: price %d¢ < 30¢ floor (too far OTM)",
+                    asset_id, timeframe, ticker, int(kalshi_price * 100),
+                )
             continue
-        if abs(relative_edge) < MIN_RELATIVE_EDGE:
+        from bot.config import CRYPTO_MIN_EDGE, CRYPTO_MIN_RELATIVE_EDGE
+        if abs(relative_edge) < CRYPTO_MIN_RELATIVE_EDGE:
+            if is_intraday:
+                logger.info("CRYPTO %s/%s DIAG %s: rel_edge %.1f%% < %.0f%% floor (fv=%.2f kp=%.2f)",
+                            asset_id, timeframe, ticker, relative_edge * 100,
+                            CRYPTO_MIN_RELATIVE_EDGE * 100, fair_value, kalshi_price)
             continue
         # Absolute edge cap: >25% means stale pricing, near-expiry, or broken liquidity
         if abs(edge) > 0.25:
@@ -1613,12 +1660,15 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
             )
             continue
         # Edge floor: crypto volatility eats thin edges before execution
-        from bot.config import CRYPTO_MIN_EDGE
         if abs(edge) < CRYPTO_MIN_EDGE:
-            logger.debug(
-                "CRYPTO %s/%s SKIP %s: edge %.1f%% below %.0f%% floor",
-                asset_id, timeframe, ticker, abs(edge) * 100, CRYPTO_MIN_EDGE * 100,
-            )
+            if is_intraday:
+                logger.info("CRYPTO %s/%s DIAG %s: abs_edge %.1f%% < %.0f%% floor",
+                            asset_id, timeframe, ticker, abs(edge) * 100, CRYPTO_MIN_EDGE * 100)
+            else:
+                logger.debug(
+                    "CRYPTO %s/%s SKIP %s: edge %.1f%% below %.0f%% floor",
+                    asset_id, timeframe, ticker, abs(edge) * 100, CRYPTO_MIN_EDGE * 100,
+                )
             continue
 
         opportunities.append({
@@ -1629,7 +1679,7 @@ def _scan_crypto_series(asset_id: str, timeframe: str) -> list[dict]:
             "market": market,
             "edge": round(edge, 4),
             "relative_edge": round(relative_edge, 4),
-            "confidence": confidence,
+            "confidence": adj_confidence,
             "recommended_side": "yes" if edge > 0 else "no",
             "spot": round(spot, 4),
             "threshold": threshold,
