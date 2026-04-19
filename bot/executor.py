@@ -27,7 +27,31 @@ from bot.config import (
     TRAILING_STOP_MIN_HOLD, PAPER_MODE, MAX_PRICE_MOVE_CENTS,
     PRICE_MOVE_CENTS_BY_STRATEGY,
     PAPER_TRADES_FILE, PAPER_STARTING_BALANCE,
+    STRATEGY_BUDGETS,
 )
+
+
+# ---------------------------------------------------------------------------
+# Strategy budget bucketing (Tier 2.1)
+# Maps raw opp_type strings → budget keys in STRATEGY_BUDGETS. Anything not
+# listed here falls into "other" (no budget limit — global MAX_TOTAL_EXPOSURE
+# still applies).
+# ---------------------------------------------------------------------------
+_STRATEGY_BUDGET_BUCKET = {
+    "vig_stack_series":        "vig_stack",
+    "vig_stack_futures":       "vig_stack",
+    "vig_stack_no":            "vig_stack",
+    "live_momentum":           "live_momentum",
+    "sports_monotonicity_arb": "arbs",
+    "sports_consistency_arb":  "arbs",
+}
+
+
+def _budget_bucket(opp_type: str | None) -> str:
+    """Map an opportunity/position type to a STRATEGY_BUDGETS key, or 'other'."""
+    if not opp_type:
+        return "other"
+    return _STRATEGY_BUDGET_BUCKET.get(str(opp_type), "other")
 
 _PAPER_TYPE_MAP = {
     "vig_stack_series": "vig_stack",
@@ -94,8 +118,20 @@ def _check_balance(cost_dollars: float) -> tuple[bool, float, str]:
     return True, balance, "ok"
 
 
-def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> tuple[bool, str]:
-    """Check position limits: no more than 20% on one trade, 50% total exposure."""
+def _check_position_limits(
+    balance: float,
+    cost_dollars: float,
+    ticker: str,
+    opp_type: str | None = None,
+) -> tuple[bool, str]:
+    """Check position limits: per-position cap, dedupe, cooldown, daily loss,
+    per-strategy budget (Tier 2.1), and global exposure.
+
+    Args:
+        opp_type: opportunity["type"] — used to enforce STRATEGY_BUDGETS. Pass
+            None (default) to skip the budget check (e.g. market-maker hedges
+            that close existing risk rather than opening new exposure).
+    """
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
         return False, (
@@ -229,18 +265,63 @@ def _check_position_limits(balance: float, cost_dollars: float, ticker: str) -> 
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
-    # Total exposure limit — only count ACTIVE positions that actually filled
-    # Exclude: ghost resting orders (filled=0), exited positions, resolved positions
-    total_exposure = sum(
-        p.get("cost", 0) for p in positions
+    # Only count ACTIVE positions that actually filled for BOTH the per-strategy
+    # budget check AND the global exposure check.
+    # Exclude: ghost resting orders (filled=0), exited, resolved.
+    active_positions = [
+        p for p in positions
         if isinstance(p, dict)
         and p.get("filled", 0) > 0
         and p.get("status") in ("filled", "partial")
-    )
-    if (total_exposure + cost_dollars) > balance * MAX_TOTAL_EXPOSURE:
+    ]
+
+    # Compare cap fractions against EQUITY, not cash-on-hand.
+    #
+    # `balance` from `_check_balance()` is cash after open-position entry costs
+    # are deducted (paper) / Kalshi available balance (live). Using cash as the
+    # cap base double-counts: `total_exposure + cost > cash × fraction` reduces
+    # to `new_cost > cash × fraction − old_exposure`, which blocks once deployed
+    # capital exceeds cash — that happens immediately on any account > 50% full.
+    #
+    # Equity = cash + already-committed capital = the real total account value
+    # the budget fractions are meant to partition. The `_check_balance` reserve
+    # guard (10% of starting balance) still enforces the liquidity floor, so
+    # we're not over-leveraging past what cash can cover.
+    #
+    # Fixed Apr 16 after the first post-Tier-2.1 restart showed budget rejects
+    # that would have blocked every entry any time vig_stack filled > 60% of
+    # cash — which is most days. Plan's stated goal ("unblock conviction") only
+    # works with equity-based caps.
+    total_exposure = sum(p.get("cost", 0) for p in active_positions)
+    equity = balance + total_exposure
+
+    # ------------------------------------------------------------------
+    # Per-strategy exposure budget (Tier 2.1)
+    # Applied BEFORE the global cap so the rejection reason is specific
+    # ("STRATEGY_BUDGET") instead of the generic total-exposure message.
+    # ------------------------------------------------------------------
+    bucket = _budget_bucket(opp_type)
+    budget_frac = STRATEGY_BUDGETS.get(bucket)
+    if budget_frac is not None:
+        bucket_exposure = sum(
+            p.get("cost", 0) for p in active_positions
+            if _budget_bucket(p.get("type") or p.get("opp_type")) == bucket
+        )
+        bucket_cap = equity * budget_frac
+        if (bucket_exposure + cost_dollars) > bucket_cap:
+            return False, (
+                f"STRATEGY_BUDGET: {bucket} has ${bucket_exposure:.2f} of "
+                f"${bucket_cap:.2f} budget ({budget_frac:.0%} of ${equity:.2f} equity); "
+                f"this ${cost_dollars:.2f} trade would overflow"
+            )
+
+    # ------------------------------------------------------------------
+    # Global total exposure limit (still applies on top of strategy budgets)
+    # ------------------------------------------------------------------
+    if (total_exposure + cost_dollars) > equity * MAX_TOTAL_EXPOSURE:
         return False, (
             f"Total exposure too high: ${total_exposure + cost_dollars:.2f} > "
-            f"{MAX_TOTAL_EXPOSURE:.0%} of ${balance:.2f}"
+            f"{MAX_TOTAL_EXPOSURE:.0%} of ${equity:.2f} equity"
         )
 
     return True, "ok"
@@ -574,7 +655,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     # ------------------------------------------------------------------
     # CHECK 3: Position limits
     # ------------------------------------------------------------------
-    pos_ok, pos_msg = _check_position_limits(balance, total_cost, ticker)
+    pos_ok, pos_msg = _check_position_limits(balance, total_cost, ticker, opp_type=opp_type)
     checks.append({"name": "position_limits", "passed": pos_ok, "detail": pos_msg})
 
     if not pos_ok:

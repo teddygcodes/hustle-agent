@@ -1,8 +1,22 @@
 # Hustle Agent — Glint Trading Bot
 
-An autonomous prediction-market trading system built on top of Kalshi's REST API. It runs a continuous scan→rank→size→execute loop across five independent strategy types, enforces multi-layer position safety, and manages a full paper-trading sandbox before any real money changes hands.
+An autonomous prediction-market trading system built on top of Kalshi's REST API. It runs a continuous scan→rank→size→execute loop across a curated set of active strategies, enforces a multi-layer position safety chain, and manages a full paper-trading sandbox before any real money changes hands.
 
 The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi API client, but **Glint** (`bot/`) is the production system. This document covers the bot in depth.
+
+---
+
+## Current Status (Apr 18, 2026)
+
+- **Mode:** `PAPER_MODE = True` — $500 simulated balance, full pipeline, zero live orders.
+- **Active strategies (`ACTIVE_STRATEGIES`):** `vig_stack_series`, `vig_stack_futures`, `sports_monotonicity_arb`, `sports_consistency_arb`. Plus `live_momentum` via the live-game watcher subsystem.
+- **Paper performance** (from `bot/state/paper_trades.json`, the ground-truth ledger):
+  - `vig_stack_series`: 43 settled, **−$101.08**, 49% WR
+  - `live_momentum`: 16 settled, **+$9.80**, 56% WR
+  - Net: **≈ −$91** across the whole history
+- **Filter F (Apr 18):** `vig_stack` entries are whitelisted to stable families (`KXHIGHMIA`, `KXHIGHAUS`, `KXINX`); volatile families require NO ≥ 0.90. This is the fix for the 22 volatile-family losses.
+- **STRATEGY_BUDGETS (Apr 16):** `vig_stack` 60%, `live_momentum` 20%, `arbs` 20% (fractions of equity). Prevents any one strategy from starving the others.
+- **Disabled (data-driven kills):** weather single-market (17% WR), series_game_edge (26% WR), all crypto (`CRYPTO_ENABLED=False`), economic indicators, parlay edge. See `config.py:ACTIVE_STRATEGIES` for the current truth.
 
 ---
 
@@ -60,7 +74,9 @@ Everything runs in **paper mode by default** — full edge detection, sizing, an
    - Handles Telegram callbacks (GO / SELL / status commands)
    - Runs fill reconciliation, trailing stop checks, and CLV settlement scans as background steps
 
-2. **`_crypto_scan_loop()`** — independent loop running every 5 minutes. Calls `scan_all_crypto_markets()` directly, bypassing the main scanner, so crypto scans don't interfere with sports/weather timing and don't double-count CoinGecko requests.
+2. **`_live_scan_loop()`** — independent loop running every 60s. Discovers live 1v1 matches on Kalshi and auto-spawns per-match `LiveGameWatcher` tasks that poll every 10s. This is where `live_momentum` runs.
+
+3. **`_crypto_scan_loop()`** — disabled. Kept wired up behind `CRYPTO_ENABLED = False`; the crypto log-normal model was killed in the Apr 14 audit.
 
 ### Single Scan Cycle
 
@@ -86,7 +102,9 @@ Each scanner returns a list of opportunity dicts with a common schema:
 
 ## Strategy Types
 
-### 1. Weather (`weather`)
+> **Active vs disabled:** Only the strategies in `ACTIVE_STRATEGIES` actually place trades. As of Apr 18 that's `vig_stack_series`, `vig_stack_futures`, `sports_monotonicity_arb`, `sports_consistency_arb`, plus `live_momentum` via the live-watcher subsystem. Weather single-market, series_game_edge, parlay edge, crypto, and econ are all **disabled** — kept for reference but not called from the main scan cycle. Each section below flags its status. The honest current-money-maker (in aggregate) is `live_momentum`; `vig_stack_series` is net-negative on paper and is being rehabilitated via the Apr 18 Filter F (stable-family whitelist + NO ≥ 0.90 on volatile families).
+
+### 1. Weather (`weather`) — DISABLED
 
 **Signal:** NWS grid-point forecast minus a documented 1.5°F warm bias, compared against Kalshi's implied temperature distribution.
 
@@ -106,7 +124,7 @@ Each scanner returns a list of opportunity dicts with a common schema:
 
 ---
 
-### 2. Series Game Edge (`series_game_edge`, `ipl_game_edge`)
+### 2. Series Game Edge (`series_game_edge`, `ipl_game_edge`) — DISABLED (26% WR)
 
 **Signal:** Sportsbook consensus moneyline vs Kalshi win/loss market for the same game.
 
@@ -123,7 +141,7 @@ Each scanner returns a list of opportunity dicts with a common schema:
 
 ---
 
-### 3. Parlay Edge (`parlay_yes`, `parlay_no`)
+### 3. Parlay Edge (`parlay_yes`, `parlay_no`) — DISABLED
 
 **Signal:** Independent-leg probability product vs Kalshi parlay contract price.
 
@@ -135,20 +153,24 @@ Each scanner returns a list of opportunity dicts with a common schema:
 
 ---
 
-### 4. Vig Stack Series (`vig_stack_series`)
+### 4. Vig Stack (`vig_stack_series`, `vig_stack_futures`) — ACTIVE
 
 **Signal:** Pure structural arbitrage — Kalshi contract ladders routinely over-price the NO side across adjacent strikes.
 
 **Mechanics:**
-- For any series with multiple price thresholds (e.g., "BTC > $65K", "BTC > $66K", "BTC > $67K"), the sum of NO probabilities across exclusive bins must equal 1.0
+- For any series with multiple mutually-exclusive thresholds (e.g., "NYC high < 60°F", "NYC high 60-65°F", "NYC high > 65°F"), the sum of YES probabilities across bins must equal 1.0
 - When the ladder mis-prices and the implied sum exceeds 1.0, the cheapest NO contracts carry positive expected value with no external model needed
 - No weather data, no sportsbook odds, no external API required — this edge is purely computational
+
+**Filter F (Apr 18):** The structural math is right but the *ladders* differ in quality. Stable ladders (Miami highs, Austin highs, S&P INX minus INX) sit on tight distributions where the NO edge converts to wins. Volatile ladders (high-variance weather cities, fast-moving indices) blow out in the tails and turn +EV math into −$100 of realized losses on paper. Filter F whitelists stable families via `VIG_STACK_STABLE_FAMILIES` and requires NO ≥ 0.90 (`VIG_STACK_WEATHER_MIN_PRICE`) on everything else — a narrow, expensive, but higher-hit-rate profile.
+
+**Paper performance (Apr 18):** 43 settled, **−$101.08**, 49% WR. Filter F is expected to drift this positive over the next 48h of new entries; the historical loss pool doesn't retroactively fix.
 
 **This is the most mechanical strategy in the bot** — it doesn't predict outcomes, it exploits pricing inconsistencies in the market structure itself.
 
 ---
 
-### 5. Crypto Price Edge (`btc_price_edge`, `eth_price_edge`, `sol_price_edge`, `xrp_price_edge`, `doge_price_edge`)
+### 5. Crypto Price Edge (`btc_price_edge`, `eth_price_edge`, `sol_price_edge`, `xrp_price_edge`, `doge_price_edge`) — DISABLED (`CRYPTO_ENABLED=False`)
 
 **Signal:** Log-normal price model vs Kalshi intraday/daily price threshold contracts.
 
@@ -164,7 +186,7 @@ Each scanner returns a list of opportunity dicts with a common schema:
 
 ---
 
-### 6. Economic Edge (`econ_cpi_edge`)
+### 6. Economic Edge (`econ_cpi_edge`) — DISABLED
 
 **Signal:** CPI nowcast model vs Kalshi inflation/economic indicator markets.
 
@@ -173,6 +195,22 @@ Each scanner returns a list of opportunity dicts with a common schema:
 - Applies an econometric nowcast model for CPI (currently seeded at 2.43% for the current cycle)
 - Computes probability that the realized number lands above/below each Kalshi threshold
 - Surface to Telegram as opportunities with the same edge/sizing pipeline as other strategies
+
+---
+
+### 7. Live Game Momentum (`live_momentum`) — ACTIVE (via watcher subsystem)
+
+**Signal:** Buy dips on the clear leader of a live 1v1 or head-to-head match (tennis, UFC, NBA, NHL) and ride the trailing stop / take-profit.
+
+**Mechanics:**
+- `_live_scan_loop()` in `bot/main.py` polls every 60s, discovers live matches on Kalshi, auto-spawns a `LiveGameWatcher` task for each match with a clear leader
+- The watcher polls Kalshi every 10s (`LIVE_POLL_INTERVAL`), tracks price history in a deque, recomputes a `GameContext` (momentum, win probability, lead trend, dip quality score) every tick
+- Buys when the leader dips 4–8¢ from its recent high AND the dip quality score passes sport-specific thresholds
+- **Conviction entry:** if there's no dip but game state screams value (wp_edge > 8%, positive momentum, 68–82¢ entry, ≥ Q3 completion), buys a 70%-sized position. NBA/NHL only; MLB and tennis excluded from conviction
+- Exits: take-profit (12¢), trailing stop (6¢ from peak), stop-loss (10¢), near-settle lock (≥93¢), hard-cap ($5 max loss)
+- Per-sport tuning in `SPORT_PROFILES` (`config.py:140-241`)
+
+**Paper performance (Apr 18):** 16 settled, **+$9.80**, 56% WR. The strategy is profitable *once* it can get fills; pre-Apr-16 it was silently starved by vig_stack's 100% exposure pool. `STRATEGY_BUDGETS` (20% equity allocation to `live_momentum`) fixed that.
 
 ---
 
@@ -215,10 +253,20 @@ _COOLDOWN = timedelta(hours=4)
 ```
 
 ### 7. Exposure Limits
+
 ```python
 MAX_POSITION_PERCENT = 0.20   # No single trade > 20% of balance
-MAX_TOTAL_EXPOSURE   = 0.50   # No more than 50% of balance deployed simultaneously
+MAX_TOTAL_EXPOSURE   = 1.00   # Global cap — 100% of balance (Apr 16)
+STRATEGY_BUDGETS = {
+    "vig_stack":     0.60,    # 60% of equity
+    "live_momentum": 0.20,    # 20% of equity
+    "arbs":          0.20,    # 20% of equity
+}
 ```
+
+- `MAX_TOTAL_EXPOSURE` is enforced against `balance + total_exposure` (equity), not just cash.
+- `STRATEGY_BUDGETS` caps each strategy's open exposure independently, so a heavy vig_stack position can't starve live_momentum. Rejections surface as `STRATEGY_BUDGET: vig_stack has $X of $Y budget` in the logs.
+- Both live together: a trade must pass the global cap **and** the per-strategy budget.
 
 ### 8. Math Self-Check
 `math_engine.py` runs every probability and edge calculation forward and backward:
@@ -379,7 +427,10 @@ All tunables live in `bot/config.py`. No scattered constants anywhere else.
 | `MAX_BET_FRACTION` | `0.05` | Hard cap at 5% of balance per trade |
 | `MIN_BET_DOLLARS` | `$1.00` | Don't execute below this cost |
 | `MAX_POSITION_PERCENT` | `0.20` | No single position > 20% of balance |
-| `MAX_TOTAL_EXPOSURE` | `0.50` | No more than 50% deployed at once |
+| `MAX_TOTAL_EXPOSURE` | `1.00` | Global cap — up to 100% of equity deployed (Apr 16) |
+| `STRATEGY_BUDGETS` | `{vig_stack: 0.60, live_momentum: 0.20, arbs: 0.20}` | Per-strategy exposure caps vs equity (Apr 16) |
+| `VIG_STACK_STABLE_FAMILIES` | `{KXHIGHMIA, KXHIGHAUS, KXINX}` | Filter F whitelist — only these vig_stack families trade freely (Apr 18) |
+| `VIG_STACK_WEATHER_MIN_PRICE` | `0.90` | Filter F — volatile vig_stack families require NO ≥ 0.90 (Apr 18) |
 | `CUT_LOSS_THRESHOLD` | `-0.30` | Auto-cut at -30% unrealized P&L |
 | `TAKE_PROFIT_THRESHOLD` | `0.50` | Alert at +50% unrealized P&L |
 | `MAX_PRICE_MOVE_CENTS` | `3` | Abort GO if price moved >3¢ since alert |

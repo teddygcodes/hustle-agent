@@ -25,7 +25,9 @@ from bot.config import (
     MIN_RELATIVE_EDGE, SCAN_INTERVAL_IDLE, SCAN_INTERVAL_PREGAME,
     SCAN_INTERVAL_LIVE, ODDS_SNAPSHOTS_FILE, BOT_STATE_FILE,
     WEATHER_SERIES_TICKERS, INDEX_RANGE_SERIES_TICKERS, ACTIVE_STRATEGIES,
-    SPORTS_FUTURES_TICKERS,
+    SPORTS_FUTURES_TICKERS, VIG_STACK_MIN_NO_ENTRY_PRICE,
+    VIG_STACK_STABLE_FAMILIES, VIG_STACK_WEATHER_MIN_PRICE,
+    VIG_STACK_MAX_RUNGS_PER_LADDER, POSITIONS_FILE,
 )
 from bot.math_engine import _self_check_edge
 from bot.kalshi_series import scan_series_markets
@@ -322,6 +324,91 @@ def _cap_correlated_vig_stack(vig_stack_opps: list[dict]) -> list[dict]:
     return result
 
 
+def _ladder_event_key(ticker: str) -> str:
+    """Collapse a market ticker to its ladder-event identifier.
+
+    KXHIGHDEN-26APR17-B57.5   → KXHIGHDEN-26APR17
+    KXINX-26APR17H1600-B7062  → KXINX-26APR17H1600
+    Tickers with fewer than two hyphen segments are returned unchanged.
+    """
+    parts = (ticker or "").split("-")
+    return "-".join(parts[:2]) if len(parts) >= 2 else (ticker or "")
+
+
+def _cap_ladder_rungs(vig_stack_opps: list[dict]) -> list[dict]:
+    """
+    Enforce VIG_STACK_MAX_RUNGS_PER_LADDER across scans by counting already-
+    open positions on the same ladder-event.
+
+    Motivation (Apr 18, data-driven): on Apr 17 the KXHIGHDEN ladder
+    accumulated 6 rungs across 3 separate scans; the actual Denver high
+    zeroed all 6 simultaneously for −$70.35. The within-scan contract
+    splitter (_cap_correlated_vig_stack) can't see positions already opened
+    on earlier scans, so cross-scan concentration was unbounded.
+
+    Algorithm:
+      1. Read open vig_stack positions from POSITIONS_FILE; count per ladder.
+      2. For each ladder group in the new opps, keep only enough
+         (highest-relative_edge first) to stay at or below the cap.
+      3. Log how many were dropped per ladder.
+    """
+    if not vig_stack_opps:
+        return vig_stack_opps
+
+    cap = VIG_STACK_MAX_RUNGS_PER_LADDER
+    if cap <= 0:
+        return vig_stack_opps
+
+    # Count already-open vig_stack positions per ladder-event.
+    open_by_ladder: dict[str, int] = defaultdict(int)
+    try:
+        import json
+        with open(POSITIONS_FILE) as fh:
+            positions = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        positions = []
+
+    if isinstance(positions, list):
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            if p.get("filled", 0) <= 0:
+                continue
+            if p.get("status") not in ("filled", "partial"):
+                continue
+            ptype = p.get("type") or p.get("opp_type") or ""
+            if "vig_stack" not in ptype:
+                continue
+            open_by_ladder[_ladder_event_key(p.get("ticker", ""))] += 1
+
+    # Group new opps by ladder, sort within each by relative_edge desc so
+    # the best signals survive the cap.
+    by_ladder: dict[str, list[dict]] = defaultdict(list)
+    for opp in vig_stack_opps:
+        by_ladder[_ladder_event_key(opp.get("ticker", ""))].append(opp)
+
+    kept: list[dict] = []
+    dropped_by_ladder: dict[str, int] = {}
+    for ladder, opps in by_ladder.items():
+        opps_sorted = sorted(opps, key=lambda o: o.get("relative_edge", 0), reverse=True)
+        slots = max(0, cap - open_by_ladder.get(ladder, 0))
+        if slots >= len(opps_sorted):
+            kept.extend(opps_sorted)
+        else:
+            kept.extend(opps_sorted[:slots])
+            dropped_by_ladder[ladder] = len(opps_sorted) - slots
+
+    if dropped_by_ladder:
+        total = sum(dropped_by_ladder.values())
+        logger.info(
+            "LADDER_CAP: dropped %d vig_stack opps (cap=%d per ladder-event) — %s",
+            total, cap,
+            ", ".join(f"{k}:{v}" for k, v in sorted(dropped_by_ladder.items())),
+        )
+
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Vig Stack Series Scanner (structural NO edge — no external odds needed)
 # ---------------------------------------------------------------------------
@@ -427,9 +514,11 @@ def scan_vig_stack_series() -> list[dict]:
     _telem: dict[str, dict[str, int]] = {
         "series": {"checked": 0, "surfaced": 0, "low_liquidity": 0, "no_vig": 0,
                    "market_closed": 0, "forecast_in_bucket": 0, "no_price_too_low": 0,
+                   "no_price_below_floor": 0, "non_stable_below_weather_floor": 0,
                    "edge_below_threshold": 0, "self_check_failed": 0},
         "futures": {"checked": 0, "surfaced": 0, "low_liquidity": 0, "no_vig": 0,
                     "market_closed": 0, "forecast_in_bucket": 0, "no_price_too_low": 0,
+                    "no_price_below_floor": 0, "non_stable_below_weather_floor": 0,
                     "edge_below_threshold": 0, "self_check_failed": 0},
     }
 
@@ -572,6 +661,24 @@ def scan_vig_stack_series() -> list[dict]:
                 if no_ask_prob < 0.03:
                     _telem[_sub]["no_price_too_low"] += 1
                     continue
+
+                # Family-aware NO entry price floor (Apr 18 evening, data-driven).
+                # Stable-climate + financial families (MIA/AUS/INX) enter at the
+                # standard 0.70 floor — their forecast-vs-actual distributions
+                # are tight (83% WR below 0.90 in-cohort). Volatile weather
+                # families (DEN/CHI/NY/etc) must meet the stricter 0.90 floor —
+                # sub-0.90 rungs there are 5W/13L (28% WR, -$129.79) while
+                # 0.90+ are 7W/0L. See config.VIG_STACK_STABLE_FAMILIES and
+                # VIG_STACK_WEATHER_MIN_PRICE for full evidence.
+                _fam = ticker.split("-")[0] if ticker else ""
+                if _fam in VIG_STACK_STABLE_FAMILIES:
+                    if no_ask_prob < VIG_STACK_MIN_NO_ENTRY_PRICE:
+                        _telem[_sub]["no_price_below_floor"] += 1
+                        continue
+                else:
+                    if no_ask_prob < VIG_STACK_WEATHER_MIN_PRICE:
+                        _telem[_sub]["non_stable_below_weather_floor"] += 1
+                        continue
 
                 # Vig stack series edge is purely structural (no prediction risk).
                 VIG_STACK_MIN_EDGE = 0.02
@@ -761,6 +868,9 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
             logger.info("VIG_STACK: suppressed %d signal(s) — weather model recommends YES on same ticker", _suppressed)
     # Cap correlated vig stack signals sharing the same series prefix
     vig_stack_opps = _cap_correlated_vig_stack(vig_stack_opps)
+    # Cap per-ladder-event rung count (reads already-open positions;
+    # prevents cross-scan concentration like the Apr 17 DEN 6-rung wipe).
+    vig_stack_opps = _cap_ladder_rungs(vig_stack_opps)
     all_opportunities.extend(vig_stack_opps)
     logger.info("VIG_STACK: found %d structural vig stack opportunities", len(vig_stack_opps))
 

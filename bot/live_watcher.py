@@ -29,10 +29,11 @@ from bot.config import (
     LIVE_PROFIT_TARGET, LIVE_TRAILING_STOP, LIVE_HARD_PROFIT_TARGET,
     LIVE_STOP_LOSS_CENTS,
     MOMENTUM_LEADER_MIN, MOMENTUM_DIP_BUY, MOMENTUM_DIP_MAX,
-    MOMENTUM_PRICE_WINDOW, MOMENTUM_UW_DEPTH_CENTS, MOMENTUM_UW_TICKS,
+    MOMENTUM_PRICE_WINDOW,
     MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN,
     MOMENTUM_SCALE_SMALL_DIP, MOMENTUM_SCALE_MED_DIP, MOMENTUM_SCALE_LARGE_DIP,
     MOMENTUM_DQS_THRESHOLD, MOMENTUM_DQS_TRAIL_STOP,
+    TENNIS_QUALITY_MIN_TICKS, TENNIS_QUALITY_MIN_RANGE,
     SPORT_PROFILES,
     PAPER_MODE,
 )
@@ -324,7 +325,8 @@ class LiveGameWatcher:
         self._started_at = time.time()
         self._peak_values: dict[str, float] = {}   # ticker → highest mark-to-market value
         self._trailing_active: dict[str, bool] = {}  # ticker → trailing stop engaged
-        self._underwater_ticks: dict[str, int] = {}  # ticker → consecutive ticks below entry
+        # NOTE: _underwater_ticks removed Apr 16 with UNDERWATER EXIT branch —
+        # data-killed in Apr 14 audit. HARD STOP-LOSS + DOLLAR STOP cover the risk.
 
         # Momentum mode state
         self._price_history: deque = deque(maxlen=MOMENTUM_PRICE_WINDOW)
@@ -340,6 +342,24 @@ class LiveGameWatcher:
         self._game_ctx: GameContext | None = GameContext(sport=sport or "")
         self._espn_tick_counter: int = 0
         self._last_espn_data: dict = {}
+
+        # Tick-level telemetry — counts each decision point in _tick_momentum.
+        # Written to the session_end journal entry so we can answer "why did
+        # this watcher never bet?" from post-hoc replay. Mirrors the pattern
+        # used in scanner.py (_telem dict + end-of-function report).
+        self._tick_telem: dict = {
+            "ticks": 0,              # total tick executions
+            "no_leader": 0,          # neither side at/above MOMENTUM_LEADER_MIN
+            "dip_too_big": 0,        # dip outside (min, max) window
+            "dqs_fail": 0,           # DQS < MOMENTUM_DQS_THRESHOLD
+            "conviction_checked": 0, # conviction gate evaluated
+            "conviction_eligible": 0,# conviction_ok == True
+            "conviction_near_miss": 0,# wp_edge >=5% but gate failed
+            "instinct_avoid": 0,     # SportInstincts.should_avoid_entry tick
+            "execute_attempt": 0,    # called _auto_bet_momentum
+            "execute_success": 0,    # execute_trade returned success
+            "execute_failed": {},    # keyed by reason string from executor
+        }
 
     # ------------------------------------------------------------------
     # Public interface
@@ -611,6 +631,22 @@ class LiveGameWatcher:
             return SPORT_PROFILES[self.sport]
         return default
 
+    def _variance_quality_ok(self, price_history: deque) -> tuple[bool, str]:
+        """Tier 2.4: lightweight dip-quality gate for sports that skip full DQS.
+
+        Reject "flat" dips where the last N ticks have almost no price movement
+        — that's a set break / changeover / timeout with no information, not
+        a real dip worth buying. Returns (ok, reason).
+        """
+        if len(price_history) < TENNIS_QUALITY_MIN_TICKS:
+            # Benefit of the doubt early in the watch — don't block on thin history
+            return True, "not_enough_history"
+        last_n = list(price_history)[-TENNIS_QUALITY_MIN_TICKS:]
+        price_range = max(last_n) - min(last_n)
+        if price_range < TENNIS_QUALITY_MIN_RANGE:
+            return False, f"flat_{price_range}c_range_over_{TENNIS_QUALITY_MIN_TICKS}ticks"
+        return True, "ok"
+
     def _compute_dqs(
         self, *,
         dip_cents: int,
@@ -745,6 +781,7 @@ class LiveGameWatcher:
         Momentum tick: fetch Kalshi price → track history → buy dips on leader → exit.
         Now trades BOTH sides of the match and supports re-entry after exit.
         """
+        self._tick_telem["ticks"] += 1
         loop = asyncio.get_event_loop()
 
         market = await loop.run_in_executor(None, self._fetch_kalshi_market)
@@ -835,6 +872,10 @@ class LiveGameWatcher:
             opp_is_leader = opp_prob >= MOMENTUM_LEADER_MIN
             opp_recent_high = max(self._opp_price_history) if self._opp_price_history else opp_yes_ask
             opp_dip_cents = opp_recent_high - opp_yes_ask
+
+        # Telemetry: neither side is a leader on this tick (can't enter)
+        if not is_leader and not opp_is_leader:
+            self._tick_telem["no_leader"] += 1
 
         elapsed = int(time.time() - self._started_at)
 
@@ -949,18 +990,30 @@ class LiveGameWatcher:
                     and dip_cents >= min_dip):
                 if dip_cents <= max_dip:
                     if skip_dqs:
-                        # DATA-DRIVEN: Tennis/UFC — skip DQS, pure price action
-                        # Backtested: dip≥8c SL=8c TP=15c → 46% win, +2.39c/trade
-                        buy_ticker = self.ticker
-                        buy_market = market
-                        buy_price = yes_ask
-                        buy_dip = dip_cents
-                        buy_dqs = 1.0  # N/A
-                        dqs_breakdown = {"mode": "price_action", "skip_dqs": True}
-                        buy_reason = (
-                            f"leader at {yes_ask}c, dipped {dip_cents}c from recent {recent_high}c "
-                            f"(SCALP MODE — pure price action)"
-                        )
+                        # Tier 2.4: variance quality gate (tennis) — reject flat
+                        # dips that happen during set breaks/changeovers.
+                        q_ok, q_reason = True, "ok"
+                        if sport_profile.get("variance_quality_gate"):
+                            q_ok, q_reason = self._variance_quality_ok(self._price_history)
+                        if not q_ok:
+                            self._tick_telem["dqs_fail"] += 1
+                            logger.info(
+                                "LiveGameWatcher VARIANCE REJECT: %s dip=%dc price=%dc (%s)",
+                                self.ticker, dip_cents, yes_ask, q_reason,
+                            )
+                        else:
+                            # DATA-DRIVEN: Tennis/UFC — skip DQS, pure price action
+                            # Backtested: dip≥8c SL=8c TP=15c → 46% win, +2.39c/trade
+                            buy_ticker = self.ticker
+                            buy_market = market
+                            buy_price = yes_ask
+                            buy_dip = dip_cents
+                            buy_dqs = 1.0  # N/A
+                            dqs_breakdown = {"mode": "price_action", "skip_dqs": True, "q_reason": q_reason}
+                            buy_reason = (
+                                f"leader at {yes_ask}c, dipped {dip_cents}c from recent {recent_high}c "
+                                f"(SCALP MODE — pure price action)"
+                            )
                     else:
                         # Compute Dip Quality Score with full game intelligence + instincts
                         dqs, dqs_bd = compute_dip_quality(
@@ -991,11 +1044,13 @@ class LiveGameWatcher:
                                 dqs_bd.get("lead_trend"), dqs_bd.get("stage"),
                                 dqs_bd.get("volatility"),
                             )
+                            self._tick_telem["dqs_fail"] += 1
                 else:
                     logger.info(
                         "LiveGameWatcher SKIP: %s dip too large (%dc > %dc max)",
                         self.ticker, dip_cents, max_dip,
                     )
+                    self._tick_telem["dip_too_big"] += 1
 
             # Check opponent side (if primary didn't qualify)
             if (not buy_ticker and opp_market and opp_is_leader
@@ -1004,18 +1059,29 @@ class LiveGameWatcher:
                     and opp_dip_cents >= min_dip):
                 if opp_dip_cents <= max_dip:
                     if skip_dqs:
-                        # Tennis/UFC scalp mode — skip DQS
-                        buy_ticker = self._opponent_ticker
-                        buy_market = opp_market
-                        buy_price = opp_yes_ask
-                        buy_dip = opp_dip_cents
-                        buy_dqs = 1.0
-                        dqs_breakdown = {"mode": "price_action", "skip_dqs": True}
-                        buy_reason = (
-                            f"OPP leader at {opp_yes_ask}c, dipped {opp_dip_cents}c "
-                            f"from recent {opp_recent_high}c "
-                            f"(SCALP MODE — pure price action)"
-                        )
+                        # Tier 2.4: variance quality gate (opponent side).
+                        q_ok, q_reason = True, "ok"
+                        if sport_profile.get("variance_quality_gate"):
+                            q_ok, q_reason = self._variance_quality_ok(self._opp_price_history)
+                        if not q_ok:
+                            self._tick_telem["dqs_fail"] += 1
+                            logger.info(
+                                "LiveGameWatcher VARIANCE REJECT (opp): %s dip=%dc price=%dc (%s)",
+                                self._opponent_ticker, opp_dip_cents, opp_yes_ask, q_reason,
+                            )
+                        else:
+                            # Tennis/UFC scalp mode — skip DQS
+                            buy_ticker = self._opponent_ticker
+                            buy_market = opp_market
+                            buy_price = opp_yes_ask
+                            buy_dip = opp_dip_cents
+                            buy_dqs = 1.0
+                            dqs_breakdown = {"mode": "price_action", "skip_dqs": True, "q_reason": q_reason}
+                            buy_reason = (
+                                f"OPP leader at {opp_yes_ask}c, dipped {opp_dip_cents}c "
+                                f"from recent {opp_recent_high}c "
+                                f"(SCALP MODE — pure price action)"
+                            )
                     else:
                         # Build a temporary opponent GameContext (inverted scores)
                         opp_game_ctx = None
@@ -1057,11 +1123,13 @@ class LiveGameWatcher:
                                 "LiveGameWatcher DQS REJECT OPP: %s dip=%dc DQS=%.2f < %.2f",
                                 self._opponent_ticker, opp_dip_cents, dqs, MOMENTUM_DQS_THRESHOLD,
                             )
+                            self._tick_telem["dqs_fail"] += 1
                 else:
                     logger.info(
                         "LiveGameWatcher SKIP: %s opp dip too large (%dc > %dc max)",
                         self._opponent_ticker, opp_dip_cents, max_dip,
                     )
+                    self._tick_telem["dip_too_big"] += 1
 
         # --- Conviction Entry: "read the game, buy without a dip" ---
         # Sometimes there IS no dip. The team is dominating, the price just
@@ -1089,6 +1157,7 @@ class LiveGameWatcher:
                     and sport_key not in CONVICTION_EXCLUDED_SPORTS
                     and self._game_ctx
                     and len(self._game_ctx._snapshots) >= CONVICTION_MIN_TICKS):
+                self._tick_telem["conviction_checked"] += 1
                 gc = self._game_ctx
                 wp = gc.win_probability
                 kalshi_implied = yes_ask / 100.0
@@ -1097,6 +1166,8 @@ class LiveGameWatcher:
 
                 # Check instincts — don't conviction-buy in garbage/clutch/etc.
                 conv_instincts = SportInstincts.detect(gc, espn_data, self.sport or "")
+                if conv_instincts.should_avoid_entry:
+                    self._tick_telem["instinct_avoid"] += 1
 
                 conviction_ok = (
                     wp_edge >= CONVICTION_MIN_WP_EDGE
@@ -1110,6 +1181,7 @@ class LiveGameWatcher:
                 )
 
                 if conviction_ok:
+                    self._tick_telem["conviction_eligible"] += 1
                     buy_ticker = self.ticker
                     buy_market = market
                     buy_price = yes_ask
@@ -1138,6 +1210,7 @@ class LiveGameWatcher:
                     )
                 elif wp_edge >= 0.05 and gc.momentum > 0:
                     # Close to conviction but not quite — log for tuning
+                    self._tick_telem["conviction_near_miss"] += 1
                     logger.debug(
                         "LiveGameWatcher CONVICTION NEAR-MISS: %s wp=%.0f%% price=%dc "
                         "edge=%.1f%% mom=%.2f trend=%.2f comp=%.0f%%",
@@ -1185,6 +1258,7 @@ class LiveGameWatcher:
                         )
 
         if buy_ticker and buy_market:
+            self._tick_telem["execute_attempt"] += 1  # Tier 1.3
             reentry_tag = f" [RE-ENTRY #{self._entry_count + 1}]" if self._entry_count > 0 else ""
             # Conviction entries use reduced sizing
             conviction_mode = buy_dip == 0 and "conviction" in buy_reason.lower()
@@ -1405,18 +1479,33 @@ class LiveGameWatcher:
         try:
             result = execute_trade(opp, sizing)
         except Exception as e:
+            # Tier 1.4: surface as a failure reason for tuning diagnostics.
+            self._tick_telem["execute_failed"]["EXCEPTION"] = (
+                self._tick_telem["execute_failed"].get("EXCEPTION", 0) + 1
+            )
             logger.error(
                 "LiveGameWatcher execute_trade EXCEPTION for %s: %s",
                 use_ticker, e, exc_info=True,
             )
             return
         if not result["success"]:
+            # Tier 1.4: count and surface the exact rejection reason so we can tell
+            # whether conviction is dying on EXPOSURE_CAP, POSITION_LIMIT, cooldown,
+            # duplicate-entry guard, or something new.
+            reason_key = str(result.get("reason") or "unknown").upper().replace(" ", "_")[:48]
+            self._tick_telem["execute_failed"][reason_key] = (
+                self._tick_telem["execute_failed"].get(reason_key, 0) + 1
+            )
             logger.warning(
-                "LiveGameWatcher MOMENTUM BET BLOCKED: %s — %s",
-                use_ticker, result.get("reason", "unknown"),
+                "LiveGameWatcher MOMENTUM BET BLOCKED: %s — reason=%s mode=%s price=%dc",
+                use_ticker, reason_key,
+                "conviction" if conviction else "dip",
+                price_cents,
             )
             return
 
+        # Tier 1.3: trade executed (paper or live) — count success.
+        self._tick_telem["execute_success"] += 1
         order = result["order_result"]
         gc = self._game_ctx
         entry_record = {
@@ -1672,6 +1761,29 @@ class LiveGameWatcher:
         if abs(relative_edge) >= LIVE_WATCH_EDGE_THRESHOLD and not already:
             await self._auto_bet(market, espn_prob, edge, relative_edge, current_game)
 
+        # Tier 2.2: arb wp_delta diagnostic.
+        # Arb mode has 0 resolved trades — we don't know if 10% LIVE_WATCH_EDGE_THRESHOLD
+        # is ever actually hit. Log every tick's wp_delta so we can compute the
+        # distribution from live_ticks.jsonl after 48h and decide to keep/tune/retire.
+        _log_tick({
+            "mode": "arb",
+            "ticker": self.ticker,
+            "match": f"{away} @ {home}",
+            "sport": self.sport,
+            "price": yes_ask,
+            "bid": market.get("yes_bid", 0) if market else 0,
+            "espn_prob": round(espn_prob, 4),
+            "wp_delta": round(espn_prob - yes_ask / 100.0, 4),  # raw: espn - kalshi
+            "edge": round(edge, 4),
+            "relative_edge": round(relative_edge, 4),
+            "edge_threshold": LIVE_WATCH_EDGE_THRESHOLD,
+            "gate_hit": abs(relative_edge) >= LIVE_WATCH_EDGE_THRESHOLD,
+            "already_bet": already,
+            "bet_side": bet_side,
+            "holding": len(self.bets_placed),
+            "elapsed": elapsed,
+        })
+
         # Build score display from ESPN data
         home_score = score_data.get("home_score", "?")
         away_score = score_data.get("away_score", "?")
@@ -1889,8 +2001,9 @@ class LiveGameWatcher:
         2. NEAR-SETTLEMENT — price >= 93¢ → match is essentially won, lock it in
         2b. TRAILING STOP — price dropped 4¢+ from peak after we entered
         2c. SCORE FLIP — the team we bet on lost the lead (ESPN data)
-        3. UNDERWATER EXIT — 3 ticks at 6¢+ below entry → momentum lost, bail
+        3. UNDERWATER EXIT — REMOVED Apr 16 (data-killed, see config note)
         4. HARD STOP-LOSS — 30¢ drop safety net for price gaps
+        4b. DOLLAR STOP — unrealized loss exceeds MOMENTUM_MAX_LOSS_DOLLARS
 
         Priority order (arb mode additions):
         5. EDGE REVERSAL — edge flipped against us
@@ -1980,18 +2093,33 @@ class LiveGameWatcher:
                     )
 
             # --- 2c. SCORE FLIP + OPPONENT RUN: team lost lead or opponent surging ---
-            # Uses GameContext for smarter exit than just raw score_diff.
+            # Tier 2.3 (Apr 16): tightened — previously fired on raw score_diff
+            # flipping sign, which kills winners when the opponent scores once
+            # in a game we're still momentum-favored to win. Now requires BOTH
+            #   (a) raw score diff flipped (effective_score_diff < 0), AND
+            #   (b) GameContext confirms it's a real flip (momentum < 0 AND
+            #       lead_trend < 0 — i.e. lead is shrinking, not just noisy).
+            # Conservative: strictly exits less often than before, so we only
+            # lose additional upside on false-positive flips (no new downside).
+            # Replay validation skipped: only 2 historical SCORE FLIP exits in
+            # live_journal.json (both MLB, now disabled) — n too small for a
+            # replay, so we ship the tightening and re-evaluate after Tier 1
+            # telemetry produces more data.
             if not should_exit and self.mode == "momentum" and self._game_ctx:
                 gc = self._game_ctx
                 effective_score_diff = score_diff
                 if ticker == self._opponent_ticker:
                     effective_score_diff = -score_diff if score_diff is not None else None
 
-                # Exit if team is now losing
-                if effective_score_diff is not None and effective_score_diff < 0:
+                # Exit if team is now losing AND GameContext confirms real flip
+                flip_confirmed = gc.momentum < 0 and gc.lead_trend < 0
+                if (effective_score_diff is not None
+                        and effective_score_diff < 0
+                        and flip_confirmed):
                     should_exit = True
                     reason = (
-                        f"SCORE FLIP: team now trailing by {abs(effective_score_diff)} "
+                        f"SCORE FLIP: trailing by {abs(effective_score_diff)}, "
+                        f"mom={gc.momentum:+.2f} lead_trend={gc.lead_trend:+.2f} "
                         f"({entry_price}¢ → {current_value}¢, {gain_cents:+d}¢)"
                     )
                 # Exit if opponent is on a scoring run and we're underwater
@@ -2002,25 +2130,10 @@ class LiveGameWatcher:
                         f"({entry_price}¢ → {current_value}¢, {gain_cents:+d}¢)"
                     )
 
-            # --- 3. UNDERWATER EXIT: momentum lost, bail early ---
-            # If price stays below entry for 3 consecutive ticks (~30s)
-            # AND is 6¢+ underwater, the dip isn't bouncing. Cut fast.
-            # Backtested: 6¢/3t beats 8¢/5t by +$6.34/day at $40 bets.
-            if not should_exit:
-                drop_cents = entry_price - current_value
-                uw_count = self._underwater_ticks.get(ticker, 0)
-                if drop_cents >= 3:
-                    uw_count += 1
-                else:
-                    uw_count = 0
-                self._underwater_ticks[ticker] = uw_count
-
-                if uw_count >= MOMENTUM_UW_TICKS and drop_cents >= MOMENTUM_UW_DEPTH_CENTS:
-                    should_exit = True
-                    reason = (
-                        f"UNDERWATER EXIT: {drop_cents}¢ below entry for "
-                        f"{uw_count} ticks ({entry_price}¢ → {current_value}¢)"
-                    )
+            # --- 3. UNDERWATER EXIT (REMOVED Apr 16) ---
+            # Data-killed in Apr 14 audit: every UW exit recovered to TP if held.
+            # HARD STOP-LOSS + DOLLAR STOP below handle runaway losses; no
+            # tick-count "momentum lost" bail. See config.py note.
 
             # --- 4. HARD STOP-LOSS ---
             # Sport-specific: tennis uses 8c (data: caps losses, +3.6% ROI)
@@ -2131,7 +2244,6 @@ class LiveGameWatcher:
                 self.bets_placed.remove(bet)
                 self._peak_values.pop(ticker, None)
                 self._trailing_active.pop(ticker, None)
-                self._underwater_ticks.pop(ticker, None)
                 logger.info(
                     "LiveGameWatcher EXIT: %s %s — %s (pnl=$%.2f, held %ds, peak %dc)",
                     ticker, held_side.upper(), reason, pnl, hold_seconds, prev_peak,
@@ -2336,6 +2448,9 @@ class LiveGameWatcher:
             lines.append("No bets placed.")
 
         # Journal the session end
+        # Tier 1.3: surface tick_telem so RECAP / post-session analysis can answer
+        # "where did the ticks go?" (no_leader / dqs_fail / dip_too_big /
+        # conviction_checked / instinct_avoid / execute_failed breakdown).
         _journal_append({
             "event": "session_end",
             "match": self._match_title or f"{away} @ {home}",
@@ -2347,6 +2462,7 @@ class LiveGameWatcher:
             "exits": len(self.exits),
             "total_pnl": sum((ex.get("pnl") or 0) for ex in self.exits),
             "price_history": list(self._price_history) if self._price_history else [],
+            "tick_telem": dict(self._tick_telem),
         })
 
         return "\n".join(lines)
@@ -2433,17 +2549,36 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
     started = []
     candidates = []
 
+    # Telemetry: count drops by reason so we can diagnose why watchers
+    # don't spawn. Mirrors the `_telem` pattern in scanner.py:427.
+    _telem: dict[str, int] = {
+        "seen": 0, "disabled_sport": 0, "api_error": 0, "no_markets": 0,
+        "bad_event_shape": 0, "low_volume": 0, "not_today": 0,
+        "no_leader": 0, "settled": 0, "unknown_name": 0,
+        "already_watching": 0, "recently_watched": 0,
+        "no_vol_growth_first_seen": 0, "no_vol_growth_idle": 0,
+        "capacity_capped": 0, "spawned": 0,
+    }
+
     # Scan both 1v1 match series (tennis/UFC) AND team sport series (NBA/MLB/NHL)
     all_series = {**MATCH_SERIES, **SPORTS_SERIES}
     for sport, series in all_series.items():
+        # Tier 1.1: skip sports marked disabled in SPORT_PROFILES.
+        # MLB is disabled per Apr 14 audit (13 trades, -$11.85). Spawning
+        # watchers for it wastes ~47% of tick volume on a sport we can't trade.
+        if SPORT_PROFILES.get(sport, {}).get("disabled"):
+            _telem["disabled_sport"] += 1
+            continue
         try:
             result = get_markets(series_ticker=series, status="open", limit=200)
         except Exception as e:
             logger.debug("Live scan error for %s: %s", series, e)
+            _telem["api_error"] += 1
             continue
 
         markets = result.get("markets", [])
         if not markets:
+            _telem["no_markets"] += 1
             continue
 
         # Group markets by event_ticker (each match has 2 sides)
@@ -2454,7 +2589,9 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 events.setdefault(ev, []).append(m)
 
         for event_tk, sides in events.items():
+            _telem["seen"] += 1
             if len(sides) != 2:
+                _telem["bad_event_shape"] += 1
                 continue
 
             side_a, side_b = sides
@@ -2466,11 +2603,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
 
             # Must have real trading activity (live match, not upcoming)
             if total_vol < MIN_VOLUME_LIVE:
+                _telem["low_volume"] += 1
                 continue
 
             # Must be today's match (ticker date = today) — skip pre-fight/upcoming
             leader_ticker_raw = side_a.get("ticker", "")
             if not _is_today_market(leader_ticker_raw):
+                _telem["not_today"] += 1
                 continue
 
             # Determine the leader
@@ -2479,10 +2618,12 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
             elif price_b >= MOMENTUM_LEADER_MIN * 100:
                 leader, leader_price = side_b, price_b
             else:
+                _telem["no_leader"] += 1
                 continue
 
             # Skip settled markets
             if leader_price >= 95:
+                _telem["settled"] += 1
                 continue
 
             title = (leader.get("title") or "").lower()
@@ -2495,6 +2636,7 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 if team_abbrev:
                     player_name = team_abbrev.upper()
             if not player_name or player_name == "?":
+                _telem["unknown_name"] += 1
                 continue
 
             query_key = _normalize(player_name)
@@ -2508,11 +2650,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     already_watching = True
                     break
             if already_watching:
+                _telem["already_watching"] += 1
                 continue
             # Also skip if this event_ticker was already watched (prevents
             # scanner from restarting a watcher that just finished)
             ev_ticker = leader.get("event_ticker", "")
             if ev_ticker and ev_ticker in _recently_watched:
+                _telem["recently_watched"] += 1
                 continue
 
 
@@ -2558,6 +2702,7 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 "Live scan: %s first seen (vol=%d) — will check growth next cycle",
                 c["player_name"], current_vol,
             )
+            _telem["no_vol_growth_first_seen"] += 1
             continue
 
         vol_growth = current_vol - prev_vol
@@ -2567,6 +2712,7 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 "Live scan: %s idle (vol growth=%d in 2min) — skipping",
                 c["player_name"], vol_growth,
             )
+            _telem["no_vol_growth_idle"] += 1
             continue
 
         logger.info(
@@ -2575,6 +2721,9 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
         )
         active_candidates.append(c)
 
+    # Capacity is capped at `slots`; the remainder are eligible but dropped this tick
+    if len(active_candidates) > slots:
+        _telem["capacity_capped"] += len(active_candidates) - slots
     for c in active_candidates[:slots]:
         logger.info(
             "Live scan FOUND: %s at %d%% in %s (%s) vol=%d — starting momentum watcher",
@@ -2603,8 +2752,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
         # Store event_ticker so crash handler can remove from _recently_watched
         watcher._match_event_ticker = c.get("event_ticker", "")
         started.append((c["query"], watcher))
+        _telem["spawned"] += 1
 
     if not candidates:
         logger.debug("Live scan: no live matches with clear leaders found")
+
+    # Emit telemetry line — one per scan — so we can see in logs WHY
+    # watchers don't spawn when they should. Suppress zeros to keep the
+    # log line compact.
+    _drops = {k: v for k, v in _telem.items() if k not in ("seen", "spawned") and v > 0}
+    logger.info(
+        "LIVE_SCAN_TELEMETRY: seen=%d spawned=%d capacity=%d drops=%s",
+        _telem["seen"], _telem["spawned"], slots, _drops or "none",
+    )
 
     return started

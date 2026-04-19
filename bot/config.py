@@ -77,9 +77,11 @@ MOMENTUM_DIP_BUY         = 0.04  # buy when leader dips 4+ cents from recent hig
 MOMENTUM_DIP_MAX         = 0.08  # SKIP dips > 8¢ — those are set changes (0% win rate)
                                  # Data: dips ≤8¢ = 75% win rate; dips 11+¢ = 0% win rate
 MOMENTUM_PRICE_WINDOW    = 12    # track last N ticks for recent high (~2 min at 10s)
-MOMENTUM_UW_DEPTH_CENTS  = 99    # DISABLED — underwater exit killed profits on 100% of trades
-                                 # Data: every UW exit recovered to TP. SL handles risk.
-MOMENTUM_UW_TICKS        = 999   # DISABLED — set impossibly high so it never triggers
+# UNDERWATER EXIT removed Apr 16 — data-killed in Apr 14 audit (every UW exit
+# recovered to TP). Constants MOMENTUM_UW_DEPTH_CENTS / MOMENTUM_UW_TICKS and
+# the branch in _check_exit deleted. HARD STOP-LOSS + DOLLAR STOP still guard
+# against runaway losses. If future data argues for revival, re-add behind
+# new constants with the evidence that justified it.
 MOMENTUM_MAX_ENTRIES     = 3     # max entries per match (re-entry after exit allowed)
 MOMENTUM_REENTRY_COOLDOWN = 5    # ticks (~50s) cooldown after exit before re-entry
 MOMENTUM_SCALE_SMALL_DIP = 1.0   # 1x on min-threshold dips — they qualify but aren't special
@@ -134,6 +136,14 @@ CONVICTION_EXCLUDED_SPORTS   = ["mlb", "tennis", "ufc"]  # DATA: MLB 12% hit rat
 MOMENTUM_DQS_THRESHOLD   = 0.40  # minimum dip quality score to buy (0-1 scale) — lowered from 0.45
 MOMENTUM_DQS_TRAIL_STOP  = 6     # trailing stop: 6¢ from peak — DATA v4: only positive trail value (+0.28c/trade)
                                  # 4c too tight (noise), 8c too wide (gives back gains)
+
+# Tier 2.4 (Apr 16): lightweight quality gate for sports that skip the full DQS
+# (tennis). Rejects "flat" dips where the last 6 ticks have <2c total range —
+# that's effectively a set break / changeover with no information content.
+# Applied in _tick_momentum when sport_profile.get("variance_quality_gate") is True.
+# If data shows this hurts UFC/other 1v1 sports, flip the per-sport flag.
+TENNIS_QUALITY_MIN_TICKS = 6     # need this many ticks to evaluate variance
+TENNIS_QUALITY_MIN_RANGE = 2     # cents — <2c range over lookback = flat/noise
 
 # Sport-specific tuning — different scoring dynamics need different thresholds
 # format: {min_dip_cents, max_dip_cents, max_entry_price, score_diff_weight}
@@ -212,6 +222,9 @@ SPORT_PROFILES = {
         #   ≥70c: 4 trades, -$6.83 (KOT -4.96, FIC -0.08, VIR +4.56, DUC +5.25)
         # At 70c+: 50% WR, trail stop locks in gains.
         # LEADER_MIN=70c now enforces this. skip_dqs=True for speed.
+        # Tier 2.4 (Apr 16): added variance quality gate — reject "flat" dips
+        # during set breaks / changeovers (pure noise, no info content).
+        # See TENNIS_QUALITY_* constants below.
         "min_dip": 5,
         "max_dip": 20,
         "max_entry": 88,
@@ -221,6 +234,7 @@ SPORT_PROFILES = {
         "take_profit": 10,
         "stop_loss": 10,     # TIGHTENED: 12 → 10. KOT dropped 16c through 12c SL.
         "skip_dqs": True,
+        "variance_quality_gate": True,  # Tier 2.4 — lightweight replacement for full DQS
         "max_contracts": 20,
     },
     "ufc": {
@@ -307,6 +321,108 @@ TAKE_PROFIT_THRESHOLD = 0.50   # +50% unrealized → alert to take profit
 CUT_LOSS_THRESHOLD = -0.30     # -30% unrealized → alert to cut loss
 TRAILING_STOP_DEFAULT = 0.20   # 20% trailing stop default
 TRAILING_STOP_MIN_HOLD = 300   # 5 min minimum hold before stop activates
+
+# Per-strategy exposure budgets (Tier 2.1, Apr 16 plan).
+# Fractions of balance reserved per strategy family so vig_stack fills cannot
+# soak 100% and starve live_momentum's conviction path. The global
+# MAX_TOTAL_EXPOSURE still applies (budgets sum to 1.0 and act as a lower cap,
+# not a replacement). Enforced in executor._check_position_limits — rejection
+# reason string: "STRATEGY_BUDGET".
+#
+# Keying is by positions' `opp_type` / `type` field. Unknown types fall into
+# "other" (no budget limit — global cap still applies).
+#
+# Evidence: vig_stack currently holds $200/$234 (85% of balance), so
+# conviction entries fail on the global cap. Reserving 20% for live_momentum
+# gives that path ~$100 of $500 headroom at all times.
+STRATEGY_BUDGETS: dict[str, float] = {
+    "vig_stack": 0.60,        # matches vig_stack_series + vig_stack_futures
+    "live_momentum": 0.20,    # live_watcher momentum/conviction entries
+    "arbs": 0.20,             # monotonicity + consistency arbs
+}
+
+# Vig stack NO entry price floor (Apr 18, data-driven).
+# Across 24 resolved vig_stack trades (paper, current + archive), entries below
+# 0.70 are a net disaster: 6 trades, 2W/4L (33% WR), net −$37.60 — including
+# the Apr 15 NYC blowup (−$24.91) and three other −$10+ exits. Entries at 0.70+
+# were 18 trades, 15W/3L (83% WR), net +$10.01.
+#
+# Theory: vig_stack's edge is structural — it comes from the ladder's total vig
+# being a large fraction of each rung's price. At NO = 0.95, a 10% ladder vig
+# is a meaningful fraction. At NO = 0.65, 10% is a small fraction and the
+# market's 35% YES estimate is well-calibrated noise, not vig-induced mispricing.
+# Middle-price NOs have the weakest structural edge.
+#
+# Revisit: after 20 additional resolved vig_stack trades OR if the 0.80-0.89
+# bucket (currently 6W/3L, net −$8.39) starts bleeding further.
+#
+# Apr 18 update: this floor remains the baseline but is now family-aware.
+# Stable families (VIG_STACK_STABLE_FAMILIES below) enter at this 0.70 floor;
+# volatile weather families must meet the stricter VIG_STACK_WEATHER_MIN_PRICE.
+VIG_STACK_MIN_NO_ENTRY_PRICE = 0.70
+
+# Vig stack stable-family whitelist (Apr 18 evening, data-driven).
+# Full-day data dive on 33 post-paper-fill-bug resolved vig_stack trades
+# (Apr 15-18) showed ladder family dominates success far more than entry
+# price alone:
+#
+#   stable (MIA, AUS, INX):  n=12, 10W/2L (83% WR), net +$20.31
+#   volatile (DEN, CHI, NY): n=21,  8W/13L (38% WR), net −$126.63
+#
+# Ladder-family × date grid proved the signal is NOT date-confounded: MIA
+# won on all 3 days it traded, while DEN lost on 2 of 3. Physical reality:
+# subtropical (MIA) + semi-arid-but-forecastable (AUS) climates have tight
+# forecast-vs-actual distributions. Spring continental cities (DEN/CHI/NY)
+# do not — a single variable-weather day zeroes every outer rung on the
+# ladder simultaneously (see KXHIGHDEN Apr 17, −$59.15 in one day).
+# Financial indices (INX/S&P) have structurally predictable intraday bands
+# from the morning open, independent of weather physics.
+#
+# Trades on families in this set pass the VIG_STACK_MIN_NO_ENTRY_PRICE (0.70)
+# floor. Trades on other families must meet VIG_STACK_WEATHER_MIN_PRICE (0.90).
+#
+# Revisit: after 20+ more resolved trades, or if any whitelisted family
+# posts a single-day loss > $15.
+VIG_STACK_STABLE_FAMILIES = {"KXHIGHMIA", "KXHIGHAUS", "KXINX"}
+
+# Vig stack volatile-family price floor (Apr 18 evening, data-driven).
+# Separate, higher floor for non-stable weather ladders. Same 33-trade post-fix
+# window, split three ways:
+#
+#   entry >= 0.90 (any family):     7W/0L  (100% WR), +$6.71
+#   entry <  0.90, stable family:   6W/2L  (75%  WR), +$16.76
+#   entry <  0.90, volatile family: 5W/13L (28%  WR), −$129.79
+#
+# Structural risk/reward at entry 0.85 NO (bet 85¢ to make 15¢) demands true
+# WR of 85%+ to break even. Volatile-family weather ladders clock 28% in
+# this price band — math is hopeless. At 0.90+ the demanded WR drops to
+# 90%, and the 7/7 observation + NWS 2°F-MAE priors make that attainable.
+#
+# Applied together with VIG_STACK_STABLE_FAMILIES: stable uses 0.70 floor,
+# everything else uses this 0.90 floor. Retroactively applied to the 33-
+# trade window: kept 15 (13W/2L, 87% WR, +$23.47), blocked 18 (5W/13L,
+# -$129.79). A $130 P&L swing on the same markets.
+#
+# Revisit: if 0.90+ non-stable cohort drops below 92% WR on n=15+ future
+# trades, or if any stable family posts a 90+ WR loss > $10 cluster.
+VIG_STACK_WEATHER_MIN_PRICE = 0.90
+
+# Vig stack per-ladder rung concentration cap (Apr 18, data-driven).
+# On Apr 17, the KXHIGHDEN ladder accumulated 6 rungs across 3 separate scan
+# cycles (13-17 contracts each). The actual Denver high landed in a range
+# that zeroed all 6 rungs simultaneously: net −$70.35 from one correlated
+# event. The existing _cap_correlated_vig_stack() only splits contracts
+# within a single scan, so cross-scan accumulation is unbounded.
+#
+# Cap: the count of OPEN vig_stack positions on a single ladder-event
+# (series_ticker + event_key, e.g. KXHIGHDEN-26APR17) plus newly surfaced
+# opportunities must not exceed this value. When capped, the highest-
+# relative-edge new opps are kept.
+#
+# Chosen at 3 rungs: the Apr 15 NY ladder (5 rungs, 5/5 wins) and the Apr 15
+# MIA ladder (3 rungs, 3/3 wins) shipped inside a 3-rung cap; the Apr 17 DEN
+# 6-rung wipe would not have. Halves worst-case single-event loss.
+VIG_STACK_MAX_RUNGS_PER_LADDER = 3
 
 # ---------------------------------------------------------------------------
 # DraftKings Sportsbook API (primary odds source — no auth needed)

@@ -105,19 +105,21 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:462`. **Only these f
 
 ### ACTIVE
 
-| Strategy | Location | Description | Real Perf |
+**Performance numbers below are post–Apr 18 audit**, rebuilt from `paper_trades.json` (PAPER_MODE=True) as ground truth. Seeded historical values in `strategy_audit.json` were inaccurate and have been replaced; `_log_settlements_to_audit` is now idempotent so the numbers stay honest going forward.
+
+| Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. **Best strategy — 79% WR (159/201).** Structural arb, no prediction needed. | 5W/1L real (Apr 15: NYC lost $24.91, all 5 Apr-15 weather bets won +$13.25 total) |
-| `vig_stack_futures` | `kalshi_series.py` | Same math applied to championship futures: NBA (17% vig), NHL (22% vig), MLB (6% vig). Untested with real fills. | 0 settled |
-| `sports_monotonicity_arb` | `scanner_sports_arb.py` | Riskless arb: spread/total threshold contracts must be monotonic (P(team wins by >5) ≤ P(team wins by >0)). Violations = free money. | 0 real fills yet |
-| `sports_consistency_arb` | `scanner_sports_arb.py` | Riskless arb: P(championship) ≤ P(individual series win). When championship > series, one side is mispriced. | 0 real fills yet |
+| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F (Apr 18) restricts entries to stable families `KXHIGHMIA / KXHIGHAUS / KXINX`; volatile families require NO ≥ 0.90. | 43 settled, **−$101.08**, 21W/22L (49%) |
+| `vig_stack_futures` | `kalshi_series.py` | Same math on championship futures: NBA (17% vig), NHL (22% vig), MLB (6% vig). Gated by Filter F same as series. | 0 settled |
+| `sports_monotonicity_arb` | `scanner_sports_arb.py` | Riskless arb: spread/total threshold contracts must be monotonic. Violations = free money. | 0 real fills yet |
+| `sports_consistency_arb` | `scanner_sports_arb.py` | Riskless arb: P(championship) ≤ P(individual series win). | 0 real fills yet |
 
 ### ACTIVE via live_watcher (separate from `ACTIVE_STRATEGIES`)
 
-| Strategy | Location | Description | Real Perf |
+| Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (tennis, UFC). Exit on trailing stop or take-profit. Auto-scans every 60s. | 40% WR (2W/3L), -$5.40 — thin but data-poor |
-| `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Added Apr 15, 0 real fills yet |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (tennis, UFC). Exit on trailing stop or take-profit. Auto-scans every 60s. Gets 20% of equity as its `STRATEGY_BUDGETS` allocation — no longer starved by vig_stack fills. | 16 settled, **+$9.80**, 9W/7L (56%) |
+| `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
 
@@ -347,7 +349,13 @@ If the bot crashed between placing an order and writing to `positions.json`, the
 `recheck_open_edges` can auto-exit when live edge drops below entry edge. Vig stack positions are exempt (`opp_type in ("vig_stack_no", "vig_stack_series")`) because the edge is structural — individual contract prices moving doesn't invalidate the ladder math; only a collapse of the entire ladder's vig would.
 
 ### 10. NO at 90-95¢ risk/reward
-Vig_stack's cheap NOs are often in the 89-95¢ range. That's 8:1 to 19:1 risk/reward against you. Even at 83% real WR, the math is marginal — one bad settlement erases many wins. Currently shows +$12.25 on 5/6 settled. Monitor closely; if the 1 remaining Apr-15 loss pattern recurs, the strategy may need tightening.
+Vig_stack's cheap NOs are often in the 89-95¢ range. That's 8:1 to 19:1 risk/reward against you. Even at ~50% real WR on volatile ladders, the math collapsed — 43 trades net −$101 on paper. **Filter F (Apr 18)** is the answer: whitelist stable families (`VIG_STACK_STABLE_FAMILIES = {"KXHIGHMIA","KXHIGHAUS","KXINX"}`), and require NO ≥ 0.90 (`VIG_STACK_WEATHER_MIN_PRICE`) on anything else. Do not weaken these without 48h of post-filter data.
+
+### 11. `STRATEGY_BUDGETS` (Apr 16) — per-strategy exposure caps
+`config.py:STRATEGY_BUDGETS = {"vig_stack": 0.60, "live_momentum": 0.20, "arbs": 0.20}`. Enforced in `executor._check_position_limits` against **equity** (`balance + total_exposure`), not just cash. Pre-Apr-16, a single 100% pool let vig_stack starve conviction trades indefinitely. Rejections surface as `STRATEGY_BUDGET: <strategy> has $X of $Y budget` in logs. Don't remove — live_momentum can't fire without it.
+
+### 12. Settlement log idempotency (Apr 18)
+`tracker._log_settlements_to_audit` is now idempotent on `(ticker, strategy, result, pnl, contracts)`. Pre-fix, re-running `resolve_trades` on already-settled positions double-counted — one ticker had 14 duplicate entries. If you touch that function, keep the dedup check in or the strategy totals will drift again.
 
 ---
 
@@ -369,14 +377,25 @@ Don't change these without data. If you do change one, update the comment with t
 
 ## Money (The Honest Numbers)
 
-**Real settled P&L** (from `trade_history.json` + `strategy_audit.settlement_log`):
-- vig_stack_series: 5W / 1L on weather ladders → one NYC loss (-$24.91, exited at $0), five Apr-15 wins (+$13.25 total). Net: **-$11.66** across 6 resolutions.
-- live_momentum: 2W / 3L → **-$5.40** across 5 resolutions.
-- Everything else: 0 real fills.
+**Ground truth source:** `paper_trades.json` (PAPER_MODE = True). Every entry with `status ∈ {won, lost, exited_early}` is a real resolution. `trade_history.json` has 0 resolved real-money entries — nothing has settled in live mode yet.
 
-**Grand total real P&L: approximately -$17 across the entire history.** Every other number you might see in UI or paper stats before Apr 15 includes ghost fills and is not real. The post-fix data is what counts.
+**Post-rebuild numbers (Apr 18, after the seeded-values cleanup):**
 
-**Open exposure** as of last check: 7 Apr-16 weather NO bets (~$90 cost). These settle today (Apr 16). If they win proportionally like the Apr-15 batch, another ~$10-15 in realized P&L. If they all lose, -$90.
+| Strategy | Settled | P&L | W / L | WR |
+|---|---|---|---|---|
+| `vig_stack_series` | 43 | **−$101.08** | 21 / 22 | 49% |
+| `live_momentum` | 16 | **+$9.80** | 9 / 7 | 56% |
+| Everything else | 0 | $0 | — | — |
+
+**Grand total paper P&L: ≈ −$91.** The older docs that quoted −$17 were based on seeded `strategies.real_*` values that never reconciled with `paper_trades.json`. Those were wiped and rebuilt on Apr 18; don't trust any pre-Apr-18 summary.
+
+**Why vig_stack is negative:** 22 of 43 settled trades closed at a loss, most via early-exit on volatile ladders (hot-weather cities outside MIA/AUS, S&P minus INX). The Apr 18 **Filter F** (volatile-family gate at NO ≥ 0.90) is designed to stop new entries of this type. Going forward we expect `real_pnl` to drift positive on new vig_stack trades. If it doesn't over the next 48h, Filter F isn't tight enough.
+
+**Why live_momentum is positive:** the 9W/7L / +$9.80 result came with NO per-strategy budget cap — conviction trades were silently starved by vig_stack's 100% exposure pool. `STRATEGY_BUDGETS` (live_momentum: 20% of equity) was wired in Apr 16 to fix that.
+
+**Open exposure** (from positions.json, check at session start): currently 8 vig_stack positions, ~$98 exposure. All are Filter-F-compliant families (MIA/AUS/INX) — i.e., everything left in the book is the profile we *want* to hold.
+
+**Settlement idempotency (Apr 18):** `_log_settlements_to_audit` in `tracker.py` had a bug — every call appended to `settlement_log` without dedup, so `resolve_trades` re-runs on already-settled positions double-counted. One ticker had 14 duplicate entries. Fixed with a `(ticker, strategy, result, pnl, contracts)` fingerprint check; the strategy totals also skip on dup so rollups stay clean.
 
 ---
 

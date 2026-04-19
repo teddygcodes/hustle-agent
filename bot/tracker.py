@@ -363,7 +363,14 @@ def resolve_trades() -> list[dict]:
 
 
 def _log_settlements_to_audit(resolved: list[dict]):
-    """Append each settlement to strategy_audit.json for ongoing tracking."""
+    """Append each settlement to strategy_audit.json for ongoing tracking.
+
+    Idempotent: if a settlement with the same (ticker, strategy, result, pnl,
+    contracts) already exists in settlement_log, it is skipped. This fixes an
+    Apr 18 bug where re-running resolve_trades on already-settled positions
+    (or a position settling twice via paper+live paths) double-counted. One
+    ticker had 14 duplicate entries before cleanup.
+    """
     audit_path = BOT_STATE_DIR / "strategy_audit.json"
     if not audit_path.exists():
         return
@@ -374,6 +381,15 @@ def _log_settlements_to_audit(resolved: list[dict]):
     if "settlement_log" not in audit:
         audit["settlement_log"] = []
 
+    # Build a set of existing settlement fingerprints once; O(1) lookup below.
+    existing_keys = {
+        (e.get("ticker"), e.get("strategy"), e.get("result"),
+         e.get("pnl"), e.get("contracts"))
+        for e in audit["settlement_log"]
+    }
+
+    appended = 0
+    skipped_dup = 0
     for r in resolved:
         opp_type = r.get("opp_type", "unknown")
         pnl = r.get("pnl", 0)
@@ -383,6 +399,15 @@ def _log_settlements_to_audit(resolved: list[dict]):
         # Skip ghost trades (filled=0)
         if filled <= 0:
             continue
+
+        # Idempotency: skip if this exact settlement is already logged.
+        # Key is (ticker, strategy, result, pnl, contracts) — pnl and contracts
+        # are integer-cents-rounded floats/ints so equality is stable.
+        dedup_key = (r.get("ticker", ""), opp_type, r.get("result", ""), pnl, filled)
+        if dedup_key in existing_keys:
+            skipped_dup += 1
+            continue
+        existing_keys.add(dedup_key)
 
         # Append to flat log
         audit["settlement_log"].append({
@@ -394,8 +419,9 @@ def _log_settlements_to_audit(resolved: list[dict]):
             "sport": r.get("sport", ""),
             "resolved_at": r.get("resolved_at", datetime.now(timezone.utc).isoformat()),
         })
+        appended += 1
 
-        # Update strategy totals
+        # Update strategy totals (also gated by dedup so rollups stay clean)
         if opp_type in strategies:
             s = strategies[opp_type]
             s["real_trades"] = s.get("real_trades", 0) + 1
@@ -412,7 +438,13 @@ def _log_settlements_to_audit(resolved: list[dict]):
 
     audit["_meta"]["last_updated"] = datetime.now(timezone.utc).isoformat()
     audit_path.write_text(json.dumps(audit, indent=2))
-    logger.info("Strategy audit updated: %d settlements logged", len(resolved))
+    if skipped_dup:
+        logger.info(
+            "Strategy audit updated: %d settlements logged (%d duplicate skipped)",
+            appended, skipped_dup,
+        )
+    else:
+        logger.info("Strategy audit updated: %d settlements logged", appended)
 
 
 # ---------------------------------------------------------------------------
