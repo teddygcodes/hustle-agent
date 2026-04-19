@@ -14,7 +14,7 @@ Glint is an autonomous prediction-market trading bot that runs 24/7 against **Ka
 
 **Starting capital:** $500 simulated (`PAPER_STARTING_BALANCE` in `config.py`). Real Kalshi account runs in parallel when `PAPER_MODE = False`.
 
-**Current mode:** `PAPER_MODE = True` (see `bot/config.py:453`). Paper and live share the full pipeline — only `execute_trade()` branches on this flag.
+**Current mode:** `PAPER_MODE = True` (see `bot/config.py:569`). Paper and live share the full pipeline — only `execute_trade()` branches on this flag.
 
 **Top-level loop (from `GlintBot`):**
 1. Scan for opportunities (every 2min live, 10min pregame, 30min idle)
@@ -36,23 +36,23 @@ Concurrent with that main loop:
 hustle-agent/
 ├── bot/                    ← GLINT. This is the product.
 │   ├── main.py             ← GlintBot orchestrator, Telegram commands, main loop (1326 lines)
-│   ├── config.py           ← Every threshold, tuning constant, API path (501 lines)
-│   ├── executor.py         ← Trade execution + 5-layer safety chain (1201 lines)
-│   ├── live_watcher.py     ← Per-game 10s-tick watcher, momentum/arb strategies (2610 lines)
-│   ├── scanner.py          ← Main scan_cycle(), opportunity aggregation (905 lines)
+│   ├── config.py           ← Every threshold, tuning constant, API path (630 lines)
+│   ├── executor.py         ← Trade execution + 5-layer safety chain (1285 lines)
+│   ├── live_watcher.py     ← Per-game 10s-tick watcher, momentum/arb strategies (2769 lines)
+│   ├── scanner.py          ← Main scan_cycle(), opportunity aggregation (1035 lines)
 │   ├── scanner_sports.py   ← Sports parlay + live game scanners (594 lines)
-│   ├── scanner_sports_arb.py ← Monotonicity + consistency riskless arb (539 lines)
+│   ├── scanner_sports_arb.py ← Monotonicity + consistency riskless arb (544 lines)
 │   ├── scanner_weather.py  ← NWS bias-corrected weather markets (341 lines)
 │   ├── kalshi_series.py    ← Series ticker scanner — THE STAR: vig_stack_series (1774 lines)
 │   ├── math_engine.py      ← All edge math + self-checking (forward & backward) (786 lines)
 │   ├── odds_scraper.py     ← DK/Bovada/FanDuel/ESPN/TheRundown aggregator (1372 lines)
-│   ├── tracker.py          ← Position tracking, P&L, settlement resolver (676 lines)
+│   ├── tracker.py          ← Position tracking, P&L, settlement resolver (762 lines)
 │   ├── notifier.py         ← Telegram send/edit, button callbacks, command registry (950 lines)
 │   ├── game_context.py     ← Live game intelligence: momentum, wp, DQS, instincts (884 lines)
 │   ├── sizing.py           ← Fractional Kelly with hard caps (115 lines)
 │   ├── patterns.py         ← Historical win rate analysis per strategy type (452 lines)
 │   ├── position_monitor.py ← Edge-recheck loop for open positions (464 lines)
-│   ├── market_maker.py     ← Spread-capture MM pairs (394 lines)
+│   ├── market_maker.py     ← Spread-capture MM pairs (409 lines)
 │   ├── clv.py              ← Closing-line value tracking (310 lines)
 │   ├── elo.py              ← ELO ratings (295 lines, lightly used)
 │   ├── injuries.py         ← Injury + back-to-back data (415 lines)
@@ -101,7 +101,7 @@ hustle-agent/
 
 ## The Strategies
 
-Active strategies live in `ACTIVE_STRATEGIES` in `config.py:462`. **Only these fire trades.** Everything else is disabled with commented-out reasons (data-driven kill decisions from the Apr 14 audit).
+Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these fire trades.** Everything else is disabled with commented-out reasons (data-driven kill decisions from the Apr 14 audit).
 
 ### ACTIVE
 
@@ -123,7 +123,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:462`. **Only these f
 
 ### DISABLED (data-driven kills)
 
-All disabled strategies have `# Disabled: reason` comments in `config.py:468-475`. Briefly:
+All disabled strategies have `# Disabled: reason` comments directly below the `ACTIVE_STRATEGIES` list in `config.py` (around lines 585-605). Briefly:
 
 - `series_game_edge` — 26% WR, sportsbook odds are efficient
 - `weather` (single-market) — 17% WR, NWS bias model too imprecise for individual strikes (**note:** vig_stack applied to the same weather ladders works — that's different math)
@@ -136,7 +136,7 @@ All disabled strategies have `# Disabled: reason` comments in `config.py:468-475
 
 ## The Safety Architecture
 
-Every trade passes through `execute_trade()` in `bot/executor.py:367`. The chain:
+Every trade passes through `execute_trade()` in `bot/executor.py:451`. The chain:
 
 1. **`verify_contract_direction()`** — MANDATORY. Parses the ticker + title, computes fair value, confirms the "recommended_side" is actually the side with edge. Catches backwards bets (buying NO when YES has the edge). Never bypass this.
 2. **`_check_balance()`** — Paper mode reconstructs balance from `paper_trades.json`; live mode calls Kalshi. Enforces `PAPER_STARTING_BALANCE * 0.10` reserve floor.
@@ -146,7 +146,8 @@ Every trade passes through `execute_trade()` in `bot/executor.py:367`. The chain
    - No opposite-side bet in same game (`GAME` ticker dedupe)
    - 4-hour cooldown after any exit/resolve on that ticker
    - Daily loss limit of $1.00/ticker (`_DAILY_TICKER_LOSS_LIMIT`)
-   - **Total exposure ≤ `MAX_TOTAL_EXPOSURE` of balance (currently 100%)**, counting only `filled > 0` AND `status in ('filled', 'partial')` — NOT ghost resting orders, NOT exited positions
+   - **Total exposure ≤ `MAX_TOTAL_EXPOSURE` of equity (currently 100%, where equity = balance + total_exposure — the Apr 16 fix)**, counting only `filled > 0` AND `status in ('filled', 'partial')` — NOT ghost resting orders, NOT exited positions
+   - **Per-strategy budgets** (`STRATEGY_BUDGETS`, Apr 16) — vig_stack 60%, live_momentum 20%, arbs 20% of equity. Rejections surface as `STRATEGY_BUDGET: <strategy> has $X of $Y budget`. See Gotcha #11.
 4. **`_verify_edge_still_exists()`** — Re-fetches current Kalshi price, recomputes edge with the same price basis used at scan time (`yes_ask` for both YES/NO trades). **3¢ kill switch** (`MAX_PRICE_MOVE_CENTS`): abort if price moved more than 3¢ since the alert. Momentum trades skip this (pure price action, no model fair value). Vig stack uses a 2% threshold (structural); everything else uses `MIN_RELATIVE_EDGE = 15%`.
 5. **Self-check math** — `_self_check_edge()` runs forward (fair - price = edge) and backward (price + edge = fair). If they don't match within `EPSILON = 1e-6`, don't trade.
 
@@ -156,7 +157,7 @@ Paper mode does the same checks. It diverges only in `execute_trade()` after all
 
 ## The Live Game Watcher (`bot/live_watcher.py`)
 
-This is the most complex single file in the bot (2610 lines). It handles two activation modes and two trading strategies:
+This is the most complex single file in the bot (2769 lines). It handles two activation modes and two trading strategies:
 
 **Activation modes:**
 - **Manual:** Telegram `WATCH <team>` → instantiates `LiveGameWatcher(query, notifier, balance=...)` → registered in `GlintBot._active_watchers`
@@ -184,10 +185,10 @@ This is the most complex single file in the bot (2610 lines). It handles two act
 - `MOMENTUM_MAX_LOSS_DOLLARS = $5` hard cap per entry
 - `LIVE_HARD_PROFIT_TARGET = 1.00` (100% gain — safety lock)
 
-**Sport profiles (`SPORT_PROFILES` in `config.py:140-241`):**
-Each sport (nba, nhl, mlb, tennis, ufc, atp aliases) has its own `min_dip`, `max_dip`, `max_entry`, `take_profit`, `stop_loss`, `trail_stop`, `max_contracts`. MLB is `"disabled": True` based on 13 trades, -$11.85. Tennis has `skip_dqs=True` for speed. UFC uses 10 max contracts (KO risk).
+**Sport profiles (`SPORT_PROFILES` in `config.py:150-260`):**
+Each sport (nba, nhl, mlb, tennis, ufc, atp aliases) has its own `min_dip`, `max_dip`, `max_entry`, `take_profit`, `stop_loss`, `trail_stop`, `max_contracts`. MLB is `"disabled": True` based on 13 trades, -$11.85. Tennis has `skip_dqs=True` for tick-speed but now gates entries through a `variance_quality_gate` (Tier 2.4) — a lightweight replacement for full DQS that rejects flat-variance windows (set breaks, no info). UFC uses 10 max contracts (KO risk).
 
-**Conviction entry (`CONVICTION_*` constants, `config.py:116-126`):** Sometimes there's no dip — the leader just keeps climbing. Conviction buys without a dip when ALL true: win_prob is 8%+ above Kalshi price, positive momentum, lead not shrinking, price in 68-82¢ zone, ≥12 ticks of game history, sport has a reliable wp model (NBA/NHL only — MLB/tennis/UFC excluded), game is Q3+ (`MIN_COMPLETION = 0.50`). Size is 70% of normal dip entry.
+**Conviction entry (`CONVICTION_*` constants, `config.py:118-126`):** Sometimes there's no dip — the leader just keeps climbing. Conviction buys without a dip when ALL true: win_prob is 8%+ above Kalshi price, positive momentum, lead not shrinking, price in 68-82¢ zone, ≥12 ticks of game history, sport has a reliable wp model (NBA/NHL only — MLB/tennis/UFC excluded), game is Q3+ (`MIN_COMPLETION = 0.50`). Size is 70% of normal dip entry.
 
 **Data-driven tuning:** Every `MOMENTUM_*` and `SPORT_PROFILES` value is annotated with the trade-log evidence that justifies it (see config comments). Example: `MOMENTUM_LEADER_MIN = 0.70` — below 70¢, 23 trades lost $67.77 at 22% WR; at 70¢+, 20 trades won $15.50 at 55% WR.
 
@@ -277,7 +278,7 @@ python3 -m pytest tests/test_live_watcher.py -v
 ```
 
 ### Flip PAPER → LIVE
-Edit `bot/config.py:453`: `PAPER_MODE = False`. That's it. Everything else is the same code path. **Do not flip without 20+ resolved paper trades showing +CLV per active strategy.**
+Edit `bot/config.py:569`: `PAPER_MODE = False`. That's it. Everything else is the same code path. **Do not flip without 20+ resolved paper trades showing +CLV per active strategy.**
 
 ---
 
@@ -393,7 +394,7 @@ Don't change these without data. If you do change one, update the comment with t
 
 **Why live_momentum is positive:** the 9W/7L / +$9.80 result came with NO per-strategy budget cap — conviction trades were silently starved by vig_stack's 100% exposure pool. `STRATEGY_BUDGETS` (live_momentum: 20% of equity) was wired in Apr 16 to fix that.
 
-**Open exposure** (from positions.json, check at session start): currently 8 vig_stack positions, ~$98 exposure. All are Filter-F-compliant families (MIA/AUS/INX) — i.e., everything left in the book is the profile we *want* to hold.
+**Open exposure** (from positions.json, check at session start): ~10 open positions, mostly vig_stack. All are Filter-F-compliant: whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely, **and** volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) are allowed via the `NO ≥ 0.90` branch — i.e., YES ≥ 90¢ so the NO is cheap and the hit rate is very high. Both paths satisfy Filter F by design.
 
 **Settlement idempotency (Apr 18):** `_log_settlements_to_audit` in `tracker.py` had a bug — every call appended to `settlement_log` without dedup, so `resolve_trades` re-runs on already-settled positions double-counted. One ticker had 14 duplicate entries. Fixed with a `(ticker, strategy, result, pnl, contracts)` fingerprint check; the strategy totals also skip on dup so rollups stay clean.
 
@@ -431,11 +432,11 @@ Answer in terms of: single process ✓/✗, exposure vs balance, what's settling
 
 | Question | File |
 |---|---|
-| What strategies are active? | `bot/config.py:462` (`ACTIVE_STRATEGIES`) |
-| What's the current mode? | `bot/config.py:453` (`PAPER_MODE`) |
-| Why is a trade being blocked? | `bot/executor.py:96` (`_check_position_limits`) |
+| What strategies are active? | `bot/config.py:578` (`ACTIVE_STRATEGIES`) |
+| What's the current mode? | `bot/config.py:569` (`PAPER_MODE`) |
+| Why is a trade being blocked? | `bot/executor.py:121` (`_check_position_limits`) |
 | How is edge calculated? | `bot/math_engine.py` |
-| How are watchers started? | `bot/main.py:766` (`handle_watch`) + `bot/live_watcher.py:348` (`start`) |
+| How are watchers started? | `bot/main.py:766` (`handle_watch`) + `bot/live_watcher.py:368` (`start`) |
 | Where's the Telegram command list? | `bot/main.py:369-813` (`_register_commands`) |
 | What did strategy X do historically? | `bot/state/strategy_audit.json` |
 | What trades have settled? | `bot/state/trade_history.json` |
@@ -446,14 +447,15 @@ Answer in terms of: single process ✓/✗, exposure vs balance, what's settling
 | How is sizing calculated? | `bot/sizing.py:11` (`kelly_size`) |
 | Where's the consensus odds aggregator? | `bot/odds_scraper.py:1155` (`fetch_consensus_odds`) |
 | Where's the sport instincts logic? | `bot/game_context.py` + `bot/config.py:94-100` (`INSTINCT_*`) |
-| Where's the DQS (dip quality score)? | `bot/game_context.py` + `bot/config.py:134` (`MOMENTUM_DQS_THRESHOLD`) |
+| Where's the DQS (dip quality score)? | `bot/game_context.py` + `bot/config.py:136` (`MOMENTUM_DQS_THRESHOLD`) |
 
 **"Why is X happening?"**
 
 | Symptom | Likely cause | File |
 |---|---|---|
-| Every trade blocked with "Total exposure too high" | Account is over-allocated (not a bug, a math reality) | `executor.py:239` |
-| Trades keep blocked with "Already hold open position" | Duplicate entry guard, check if market actually settled | `executor.py:115` |
+| Every trade blocked with "Total exposure too high" | Account is over-allocated (not a bug, a math reality) | `executor.py:323` |
+| Every trade blocked with "STRATEGY_BUDGET: …" | Per-strategy budget exhausted; another bucket has headroom | `executor.py:304-313` (Apr 16) |
+| Trades keep blocked with "Already hold open position" | Duplicate entry guard, check if market actually settled | `executor.py:204` |
 | Every live game edge shows the same price for 2 minutes | `bypass_cache=True` not being passed to `fetch_consensus_odds` | `live_watcher.py` |
 | Paper trades all show `filled=0` | Paper fill bug regressed | `executor.py:execute_trade` (PAPER_MODE branch) |
 | Two bot processes running | `RESTART` didn't cleanly kill | `kill -9 <pid>` |

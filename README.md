@@ -43,12 +43,12 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 
 Glint watches Kalshi prediction markets 24/7 and looks for contracts whose market-implied probability is meaningfully wrong relative to an independent model. When it finds one — with edge above a minimum threshold, sizing above a minimum dollar amount, and no position conflicts — it alerts via Telegram and either executes automatically (paper mode) or sends a GO prompt for manual approval.
 
-It covers:
-- **Weather** — NWS next-day high temperature forecasts vs Kalshi temp contracts
-- **Sports series** — Sportsbook moneylines and parlay prices vs Kalshi game markets
-- **Vig stacking** — Structural overprice in Kalshi contract ladders (no external data needed)
-- **Crypto prices** — Log-normal price distribution model vs Kalshi daily/intraday price contracts
-- **Economic indicators** — CPI nowcast model vs Kalshi macro markets
+It covers (see [Strategy Types](#strategy-types) for per-strategy active/disabled status):
+
+- **Vig stacking** (`vig_stack_series`, `vig_stack_futures`) — **ACTIVE.** Structural overprice in Kalshi contract ladders. No external data needed. Net negative on paper before Filter F; the Apr 18 whitelist + NO ≥ 0.90 gate is the repair.
+- **Live game momentum** (`live_momentum`) — **ACTIVE via the live-watcher subsystem.** Dip-buy the leader on 1v1 live matches; take-profit + trailing stop exits. Paper-positive (+$9.80 on 16 settled).
+- **Sports arbs** (`sports_monotonicity_arb`, `sports_consistency_arb`) — **ACTIVE but no fills yet.** Riskless arbs on threshold-ladder monotonicity and championship-vs-series consistency.
+- **Weather single-market**, **sports series edge**, **parlay edge**, **crypto price edge**, **economic indicators** — **DISABLED** (data-driven kills from the Apr 14 audit; see the table in Strategy Types).
 
 Everything runs in **paper mode by default** — full edge detection, sizing, and trade lifecycle management with zero real capital at risk until you flip one line in `config.py`.
 
@@ -58,7 +58,7 @@ Everything runs in **paper mode by default** — full edge detection, sizing, an
 
 ### The Main Loop
 
-`bot/main.py` runs two concurrent `asyncio` tasks:
+`bot/main.py` runs three concurrent `asyncio` tasks (one disabled):
 
 1. **`_main_loop()`** — the primary scan cycle. Runs immediately on startup, then on an adaptive schedule:
    - 2-minute cadence when games are live
@@ -83,12 +83,14 @@ Everything runs in **paper mode by default** — full edge detection, sizing, an
 ```
 scan_cycle()
   ├── prefetch: Kalshi parlay markets (400+ contracts, cached)
-  ├── scanner_weather.py   → NWS forecast + edge calc (all 18 cities)
-  ├── scanner_sports.py    → odds scraper + parlay math (NBA/MLB/NHL/NCAAB)
-  ├── kalshi_series.py     → series game edges + vig stack + crypto ladders
-  ├── econ_scanner.py      → CPI nowcast vs Kalshi econ markets
-  └── deduplicate + rank by edge → return top N
+  ├── scanner_weather.py   → [DISABLED] still imported but returns [] for single-market edge
+  ├── scanner_sports.py    → [DISABLED] series_game_edge killed in Apr 14 audit (26% WR)
+  ├── kalshi_series.py     → [ACTIVE] vig_stack_series + vig_stack_futures (crypto ladder also killed)
+  ├── scanner_sports_arb.py → [ACTIVE] monotonicity + consistency riskless arbs
+  ├── econ_scanner.py      → [DISABLED] CPI nowcast retired
+  └── filter to ACTIVE_STRATEGIES + deduplicate + rank by edge → return top N
 ```
+Results are filtered to `ACTIVE_STRATEGIES` in `main.py` before execution. Disabled scanners are kept plumbed so re-enabling is a one-line config change, not a code change.
 
 Each scanner returns a list of opportunity dicts with a common schema:
 ```
@@ -208,7 +210,7 @@ Each scanner returns a list of opportunity dicts with a common schema:
 - Buys when the leader dips 4–8¢ from its recent high AND the dip quality score passes sport-specific thresholds
 - **Conviction entry:** if there's no dip but game state screams value (wp_edge > 8%, positive momentum, 68–82¢ entry, ≥ Q3 completion), buys a 70%-sized position. NBA/NHL only; MLB and tennis excluded from conviction
 - Exits: take-profit (12¢), trailing stop (6¢ from peak), stop-loss (10¢), near-settle lock (≥93¢), hard-cap ($5 max loss)
-- Per-sport tuning in `SPORT_PROFILES` (`config.py:140-241`)
+- Per-sport tuning in `SPORT_PROFILES` (`config.py:150-260`)
 
 **Paper performance (Apr 18):** 16 settled, **+$9.80**, 56% WR. The strategy is profitable *once* it can get fills; pre-Apr-16 it was silently starved by vig_stack's 100% exposure pool. `STRATEGY_BUDGETS` (20% equity allocation to `live_momentum`) fixed that.
 
@@ -256,7 +258,7 @@ _COOLDOWN = timedelta(hours=4)
 
 ```python
 MAX_POSITION_PERCENT = 0.20   # No single trade > 20% of balance
-MAX_TOTAL_EXPOSURE   = 1.00   # Global cap — 100% of balance (Apr 16)
+MAX_TOTAL_EXPOSURE   = 1.00   # Global cap — 100% of equity (balance + open exposure, Apr 16)
 STRATEGY_BUDGETS = {
     "vig_stack":     0.60,    # 60% of equity
     "live_momentum": 0.20,    # 20% of equity
@@ -316,7 +318,9 @@ execute_trade(opportunity)
   1. verify_contract_direction()     ← hard-block if title semantics don't match
   2. kelly_size()                    ← compute contracts and total cost
   3. _check_balance()                ← paper: derived from paper_trades.json; live: API
-  4. _check_position_limits()        ← dedup + 4h cooldown + 20% / 50% exposure
+  4. _check_position_limits()        ← dedup + 4h cooldown + MAX_POSITION_PERCENT 20%
+                                       + MAX_TOTAL_EXPOSURE 100% (vs equity, Apr 16)
+                                       + STRATEGY_BUDGETS (vig_stack 60% / live_momentum 20% / arbs 20%)
   5. re-fetch Kalshi price           ← abort if moved > 3 cents
   6. place_order() or paper record   ← live: Kalshi API; paper: write to paper_trades.json
   7. record_clv_entry()              ← log entry price and fair value for CLV tracking
@@ -467,24 +471,31 @@ hustle-agent/
 │   ├── kalshi_series.py     # Series game edges + vig stack + crypto ladders
 │   ├── econ_scanner.py      # CPI nowcast vs Kalshi economic indicator markets
 │   │
+│   ├── scanner_sports_arb.py # Monotonicity + consistency riskless arb scanners (ACTIVE)
 │   ├── math_engine.py       # All edge math with forward/backward self-checks
 │   ├── sizing.py            # Fractional Kelly criterion with uncertainty discount
-│   ├── executor.py          # Trade execution — 8-step safety pipeline, paper + live
-│   ├── tracker.py           # P&L tracking, market resolution, CLV settlement
+│   ├── executor.py          # Trade execution — safety pipeline, paper + live, STRATEGY_BUDGETS
+│   ├── tracker.py           # P&L tracking, market resolution, CLV settlement (idempotent)
 │   ├── clv.py               # Closing-Line Value per strategy
 │   │
+│   ├── live_watcher.py      # Per-game 10s-tick watcher — live_momentum + live arb
+│   ├── game_context.py      # Live game intelligence: momentum, win_prob, DQS, instincts
+│   ├── position_monitor.py  # Edge-recheck loop for open positions
+│   │
 │   ├── odds_scraper.py      # DraftKings / Bovada / FanDuel / ESPN / TheRundown cascade
-│   ├── crypto.py            # CoinGecko spot price + 30d volatility cache
+│   ├── crypto.py            # CoinGecko spot price + 30d volatility cache (currently disabled)
 │   ├── elo.py               # Team Elo ratings for sports edge adjustment
 │   ├── injuries.py          # Injury report integration
 │   ├── market_maker.py      # Passive limit-order market-making
 │   ├── price_monitor.py     # Line movement detection (5pp threshold)
 │   ├── outcome_tracker.py   # Trade outcome logging for calibration
 │   ├── notifier.py          # Telegram formatting and HTTP sender
-│   ├── patterns.py          # Regex patterns for contract title parsing
+│   ├── patterns.py          # Historical win rate per strategy type (dynamic confidence)
 │   ├── scheduler.py         # Adaptive scan frequency (live / pregame / idle)
+│   ├── daily_log.py         # Rolling daily performance log
 │   ├── state_io.py          # Atomic JSON read/write (write-to-tmp-then-rename)
-│   └── logger.py            # RotatingFileHandler — bot/logs/bot.log, 10 MB × 5
+│   ├── logger.py            # RotatingFileHandler — bot/logs/bot.log, 10 MB × 5
+│   └── tools/               # Diagnostic scripts (e.g. clv_by_strategy.py)
 │
 ├── agent/
 │   ├── kalshi_client.py     # Kalshi REST API (used by bot for all API calls)
@@ -495,27 +506,33 @@ hustle-agent/
 │
 ├── bot/state/               # Runtime state (gitignored)
 │   ├── positions.json       # All open + resolved positions
-│   ├── paper_trades.json    # Paper trade ledger (entry, exit, P&L, CLV)
+│   ├── paper_trades.json    # Paper trade ledger (entry, exit, P&L, CLV) — ground truth for balance
 │   ├── pending.json         # Queued opportunities with expiry
 │   ├── clv.json             # CLV records per trade
-│   ├── bot_state.json       # Scan count, session stats
+│   ├── bot_state.json       # Scan count, session stats, heartbeat
 │   ├── trade_history.json   # Resolved trade archive
+│   ├── strategy_audit.json  # Per-strategy status + settlement_log (idempotent, Apr 18)
+│   ├── live_journal.json    # Live-watcher events: scan_found, bet, exit, session_end
+│   ├── live_ticks.jsonl     # Enriched per-tick log: price, wp, momentum, DQS, game_state
 │   └── mm_positions.json    # Market-making pair tracker
 │
 ├── bot/logs/
 │   └── bot.log              # Rotating log — tail this for real-time status
 │
-├── tests/                   # 404 tests across 10 test files
-│   ├── test_bot_executor.py # Execution pipeline, position limits, cooldowns
-│   ├── test_bot_scanners.py # Scanner math, weather parsing, series matching
-│   ├── test_bot_tracker.py  # P&L resolution, paper trade updates, CLV
+├── tests/                   # pytest suite (see Testing section for current count)
+│   ├── test_bot_executor.py    # Execution pipeline, position limits, cooldowns, STRATEGY_BUDGETS
+│   ├── test_bot_scanners.py    # Scanner math, weather parsing, series matching
+│   ├── test_bot_tracker.py     # P&L resolution, paper trade updates, CLV, settlement idempotency
 │   ├── test_bot_improvements.py # Edge cap, cooldown, logging fixes
-│   ├── test_kalshi.py       # Kalshi client mocking and response parsing
-│   ├── test_parlay.py       # Parlay leg parsing and pricing math
-│   ├── test_player_stats.py # Player prop estimator
-│   ├── test_instincts.py    # Heuristic edge detection
-│   ├── test_to_8.py         # Batch improvements and regressions
-│   └── test_agent.py        # Original agent subsystems
+│   ├── test_live_watcher.py    # Watcher start/stop, tick processing, exit paths
+│   ├── test_sport_instincts.py # Per-sport instinct filters (avoid_entry etc.)
+│   ├── test_instincts.py       # Heuristic edge detection
+│   ├── test_data_driven_fixes.py # Regression guard for Apr 14/16/18 tuning decisions
+│   ├── test_kalshi.py          # Kalshi client mocking and response parsing
+│   ├── test_parlay.py          # Parlay leg parsing and pricing math
+│   ├── test_player_stats.py    # Player prop estimator
+│   ├── test_to_8.py            # Batch improvements and regressions
+│   └── test_agent.py           # Original agent subsystems (legacy, kept for kalshi_client coverage)
 │
 └── ui/                      # React dashboard (Vite + React + TypeScript + Tailwind)
     ├── server/index.ts      # Express API — reads state files, serves JSON
@@ -561,7 +578,8 @@ The bot will:
 2. Reconcile `positions.json` against the live Kalshi API
 3. Send a Telegram startup message
 4. Begin the first scan cycle immediately
-5. Start the crypto loop in parallel
+5. Start `_live_scan_loop()` on a 60s cadence (spawns `LiveGameWatcher` tasks for live matches)
+6. (`_crypto_scan_loop` is wired up but gated off by `CRYPTO_ENABLED = False` — no work happens there until re-enabled)
 
 ### Stopping
 
@@ -573,22 +591,33 @@ Send `SIGTERM` or `SIGINT` (Ctrl-C). The bot catches both signals, sends a Teleg
 
 ```bash
 python3 -m pytest tests/ -q
-# 404 passed, 1 warning in 6.4s
+# 482 tests collected across 13 test files
+# Current state (Apr 18): 429 pass, ~5 stale (known, see below), rest skipped behind live-call guards
 ```
+
+> **Known stale tests (Apr 18):** A handful of tests became outdated as the bot evolved and have not been refreshed yet:
+> - `test_bot_executor.py::test_position_limit_fail_aborts` and `test_data_driven_fixes.py::test_ticker_exceeding_daily_loss_blocked` — both hit the reserve-guard message before reaching the position-limit check they're asserting on
+> - `test_bot_improvements.py::test_watchdog_*` — heartbeat test harness drifted from current watchdog semantics
+> - `test_bot_scanners.py::test_eth_in_active_strategies` — asserts `eth_price_edge` is active, but crypto was disabled Apr 14
+>
+> These are documentation debt on the test layer, not bugs in the trading code. They will be repaired in a dedicated cleanup pass.
 
 All tests mock external APIs — no real Kalshi calls, no CoinGecko, no sportsbook requests, no Telegram messages. The test suite covers:
 
-- Executor: balance check (paper and live), position limit enforcement, 4-hour cooldown, price movement kill switch, direction verification, paper trade lifecycle
-- Scanners: weather normal distribution math, NWS response parsing, city alias mapping, series game edge calculation, vig stack detection, crypto log-normal model
-- Tracker: market resolution logic, P&L computation, paper_trades.json update on settlement
-- Sizing: Kelly formula correctness, fractional cap, uncertainty discount, dollar floor/ceiling
-- CLV: entry recording, settlement computation (YES and NO sides), report generation
-- Parlay: title parsing for multi-leg contracts, edge calculation with correlation discount
-- Regression: all `test_bot_improvements.py` tests guard the specific fixes that were made (edge cap, cooldown, logging) so they cannot silently regress
+- **Executor:** balance check (paper and live), position limit enforcement, 4-hour cooldown, price movement kill switch, direction verification, paper trade lifecycle, `STRATEGY_BUDGETS` (Apr 16), Filter F gate (Apr 18)
+- **Scanners:** weather normal distribution math, NWS response parsing, city alias mapping, series game edge calculation, vig stack detection, crypto log-normal model
+- **Tracker:** market resolution logic, P&L computation, paper_trades.json update on settlement, settlement-log idempotency (Apr 18 fix)
+- **Live watcher:** watcher start/stop, tick-level dip + DQS + variance_quality_gate (Tier 2.4), conviction-entry gating, exit paths (take-profit, trail, stop, near-settle), sport-instinct avoid_entry guards
+- **Sizing:** Kelly formula correctness, fractional cap, uncertainty discount, dollar floor/ceiling
+- **CLV:** entry recording, settlement computation (YES and NO sides), report generation
+- **Parlay:** title parsing for multi-leg contracts, edge calculation with correlation discount
+- **Regression guards:** `test_bot_improvements.py` + `test_data_driven_fixes.py` lock in the specific fixes from the Apr 14/16/18 audits (edge cap, cooldown, UW-exit removal, SCORE-FLIP momentum gate, etc.) so they cannot silently regress
 
 ---
 
 ## Dashboard UI
+
+> **Status:** The React dashboard under `ui/` is **legacy and not actively maintained.** The bot is operated entirely via Telegram. The static `bot/dashboard.html` file is a lighter read-only view that works without a Node toolchain.
 
 A React dashboard reads all state files and shows the bot's activity in real-time.
 
