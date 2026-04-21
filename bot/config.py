@@ -66,17 +66,25 @@ LIVE_NEAR_SETTLE_CENTS   = 93   # exit if price >= 93¢ (match almost over, lock
 LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant
 
 # Momentum mode (WATCH on 1v1 matches — tennis, UFC, etc.)
-MOMENTUM_LEADER_MIN      = 0.75  # v7 (Apr 20): raised past the [75-80c) dead zone.
+MOMENTUM_LEADER_MIN      = 0.70  # v7b (Apr 20, post-S2 revert): was briefly raised
+                                 # to 0.75 in Session 2 to "skip the [75-80c) dead
+                                 # zone." Wrong: MIN is a FLOOR (is_leader = prob >=
+                                 # MIN, live_watcher.py:863), so 0.75 ADMITS [75-80c)
+                                 # while surrendering the positive [70-75c) bucket.
+                                 # Reverted to 0.70 — highest EV of the three options:
+                                 #   0.70 floor: [70-75) + [75-80) + [80-85) = +$14.50
+                                 #   0.75 floor: [75-80) + [80-85)            = +$5.20 (shipped — worse)
+                                 #   0.80 floor: [80-85)                       = +$8.40
+                                 # Proper fix (TODO): add an explicit [75-80c) exclusion
+                                 # in the is_leader check at live_watcher.py:863, 873, 2622,
+                                 # 2624. That captures both positive buckets for ~+$17.70.
                                  # Apr 14 audit (v6 reason, 43 trades):
                                  #   <70c: 23 trades, -$67.77 (-$2.95/trade, 22% WR)
                                  #   ≥70c: 20 trades, +$15.50 (+$0.78/trade, 55% WR)
                                  # Apr 20 post-rebuild entry-bucket breakdown:
-                                 #   [70-75c): +$9.30  (positive)
-                                 #   [75-80c): -$3.20  across 9 trades  ← dead zone
+                                 #   [70-75c): +$9.30  (positive — re-enabled by revert)
+                                 #   [75-80c): -$3.20  across 9 trades (dead zone, still entered)
                                  #   [80-85c): +$8.40  (positive)
-                                 # The [75-80c) bucket is a consistent drag bracketed by
-                                 # positive neighbors. Bumping the floor to 0.75 skips it
-                                 # and keeps the productive 80c+ cohort intact.
 MOMENTUM_MAX_LOSS_DOLLARS = 5.00  # HARD CAP: exit if unrealized loss exceeds $5
                                   # Data: 7 trades lost >$10, totaling -$127. Capping at $5
                                   # would have turned -$104 total into +$2.84.

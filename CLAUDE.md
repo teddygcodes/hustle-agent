@@ -118,7 +118,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis (main ATP, WTA, and both challenger tours) disabled Apr 20 via `MOMENTUM_DISABLED_SPORTS` — 72% of momentum volume for −$6.20 net. Leader floor is 0.75 (raised Apr 20 from 0.70 to skip the [75-80¢) dead zone). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis (main ATP, WTA, and both challenger tours) disabled Apr 20 via `MOMENTUM_DISABLED_SPORTS` — 72% of momentum volume for −$6.20 net. Leader floor is 0.70 (Apr 20 Session 2 briefly raised to 0.75 but reverted same day — the bump admitted the [75-80¢) dead zone instead of skipping it; see config.py:69). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
 | `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
@@ -394,7 +394,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 **Why vig_stack is negative:** of 54 settled trades, 25 closed at a loss — the weight concentrated in volatile ladders. Ground truth by family: volatile (`KXHIGHDEN/NY/CHI`) = 36 trades, −$126.88, 69% early-cut; whitelist (`KXHIGHMIA/AUS/INX`) = 18 trades, +$16.26. Apr 18 Filter F set the volatile floor at NO ≥ 0.90; Apr 20 Session 2 raised it to **0.93** after bucket analysis showed only [92-96¢) is breakeven. Going forward we expect `real_pnl` to drift positive on new volatile-family trades. If a post-0.93 cohort of 10+ still prints negative, escalate.
 
-**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill) and raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to skip the [75-80¢) dead zone (−$3.20 / 9 trades). `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
+**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill). Session 2 also briefly raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to "skip the [75-80¢) dead zone" — but MIN is a floor, so 0.75 admits the dead zone while surrendering the positive [70-75¢) bucket. Reverted to 0.70 same day; proper dead-zone filter (explicit [75-80¢) exclusion in `is_leader`) is TODO. `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
 
 **Open exposure** (from positions.json, check at session start): ~10-16 open positions, mostly vig_stack. Whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely; volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) now require NO ≥ 0.93 (post–Session 2). Any already-open position with a pre-0.93 entry continues to exit on normal rules — the floor gates entries, not exits.
 
@@ -443,7 +443,7 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 **What shipped.**
 - `VIG_STACK_WEATHER_MIN_PRICE`: 0.90 → **0.93** (`config.py:408`). 1¢ safety margin above the bottom of the [92-96¢) breakeven bucket. Stable-family carve-out (`VIG_STACK_STABLE_FAMILIES` = MIA/AUS/INX at 0.70) preserved.
-- `MOMENTUM_LEADER_MIN`: 0.70 → **0.75** (`config.py:69`). Skips the [75-80¢) dead zone; [80-85¢) cohort stays eligible.
+- `MOMENTUM_LEADER_MIN`: 0.70 → 0.75 → **0.70 (reverted same day)** (`config.py:69`). The bump was meant to skip the [75-80¢) dead zone but MIN is a floor (`is_leader = prob >= MIN` at `live_watcher.py:863`), so 0.75 *admits* the dead zone while surrendering the positive [70-75¢) bucket (+$9.30). Bucket EV: 0.70 = +$14.50, 0.75 (shipped) = +$5.20, 0.80 = +$8.40. Revert gets back to the highest-EV of the single-threshold options. **TODO:** add an explicit [75-80¢) exclusion in the `is_leader` check (lines 863, 873, 2622, 2624) to capture both positive buckets — theoretical ~+$17.70.
 - New `MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "wta", "wta_challenger"}` (`config.py`, under the MOMENTUM block). Blanket tennis kill — main ATP included precautionarily.
 - One-line `can_enter` gate added in `live_watcher._tick_momentum` (~line 972). Blocks new entries for disabled sports; `_check_exit` does not consult this set, so held positions still exit on TP/SL/trailing.
 
