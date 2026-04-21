@@ -66,10 +66,17 @@ LIVE_NEAR_SETTLE_CENTS   = 93   # exit if price >= 93¢ (match almost over, lock
 LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant
 
 # Momentum mode (WATCH on 1v1 matches — tennis, UFC, etc.)
-MOMENTUM_LEADER_MIN      = 0.70  # v6: DATA AUDIT — 43 real trades prove entries <70c lose money.
+MOMENTUM_LEADER_MIN      = 0.75  # v7 (Apr 20): raised past the [75-80c) dead zone.
+                                 # Apr 14 audit (v6 reason, 43 trades):
                                  #   <70c: 23 trades, -$67.77 (-$2.95/trade, 22% WR)
                                  #   ≥70c: 20 trades, +$15.50 (+$0.78/trade, 55% WR)
-                                 # Below 70c, "leader" isn't leading strongly enough for reversion.
+                                 # Apr 20 post-rebuild entry-bucket breakdown:
+                                 #   [70-75c): +$9.30  (positive)
+                                 #   [75-80c): -$3.20  across 9 trades  ← dead zone
+                                 #   [80-85c): +$8.40  (positive)
+                                 # The [75-80c) bucket is a consistent drag bracketed by
+                                 # positive neighbors. Bumping the floor to 0.75 skips it
+                                 # and keeps the productive 80c+ cohort intact.
 MOMENTUM_MAX_LOSS_DOLLARS = 5.00  # HARD CAP: exit if unrealized loss exceeds $5
                                   # Data: 7 trades lost >$10, totaling -$127. Capping at $5
                                   # would have turned -$104 total into +$2.84.
@@ -87,6 +94,20 @@ MOMENTUM_REENTRY_COOLDOWN = 5    # ticks (~50s) cooldown after exit before re-en
 MOMENTUM_SCALE_SMALL_DIP = 1.0   # 1x on min-threshold dips — they qualify but aren't special
 MOMENTUM_SCALE_MED_DIP   = 1.2   # 1.2x on medium dips — bigger dip = better bounce
 MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% win, +3.67c avg
+
+# Momentum sports that are gated off at the entry point (Apr 20 post-rebuild).
+#   ATP Challenger:  2W/1L/14 exited_early, -$7.80, 82% cut rate
+#   WTA:             1W/1L/5  exited_early, -$7.00, 71% cut rate
+#   Tennis combined: 72% of live_momentum volume for -$6.20 net
+#   NBA + NHL alone: +$19.60 across 10 trades
+# Blanket tennis kill: main ATP is included precautionarily — no positive data
+# yet to justify keeping it on while the challenger + WTA cohorts are this deep
+# in the red. Revisit if/when an ATP cohort prints +P&L on n=10+ trades.
+#
+# Gate blocks NEW entries only; already-open positions exit normally via the
+# TP / SL / trailing-stop logic in live_watcher._check_exit, which does not
+# consult this set (verified). See live_watcher.py `_tick_momentum` can_enter.
+MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "wta", "wta_challenger"}
 
 # ---------------------------------------------------------------------------
 # Sport Instincts — situational awareness thresholds
@@ -385,27 +406,32 @@ VIG_STACK_MIN_NO_ENTRY_PRICE = 0.70
 # posts a single-day loss > $15.
 VIG_STACK_STABLE_FAMILIES = {"KXHIGHMIA", "KXHIGHAUS", "KXINX"}
 
-# Vig stack volatile-family price floor (Apr 18 evening, data-driven).
-# Separate, higher floor for non-stable weather ladders. Same 33-trade post-fix
-# window, split three ways:
-#
+# Vig stack volatile-family price floor.
+# Apr 18: introduced at 0.90 after a 33-trade split showed:
 #   entry >= 0.90 (any family):     7W/0L  (100% WR), +$6.71
 #   entry <  0.90, stable family:   6W/2L  (75%  WR), +$16.76
-#   entry <  0.90, volatile family: 5W/13L (28%  WR), −$129.79
+#   entry <  0.90, volatile family: 5W/13L (28%  WR), -$129.79
 #
-# Structural risk/reward at entry 0.85 NO (bet 85¢ to make 15¢) demands true
-# WR of 85%+ to break even. Volatile-family weather ladders clock 28% in
-# this price band — math is hopeless. At 0.90+ the demanded WR drops to
-# 90%, and the 7/7 observation + NWS 2°F-MAE priors make that attainable.
+# Apr 20 raised to 0.93 after the Session-1 rebuild exposed the full picture:
+#   Volatile families (KXHIGHDEN/NY/CHI):  36 trades, -$126.88, 69% early-cut
+#   Whitelist families (MIA/AUS/INX):      18 trades, +$16.26
+#
+# Volatile-family entry-price buckets (post-rebuild ground truth):
+#   <92c:       42 trades, -$110.79  (deeply negative — core of the bleed)
+#   [92-96c):   12 trades, +$0.17, 11W/1L (92% WR)  ← sole breakeven band
+#
+# A 0.93 floor sits 1c inside the breakeven band — gives a safety margin over
+# the bottom of [92-96c) while keeping the bulk of the cohort eligible.
+# Structural risk/reward at NO 0.93 (bet 93c to make 7c) demands ~93% true WR
+# to break even; the observed 92% WR + NWS 2F-MAE priors support the call.
 #
 # Applied together with VIG_STACK_STABLE_FAMILIES: stable uses 0.70 floor,
-# everything else uses this 0.90 floor. Retroactively applied to the 33-
-# trade window: kept 15 (13W/2L, 87% WR, +$23.47), blocked 18 (5W/13L,
-# -$129.79). A $130 P&L swing on the same markets.
+# everything else uses this 0.93 floor.
 #
-# Revisit: if 0.90+ non-stable cohort drops below 92% WR on n=15+ future
-# trades, or if any stable family posts a 90+ WR loss > $10 cluster.
-VIG_STACK_WEATHER_MIN_PRICE = 0.90
+# Revisit: if a new cohort of 10+ trades in the volatile family [93-96c) still
+# prints negative, 0.93 isn't tight enough — escalate. Also revisit if any
+# stable family posts a 90+ WR loss > $10 cluster.
+VIG_STACK_WEATHER_MIN_PRICE = 0.93
 
 # Vig stack per-ladder rung concentration cap (Apr 18, data-driven).
 # On Apr 17, the KXHIGHDEN ladder accumulated 6 rungs across 3 separate scan

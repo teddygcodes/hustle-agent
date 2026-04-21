@@ -33,6 +33,7 @@ from bot.config import (
     MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN,
     MOMENTUM_SCALE_SMALL_DIP, MOMENTUM_SCALE_MED_DIP, MOMENTUM_SCALE_LARGE_DIP,
     MOMENTUM_DQS_THRESHOLD, MOMENTUM_DQS_TRAIL_STOP,
+    MOMENTUM_DISABLED_SPORTS,
     TENNIS_QUALITY_MIN_TICKS, TENNIS_QUALITY_MIN_RANGE,
     SPORT_PROFILES,
     PAPER_MODE,
@@ -964,11 +965,16 @@ class LiveGameWatcher:
         max_dip = sport_profile.get("max_dip", int(MOMENTUM_DIP_MAX * 100))
         min_dip = sport_profile.get("min_dip", int(MOMENTUM_DIP_BUY * 100))
 
-        # Can we enter? Check caps and cooldown
+        # Can we enter? Check caps and cooldown.
+        # Sport-disable gate (Apr 20 Session 2): block new entries in sports
+        # listed in MOMENTUM_DISABLED_SPORTS. Exits are unaffected — _check_exit
+        # does not consult this flag, so already-open positions still close on
+        # TP / SL / trailing normally.
         can_enter = (
             self._entry_count < MOMENTUM_MAX_ENTRIES
             and self._cooldown_remaining <= 0
             and not self.bets_placed  # one position at a time
+            and (self.sport or "").lower() not in MOMENTUM_DISABLED_SPORTS
         )
 
         buy_ticker = None

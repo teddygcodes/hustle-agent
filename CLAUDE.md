@@ -109,7 +109,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 20) |
 |---|---|---|---|
-| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F (Apr 18) restricts entries to stable families `KXHIGHMIA / KXHIGHAUS / KXINX`; volatile families require NO ≥ 0.90. | 54 settled, **−$110.62**, 29W/25L (54%) |
+| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F stable families `KXHIGHMIA / KXHIGHAUS / KXINX` enter freely; volatile families require NO ≥ 0.93 (Apr 20, raised from 0.90 after bucket analysis showed only [92-96¢) is breakeven). | 54 settled, **−$110.62**, 29W/25L (54%) |
 | `vig_stack_futures` | `kalshi_series.py` | Same math on championship futures: NBA (17% vig), NHL (22% vig), MLB (6% vig). Gated by Filter F same as series. | 0 settled |
 | `sports_monotonicity_arb` | `scanner_sports_arb.py` | Riskless arb: spread/total threshold contracts must be monotonic. Violations = free money. | 0 real fills yet |
 | `sports_consistency_arb` | `scanner_sports_arb.py` | Riskless arb: P(championship) ≤ P(individual series win). | 0 real fills yet |
@@ -118,7 +118,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (tennis, UFC). Exit on trailing stop or take-profit. Auto-scans every 60s. Gets 20% of equity as its `STRATEGY_BUDGETS` allocation — no longer starved by vig_stack fills. | 39 settled, **+$12.30**, 24W/15L (62%) |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis (main ATP, WTA, and both challenger tours) disabled Apr 20 via `MOMENTUM_DISABLED_SPORTS` — 72% of momentum volume for −$6.20 net. Leader floor is 0.75 (raised Apr 20 from 0.70 to skip the [75-80¢) dead zone). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
 | `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
@@ -392,11 +392,11 @@ Don't change these without data. If you do change one, update the comment with t
 
 The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the then-visible data but missed 50 exited_early trades. Don't trust any pre-Apr-20 summary for early-exit strategies.
 
-**Why vig_stack is negative:** 22 of 43 settled trades closed at a loss, most via early-exit on volatile ladders (hot-weather cities outside MIA/AUS, S&P minus INX). The Apr 18 **Filter F** (volatile-family gate at NO ≥ 0.90) is designed to stop new entries of this type. Going forward we expect `real_pnl` to drift positive on new vig_stack trades. If it doesn't over the next 48h, Filter F isn't tight enough.
+**Why vig_stack is negative:** of 54 settled trades, 25 closed at a loss — the weight concentrated in volatile ladders. Ground truth by family: volatile (`KXHIGHDEN/NY/CHI`) = 36 trades, −$126.88, 69% early-cut; whitelist (`KXHIGHMIA/AUS/INX`) = 18 trades, +$16.26. Apr 18 Filter F set the volatile floor at NO ≥ 0.90; Apr 20 Session 2 raised it to **0.93** after bucket analysis showed only [92-96¢) is breakeven. Going forward we expect `real_pnl` to drift positive on new volatile-family trades. If a post-0.93 cohort of 10+ still prints negative, escalate.
 
-**Why live_momentum is positive:** the 9W/7L / +$9.80 result came with NO per-strategy budget cap — conviction trades were silently starved by vig_stack's 100% exposure pool. `STRATEGY_BUDGETS` (live_momentum: 20% of equity) was wired in Apr 16 to fix that.
+**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill) and raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to skip the [75-80¢) dead zone (−$3.20 / 9 trades). `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
 
-**Open exposure** (from positions.json, check at session start): ~10 open positions, mostly vig_stack. All are Filter-F-compliant: whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely, **and** volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) are allowed via the `NO ≥ 0.90` branch — i.e., YES ≥ 90¢ so the NO is cheap and the hit rate is very high. Both paths satisfy Filter F by design.
+**Open exposure** (from positions.json, check at session start): ~10-16 open positions, mostly vig_stack. Whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely; volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) now require NO ≥ 0.93 (post–Session 2). Any already-open position with a pre-0.93 entry continues to exit on normal rules — the floor gates entries, not exits.
 
 **Settlement idempotency (Apr 18):** `_log_settlements_to_audit` in `tracker.py` had a bug — every call appended to `settlement_log` without dedup, so `resolve_trades` re-runs on already-settled positions double-counted. One ticker had 14 duplicate entries. Fixed with a `(ticker, strategy, result, pnl, contracts)` fingerprint check; the strategy totals also skip on dup so rollups stay clean.
 
@@ -434,19 +434,22 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 2 — Active strategy retuning
-**Problem.** Two active dollar leaks visible in post-Filter-F data:
-- **Vig_stack volatile branch**: KXHIGHDEN/NY/CHI are −$127 on 43 trades, 59% cut rate. Whitelist families (MIA/AUS/INX) are +$16 on 11 trades. Only the [92-96¢) entry bucket is near-breakeven (+$0.17, 92% WR); everything below 92¢ is deeply negative.
-- **Live_momentum tennis challengers**: ATP Challenger is 2/1/14 for −$7.80 (82% cut). WTA is 1/1/4 for −$10.20 (67% cut). Tennis combined = 76% of volume for −$6.20 net. NBA/NHL alone = +$13.40 on 8 trades.
-- **Momentum entry dead zone**: [75-80¢) bucket is −$3.20 across 9 trades, bracketed by positive [70-75¢) and [80-85¢) buckets.
+### ☑ Session 2 — Active strategy retuning (Apr 20)
+**Problem.** Two active dollar leaks visible after the Session-1 settlement-pipeline rebuild (ground-truth recompute from `paper_trades.json`):
 
-**Changes (config.py only, no new code paths).**
-- `VIG_STACK_WEATHER_MIN_PRICE`: 0.90 → **0.93** (raises NO floor on non-whitelist families; only [92-96¢) is breakeven in the data).
-- Add disabled-sports gate in live_watcher entry path: `wta`, `wta_chall`, `atp_chall`. Gate entries only — let existing positions exit normally.
-- `MOMENTUM_LEADER_MIN`: 0.70 → **0.75** (skip the dead zone).
-- Refresh config comments with Apr 20 evidence: family-level P&L, sport-level WR+cut, entry-bucket table.
+- **Vig_stack volatile branch**: KXHIGHDEN/NY/CHI = **−$126.88 on 36 trades, 69% early-cut**. Whitelist families (KXHIGHMIA/AUS/INX) = **+$16.26 on 18 trades**. Volatile-family entry-price buckets: `<92¢` = −$110.79 / 42 trades (deeply negative); `[92-96¢)` = +$0.17 / 12 trades, 11W/1L (92% WR) — the sole breakeven band.
+- **Live_momentum tennis**: ATP Challenger = 2W/1L/14 EE, **−$7.80, 82% cut**. WTA = 1W/1L/5 EE, **−$7.00, 71% cut**. Tennis combined = 72% of live_momentum volume for **−$6.20 net**. NBA + NHL alone = **+$19.60 on 10 trades**.
+- **Momentum entry dead zone**: [75-80¢) bucket = **−$3.20 across 9 trades**, bracketed by positive [70-75¢) (+$9.30) and [80-85¢) (+$8.40).
 
-**Verify.** 2h of scans after restart: zero new entries into `KXHIGHDEN/NY/CHI` or `KXWTAMATCH`/`KXATPCHALLENGERMATCH`/`KXWTACHALLENGER`. Held positions in those markets still exit on normal TP/SL/trailing.
+**What shipped.**
+- `VIG_STACK_WEATHER_MIN_PRICE`: 0.90 → **0.93** (`config.py:408`). 1¢ safety margin above the bottom of the [92-96¢) breakeven bucket. Stable-family carve-out (`VIG_STACK_STABLE_FAMILIES` = MIA/AUS/INX at 0.70) preserved.
+- `MOMENTUM_LEADER_MIN`: 0.70 → **0.75** (`config.py:69`). Skips the [75-80¢) dead zone; [80-85¢) cohort stays eligible.
+- New `MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "wta", "wta_challenger"}` (`config.py`, under the MOMENTUM block). Blanket tennis kill — main ATP included precautionarily.
+- One-line `can_enter` gate added in `live_watcher._tick_momentum` (~line 972). Blocks new entries for disabled sports; `_check_exit` does not consult this set, so held positions still exit on TP/SL/trailing.
+
+**Why not `SPORT_PROFILES[x]["disabled"] = True`.** Tennis variants (`atp`, `atp_challenger`, `wta`, `wta_challenger`) all alias to the same `tennis` profile dict (`config.py:258-259`). Setting `disabled` there also kills main ATP + tennis. More importantly, the existing `disabled` check fires at scan-spawn time (`live_watcher.py:2566`), which would prevent a watcher from ever spawning for an already-open tennis position — no watcher = no TP/SL/trailing. A `can_enter` gate is the right tool for "block entries, preserve exits."
+
+**Verify.** 2h of scans after restart: zero new entries into `KXHIGHDEN/NY/CHI` (or any non-whitelist HIGH family below 93¢) or into `KXATPMATCH` / `KXWTAMATCH` / `KXATPCHALLENGERMATCH` / `KXWTACHALLENGERMATCH`. No new momentum entries with `price_cents < 75`. Any held tennis positions still exit on normal TP/SL/trailing.
 
 ---
 
