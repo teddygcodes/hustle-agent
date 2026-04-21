@@ -400,6 +400,89 @@ Don't change these without data. If you do change one, update the comment with t
 
 ---
 
+## Apr 20 Audit — Remediation Plan
+
+The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions below. Each is self-contained, verifies against `bot/state/`, and can land independently. **Execution order: 1 → 2 → 5 → 3 → 4.** Session 1 is foundational (audit integrity) — every performance claim downstream depends on it. Session 2 stops the active dollar leaks. Session 5 is safe cleanup and can interleave. Sessions 3 and 4 are diagnose-then-fix.
+
+Status legend: ☐ pending · ◐ in-progress · ☑ done.
+
+### ☐ Session 1 — Settlement + pattern pipeline
+**Problem.** 58 resolved paper trades are missing from `strategy_audit.settlement_log` (latest: Apr 20 20:29 UTC — ongoing). **All are `exited_early`.** Audit rollups (`strategies[k].real_trades`) also drift: vig_stack_series is short 4, live_momentum is short 13. `patterns.json` shows `total_resolved: 0` — never wired.
+
+**Root cause.** `tracker._log_settlements_to_audit` is only called from `resolve_trades` (market-close won/lost). Live-watcher `_check_exit` and manual SELL bypass it when setting `status=exited_early`. `patterns.py::record_resolution` has no active call site.
+
+**Changes.**
+- `tracker.py` — extract settlement-logging into a shared helper that accepts any resolved trade (won/lost/exited_early); keep the `(ticker, strategy, result, pnl, contracts)` dedup key.
+- Add call at every `status=exited_early` write: `live_watcher._check_exit`, manual SELL handler in `main.py`, and any other terminal-status mutator (grep `status.*exited_early`).
+- Wire `patterns.record_resolution(trade)` at the same exit points.
+- One-shot rebuild: read `paper_trades.json`, rebuild `strategy_audit.json` rollups + `settlement_log` from scratch. Keep current audit as `.bak`.
+- Add invariant WARNING if `len(settlement_log) ≠ sum(real_trades) ≠ count(paper_trades where status ∈ {won,lost,exited_early})`.
+
+**Verify.** Resolved count identical across audit, paper, patterns (74 as of Apr 20). Next `exited_early` from live_watcher reaches `settlement_log` within one scan cycle.
+
+---
+
+### ☐ Session 2 — Active strategy retuning
+**Problem.** Two active dollar leaks visible in post-Filter-F data:
+- **Vig_stack volatile branch**: KXHIGHDEN/NY/CHI are −$127 on 43 trades, 59% cut rate. Whitelist families (MIA/AUS/INX) are +$16 on 11 trades. Only the [92-96¢) entry bucket is near-breakeven (+$0.17, 92% WR); everything below 92¢ is deeply negative.
+- **Live_momentum tennis challengers**: ATP Challenger is 2/1/14 for −$7.80 (82% cut). WTA is 1/1/4 for −$10.20 (67% cut). Tennis combined = 76% of volume for −$6.20 net. NBA/NHL alone = +$13.40 on 8 trades.
+- **Momentum entry dead zone**: [75-80¢) bucket is −$3.20 across 9 trades, bracketed by positive [70-75¢) and [80-85¢) buckets.
+
+**Changes (config.py only, no new code paths).**
+- `VIG_STACK_WEATHER_MIN_PRICE`: 0.90 → **0.93** (raises NO floor on non-whitelist families; only [92-96¢) is breakeven in the data).
+- Add disabled-sports gate in live_watcher entry path: `wta`, `wta_chall`, `atp_chall`. Gate entries only — let existing positions exit normally.
+- `MOMENTUM_LEADER_MIN`: 0.70 → **0.75** (skip the dead zone).
+- Refresh config comments with Apr 20 evidence: family-level P&L, sport-level WR+cut, entry-bucket table.
+
+**Verify.** 2h of scans after restart: zero new entries into `KXHIGHDEN/NY/CHI` or `KXWTAMATCH`/`KXATPCHALLENGERMATCH`/`KXWTACHALLENGER`. Held positions in those markets still exit on normal TP/SL/trailing.
+
+---
+
+### ☐ Session 3 — Live-watcher ESPN restoration
+**Problem.** 3000/3000 recent live ticks have `espn_scores: None`. `wp` also missing on most. The watcher is running on Kalshi price alone — TP/SL still fire, but momentum/DQS/conviction logic is degraded (`wp_edge > 8%` gate never passes).
+
+**Diagnose first.**
+1. `grep -i "espn\|_fetch_espn_score" bot/logs/bot.log | tail -100` — find last successful fetch timestamp + error pattern.
+2. Invoke `_fetch_espn_score()` manually against a known-live game; inspect response shape vs parser expectations in `live_watcher.py`.
+3. Rule out: API path change, required UA header, silent exception swallow, cert issue, rate limit.
+
+**Fixes (pick one after diagnosis).** API path/query update · add UA header · replace bare except with logged exception · fallback to TheRundown or ESPN gamecast HTML scrape.
+
+**Verify.** 10 minutes of new live ticks: `grep espn_scores bot/state/live_ticks.jsonl | tail -20` shows non-null for live games. `wp` field populates.
+
+---
+
+### ☐ Session 4 — Scheduler + bot_state revival
+**Problem.** Cron-style subsystems appear dead or disconnected:
+- `last_morning_briefing`: Apr 12 (9d stale).
+- `last_nightly_summary`: Apr 19 (2d+ stale).
+- `last_odds_api_request`: Apr 5 (16d stale — field may be dead code).
+- `crypto_trades_today: 2902` despite `CRYPTO_ENABLED = False`.
+- `total_pnl: 0` — never written.
+
+**Changes.**
+- `scheduler.py` — verify morning briefing + nightly summary actually run. Confirm `GlintBot.start()` schedules `scheduler.run_forever` in its task group (likely missing or cancelled silently).
+- Reset `bot_state.json`: `crypto_trades_today = 0`, wire `total_pnl` from `paper_trades.json` on each nightly summary write.
+- Audit `last_odds_api_request`: either remove the field or reconnect whatever was supposed to write it.
+
+**Verify.** Next configured morning time → Telegram briefing arrives. `bot_state.json.last_morning_briefing` advances. `total_pnl` updates after next nightly.
+
+---
+
+### ☐ Session 5 — State hygiene
+**Problem.** 216MB of state with ~150MB bloat or zombies. No trading impact; just noise in tooling and dashboards.
+
+**Changes (safe, cosmetic).**
+- Purge `clv.json` records where `opp_type` is in disabled strategies (227/424 entries). Add filter at read in `clv.py` to prevent re-accumulation.
+- Delete stale files: `odds_snapshots.json` (12d), `price_cache.json` (12d), `watchlist.json` (3 bytes, 15d), `strategy_audit.json.bak-*` (Apr 18 leftovers), `paper_trades_archive.json` if rotation is permanently retired.
+- Nightly rotation for `live_ticks.jsonl` (currently 108MB): at UTC midnight, move to `state/archive/live_ticks-YYYY-MM-DD.jsonl.gz` and truncate active file.
+- Document or deprecate `trade_history.json`. It's an order-level log (379 entries, 285 resting + 94 filled), not a resolution log like `paper_trades.json`. CLAUDE.md state-files table currently implies they're the same — fix the description or drop the file.
+- Refresh `bot.lock` mtime on every heartbeat so the lockfile is a liveness signal (currently written once at startup, then frozen — useless for detecting zombies).
+
+**Verify.** `du -sh bot/state/` drops from ~216MB → ~110MB. `clv.json` has zero disabled-strategy records. `bot.lock` mtime advances with each scan cycle.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
