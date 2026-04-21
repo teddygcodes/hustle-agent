@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from bot.config import PATTERNS_FILE, MIN_RELATIVE_EDGE
+from bot.config import PATTERNS_FILE, MIN_RELATIVE_EDGE, PAPER_TRADES_FILE
+from bot.state_io import load_json as _load_json
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +105,27 @@ def _day_of_week(iso_str: str) -> str:
 
 
 def _resolved_trades(trade_history: list[dict]) -> list[dict]:
-    """Filter to only resolved trades with a result."""
-    return [
-        t for t in trade_history
-        if t.get("status") == "resolved" and t.get("result") in ("won", "lost")
-    ]
+    """Filter to only resolved trades. Accepts trade_history.json schema
+    (status='resolved', result in won/lost) and paper_trades.json schema
+    (status in won/lost/exited_early). For exited_early, derive result from pnl sign
+    so profitable TP exits roll into the win bucket.
+    """
+    out = []
+    for t in trade_history:
+        if not isinstance(t, dict):
+            continue
+        status = t.get("status")
+        result = t.get("result")
+        if status == "resolved" and result in ("won", "lost"):
+            out.append(t)
+        elif status in ("won", "lost"):
+            if not result:
+                t = {**t, "result": status}
+            out.append(t)
+        elif status == "exited_early":
+            derived = "won" if t.get("pnl", 0) > 0 else "lost"
+            out.append({**t, "result": derived})
+    return out
 
 
 def _winrate_entry(trades: list[dict]) -> dict:
@@ -152,6 +169,21 @@ def save_patterns(patterns: dict) -> None:
         log.error("Failed to save patterns: %s", e)
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
+
+
+def record_resolution(trade: dict) -> None:
+    """Rebuild patterns.json from paper_trades.json. Called on every terminal-status write.
+
+    Full-rebuild (not incremental) matches the existing analyze_patterns + save_patterns
+    flow and is idempotent by design — harder to desync than an incremental recorder.
+    The `trade` argument is unused but kept so hook sites can pass context if future
+    pattern work needs per-trade data.
+    """
+    paper_trades = _load_json(PAPER_TRADES_FILE)
+    if not isinstance(paper_trades, list):
+        return
+    patterns = analyze_patterns(paper_trades)
+    save_patterns(patterns)
 
 
 # ── 2. Analyze Patterns ─────────────────────────────────────────────────────

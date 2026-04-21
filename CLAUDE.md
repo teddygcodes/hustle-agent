@@ -105,11 +105,11 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 ### ACTIVE
 
-**Performance numbers below are post–Apr 18 audit**, rebuilt from `paper_trades.json` (PAPER_MODE=True) as ground truth. Seeded historical values in `strategy_audit.json` were inaccurate and have been replaced; `_log_settlements_to_audit` is now idempotent so the numbers stay honest going forward.
+**Performance numbers below are post–Apr 20 rebuild**, rebuilt from `paper_trades.json` (PAPER_MODE=True) as ground truth. Apr 20 Session 1 wired `exited_early` settlements into the audit pipeline (they were previously invisible), so the numbers now include all 59 early exits plus the 34 market-close won/lost. Invariant warning fires if paper/log/rollup counts ever drift again.
 
-| Strategy | Location | Description | Real Perf (paper, Apr 18) |
+| Strategy | Location | Description | Real Perf (paper, Apr 20) |
 |---|---|---|---|
-| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F (Apr 18) restricts entries to stable families `KXHIGHMIA / KXHIGHAUS / KXINX`; volatile families require NO ≥ 0.90. | 43 settled, **−$101.08**, 21W/22L (49%) |
+| `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F (Apr 18) restricts entries to stable families `KXHIGHMIA / KXHIGHAUS / KXINX`; volatile families require NO ≥ 0.90. | 54 settled, **−$110.62**, 29W/25L (54%) |
 | `vig_stack_futures` | `kalshi_series.py` | Same math on championship futures: NBA (17% vig), NHL (22% vig), MLB (6% vig). Gated by Filter F same as series. | 0 settled |
 | `sports_monotonicity_arb` | `scanner_sports_arb.py` | Riskless arb: spread/total threshold contracts must be monotonic. Violations = free money. | 0 real fills yet |
 | `sports_consistency_arb` | `scanner_sports_arb.py` | Riskless arb: P(championship) ≤ P(individual series win). | 0 real fills yet |
@@ -118,7 +118,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (tennis, UFC). Exit on trailing stop or take-profit. Auto-scans every 60s. Gets 20% of equity as its `STRATEGY_BUDGETS` allocation — no longer starved by vig_stack fills. | 16 settled, **+$9.80**, 9W/7L (56%) |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (tennis, UFC). Exit on trailing stop or take-profit. Auto-scans every 60s. Gets 20% of equity as its `STRATEGY_BUDGETS` allocation — no longer starved by vig_stack fills. | 39 settled, **+$12.30**, 24W/15L (62%) |
 | `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
@@ -380,15 +380,17 @@ Don't change these without data. If you do change one, update the comment with t
 
 **Ground truth source:** `paper_trades.json` (PAPER_MODE = True). Every entry with `status ∈ {won, lost, exited_early}` is a real resolution. `trade_history.json` has 0 resolved real-money entries — nothing has settled in live mode yet.
 
-**Post-rebuild numbers (Apr 18, after the seeded-values cleanup):**
+**Post-rebuild numbers (Apr 20, after Session 1 settlement-pipeline fix):**
 
 | Strategy | Settled | P&L | W / L | WR |
 |---|---|---|---|---|
-| `vig_stack_series` | 43 | **−$101.08** | 21 / 22 | 49% |
-| `live_momentum` | 16 | **+$9.80** | 9 / 7 | 56% |
+| `vig_stack_series` | 54 | **−$110.62** | 29 / 25 | 54% |
+| `live_momentum` | 39 | **+$12.30** | 24 / 15 | 62% |
 | Everything else | 0 | $0 | — | — |
 
-**Grand total paper P&L: ≈ −$91.** The older docs that quoted −$17 were based on seeded `strategies.real_*` values that never reconciled with `paper_trades.json`. Those were wiped and rebuilt on Apr 18; don't trust any pre-Apr-18 summary.
+**Grand total paper P&L: ≈ −$98.** Apr 20 rebuild was necessary because `exited_early` trades (59 of 93 resolved) were silently missing from `settlement_log` — only market-close won/lost were being logged. Post-fix: `executor._paper_record_exit` calls `tracker.log_settlement` + `patterns.record_resolution` on every paper exit, so the three counts (paper resolved, settlement_log length, sum of `strategies[k].real_trades`) stay in lock-step. Invariant warning fires if they drift.
+
+The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the then-visible data but missed 50 exited_early trades. Don't trust any pre-Apr-20 summary for early-exit strategies.
 
 **Why vig_stack is negative:** 22 of 43 settled trades closed at a loss, most via early-exit on volatile ladders (hot-weather cities outside MIA/AUS, S&P minus INX). The Apr 18 **Filter F** (volatile-family gate at NO ≥ 0.90) is designed to stop new entries of this type. Going forward we expect `real_pnl` to drift positive on new vig_stack trades. If it doesn't over the next 48h, Filter F isn't tight enough.
 
@@ -406,19 +408,29 @@ The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities
 
 Status legend: ☐ pending · ◐ in-progress · ☑ done.
 
-### ☐ Session 1 — Settlement + pattern pipeline
-**Problem.** 58 resolved paper trades are missing from `strategy_audit.settlement_log` (latest: Apr 20 20:29 UTC — ongoing). **All are `exited_early`.** Audit rollups (`strategies[k].real_trades`) also drift: vig_stack_series is short 4, live_momentum is short 13. `patterns.json` shows `total_resolved: 0` — never wired.
+### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)
+**Problem (pre-fix).** 58 resolved paper trades missing from `strategy_audit.settlement_log`, all `exited_early`. Ground-truth paper_trades.json showed 93 resolved (32W / 2L / 59 exited_early), settlement_log had 35, patterns.json had `total_resolved: 0`.
 
-**Root cause.** `tracker._log_settlements_to_audit` is only called from `resolve_trades` (market-close won/lost). Live-watcher `_check_exit` and manual SELL bypass it when setting `status=exited_early`. `patterns.py::record_resolution` has no active call site.
+**Root cause.** All `exited_early` writes funnel through `executor._paper_record_exit`, which never called `_log_settlements_to_audit` or `patterns.record_resolution` (the latter didn't exist).
 
-**Changes.**
-- `tracker.py` — extract settlement-logging into a shared helper that accepts any resolved trade (won/lost/exited_early); keep the `(ticker, strategy, result, pnl, contracts)` dedup key.
-- Add call at every `status=exited_early` write: `live_watcher._check_exit`, manual SELL handler in `main.py`, and any other terminal-status mutator (grep `status.*exited_early`).
-- Wire `patterns.record_resolution(trade)` at the same exit points.
-- One-shot rebuild: read `paper_trades.json`, rebuild `strategy_audit.json` rollups + `settlement_log` from scratch. Keep current audit as `.bak`.
-- Add invariant WARNING if `len(settlement_log) ≠ sum(real_trades) ≠ count(paper_trades where status ∈ {won,lost,exited_early})`.
+**What shipped.**
+- `tracker.py` — extracted `log_settlement(trade)` per-trade helper; accepts both paper_trades schema (type/status/pnl) and trade_history schema (opp_type/result/contracts). Maps `type="vig_stack"` → `strategy="vig_stack_series"`. Derives won/lost from pnl sign for `exited_early`. Kept `(ticker, strategy, result, pnl, contracts)` dedup.
+- `tracker.check_settlement_invariant()` — logs WARNING if `paper_resolved ≠ len(settlement_log) ≠ sum(strategies[k].real_trades)`. Called at end of batch writes, not per-call.
+- `patterns.py` — new `record_resolution(trade)` does a full rebuild of `patterns.json` from `paper_trades.json` (matches existing `analyze_patterns` + `save_patterns` style — harder to desync than incremental). `_resolved_trades` extended to accept paper_trades `status ∈ {won, lost, exited_early}`.
+- `executor._paper_record_exit` — single hook point. Lazy imports `log_settlement` + `record_resolution`. Covers live_watcher `_check_exit`, manual SELL, EXITALL (all three paths flow through this one function — verified).
+- `tracker.resolve_trades` — also calls `patterns.record_resolution` after the existing `_log_settlements_to_audit` for market-close won/lost.
+- `tools/rebuild_strategy_audit.py` — one-shot script. Backs up audit → `.bak-YYYYMMDD`, resets rollups, replays every resolved paper trade through `log_settlement`.
 
-**Verify.** Resolved count identical across audit, paper, patterns (74 as of Apr 20). Next `exited_early` from live_watcher reaches `settlement_log` within one scan cycle.
+**Post-rebuild ground truth (Apr 20 2026):**
+
+| | Paper | settlement_log | rollup |
+|---|---|---|---|
+| Total | 93 | 93 | 93 |
+| vig_stack_series | 54 | 54 | 54 (−$110.62, 29W/54, 54%) |
+| live_momentum | 39 | 39 | 39 (+$12.30, 24W/39, 62%) |
+| patterns.json total_resolved | — | — | 93 |
+
+Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 

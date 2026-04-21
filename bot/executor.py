@@ -889,14 +889,26 @@ def _paper_record_exit(order_id: str, exit_price: float, realized_pnl: float) ->
     paper_trades = _load_json(PAPER_TRADES_FILE)
     if not isinstance(paper_trades, list):
         return
+    exited = None
     for t in paper_trades:
         if isinstance(t, dict) and t.get("id") == order_id:
             t["status"] = "exited_early"
             t["exit_price"] = round(exit_price, 4)
             t["pnl"] = realized_pnl
             t["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            exited = t
             break
     _save_json(PAPER_TRADES_FILE, paper_trades)
+
+    if exited is not None:
+        try:
+            from bot.tracker import log_settlement, check_settlement_invariant
+            from bot.patterns import record_resolution
+            log_settlement(exited)
+            record_resolution(exited)
+            check_settlement_invariant()
+        except Exception as e:
+            logger.debug("Settlement/pattern hook failed: %s", e)
 
 
 def exit_position(ticker: str, reason: str = "manual") -> dict:

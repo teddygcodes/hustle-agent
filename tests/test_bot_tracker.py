@@ -236,3 +236,115 @@ class TestCalibrationReport:
 
         report = tracker.get_calibration_report()
         assert report.get("bad_strategy", {}).get("flagged") is True
+
+
+# ---------------------------------------------------------------------------
+# bot.tracker.log_settlement — Apr 20 settlement-pipeline fix
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def audit_env(tmp_path, monkeypatch):
+    """Isolate strategy_audit.json + paper_trades.json in tmp_path for tracker tests."""
+    import json as _json
+    from bot import tracker as _tracker, config as _config
+
+    audit_file = tmp_path / "strategy_audit.json"
+    paper_file = tmp_path / "paper_trades.json"
+
+    audit_file.write_text(_json.dumps({
+        "_meta": {},
+        "strategies": {
+            "vig_stack_series": {"real_trades": 0, "real_pnl": 0, "real_wins": 0, "real_losses": 0, "real_wr": "0%"},
+            "live_momentum":    {"real_trades": 0, "real_pnl": 0, "real_wins": 0, "real_losses": 0, "real_wr": "0%"},
+        },
+        "settlement_log": [],
+    }))
+    paper_file.write_text("[]")
+
+    monkeypatch.setattr(_tracker, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(_tracker, "PAPER_TRADES_FILE", paper_file)
+    monkeypatch.setattr(_config, "PAPER_TRADES_FILE", paper_file)
+    return tmp_path, audit_file, paper_file
+
+
+class TestLogSettlement:
+
+    def test_exited_early_positive_pnl_counts_as_win(self, audit_env):
+        import json as _json
+        from bot.tracker import log_settlement
+
+        _, audit_file, _ = audit_env
+        trade = {"ticker": "T1", "type": "live_momentum", "status": "exited_early",
+                 "pnl": 2.50, "contracts": 5}
+        assert log_settlement(trade) is True
+
+        audit = _json.loads(audit_file.read_text())
+        assert len(audit["settlement_log"]) == 1
+        entry = audit["settlement_log"][0]
+        assert entry["result"] == "won"
+        assert entry["strategy"] == "live_momentum"
+        assert audit["strategies"]["live_momentum"]["real_trades"] == 1
+        assert audit["strategies"]["live_momentum"]["real_wins"] == 1
+
+    def test_exited_early_negative_pnl_counts_as_loss(self, audit_env):
+        import json as _json
+        from bot.tracker import log_settlement
+
+        _, audit_file, _ = audit_env
+        trade = {"ticker": "T2", "type": "vig_stack", "status": "exited_early",
+                 "pnl": -4.10, "contracts": 10}
+        assert log_settlement(trade) is True
+
+        audit = _json.loads(audit_file.read_text())
+        entry = audit["settlement_log"][0]
+        assert entry["result"] == "lost"
+        assert entry["strategy"] == "vig_stack_series"
+        assert audit["strategies"]["vig_stack_series"]["real_losses"] == 1
+
+    def test_dedup_on_fingerprint(self, audit_env):
+        import json as _json
+        from bot.tracker import log_settlement
+
+        _, audit_file, _ = audit_env
+        trade = {"ticker": "T3", "type": "live_momentum", "status": "exited_early",
+                 "pnl": 1.00, "contracts": 3}
+        assert log_settlement(trade) is True
+        assert log_settlement(trade) is False
+
+        audit = _json.loads(audit_file.read_text())
+        assert len(audit["settlement_log"]) == 1
+        assert audit["strategies"]["live_momentum"]["real_trades"] == 1
+
+    def test_ghost_trade_rejected(self, audit_env):
+        from bot.tracker import log_settlement
+        trade = {"ticker": "T4", "type": "live_momentum", "status": "exited_early",
+                 "pnl": 1.00, "contracts": 0}
+        assert log_settlement(trade) is False
+
+    def test_paper_type_maps_to_strategy_key(self, audit_env):
+        import json as _json
+        from bot.tracker import log_settlement
+
+        _, audit_file, _ = audit_env
+        trade = {"ticker": "T5", "type": "vig_stack", "status": "won",
+                 "pnl": 0.15, "contracts": 20}
+        assert log_settlement(trade) is True
+
+        audit = _json.loads(audit_file.read_text())
+        assert audit["settlement_log"][0]["strategy"] == "vig_stack_series"
+        assert audit["strategies"]["vig_stack_series"]["real_trades"] == 1
+
+    def test_invariant_holds_after_batch(self, audit_env):
+        from bot.tracker import log_settlement, check_settlement_invariant
+        import json as _json
+
+        _, _, paper_file = audit_env
+        trades = [
+            {"id": "a", "ticker": "A", "type": "live_momentum", "status": "exited_early", "pnl": 1.0, "contracts": 2},
+            {"id": "b", "ticker": "B", "type": "live_momentum", "status": "exited_early", "pnl": -0.5, "contracts": 3},
+            {"id": "c", "ticker": "C", "type": "vig_stack", "status": "won", "pnl": 0.1, "contracts": 10},
+        ]
+        paper_file.write_text(_json.dumps(trades))
+        for t in trades:
+            log_settlement(t)
+        assert check_settlement_invariant() is True

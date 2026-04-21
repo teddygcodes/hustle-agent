@@ -359,92 +359,162 @@ def resolve_trades() -> list[dict]:
         except Exception as e:
             logger.debug("Strategy audit log failed: %s", e)
 
+        # Rebuild patterns.json from paper_trades.json
+        try:
+            from bot import patterns
+            patterns.record_resolution({})
+        except Exception as e:
+            logger.debug("Pattern record failed: %s", e)
+
     return resolved
 
 
-def _log_settlements_to_audit(resolved: list[dict]):
-    """Append each settlement to strategy_audit.json for ongoing tracking.
+# Map paper_trades.json `type` field to strategy_audit.json `strategies[k]` key.
+_PAPER_TYPE_TO_STRATEGY = {
+    "vig_stack": "vig_stack_series",
+    "vig_stack_no": "vig_stack_series",
+}
 
-    Idempotent: if a settlement with the same (ticker, strategy, result, pnl,
-    contracts) already exists in settlement_log, it is skipped. This fixes an
-    Apr 18 bug where re-running resolve_trades on already-settled positions
-    (or a position settling twice via paper+live paths) double-counted. One
-    ticker had 14 duplicate entries before cleanup.
+
+def _normalize_strategy(trade: dict) -> str:
+    """Resolve the strategy key. trade_history uses opp_type; paper_trades uses type."""
+    raw = trade.get("opp_type") or trade.get("type") or "unknown"
+    return _PAPER_TYPE_TO_STRATEGY.get(raw, raw)
+
+
+def _derive_result(trade: dict) -> str:
+    """For exited_early trades, derive won/lost from pnl sign. Otherwise use result/status."""
+    explicit = trade.get("result")
+    if explicit in ("won", "lost"):
+        return explicit
+    status = trade.get("status", "")
+    if status in ("won", "lost"):
+        return status
+    if status == "exited_early":
+        return "won" if trade.get("pnl", 0) > 0 else "lost"
+    return ""
+
+
+def _normalize_contracts(trade: dict) -> int:
+    """paper_trades uses `contracts`, trade_history also uses `contracts`, positions use `filled`."""
+    for key in ("contracts", "filled", "quantity"):
+        val = trade.get(key)
+        if val:
+            return int(val)
+    return 0
+
+
+def log_settlement(trade: dict) -> bool:
+    """Log a single resolved trade to strategy_audit.settlement_log + strategies[k] rollups.
+
+    Accepts either paper_trades.json schema (type, status, pnl) or
+    trade_history.json schema (opp_type, result, pnl, contracts).
+    Returns True if appended, False if skipped (dup or ghost).
+
+    Idempotent via (ticker, strategy, result, pnl, contracts) fingerprint.
     """
     audit_path = BOT_STATE_DIR / "strategy_audit.json"
     if not audit_path.exists():
-        return
+        return False
+
+    contracts = _normalize_contracts(trade)
+    if contracts <= 0:
+        return False
+
+    strategy = _normalize_strategy(trade)
+    result = _derive_result(trade)
+    if not result:
+        return False
+    pnl = trade.get("pnl", 0)
+    ticker = trade.get("ticker", "")
+
     audit = json.loads(audit_path.read_text())
-    strategies = audit.get("strategies", {})
+    audit.setdefault("settlement_log", [])
+    audit.setdefault("_meta", {})
+    strategies = audit.setdefault("strategies", {})
 
-    # Also maintain a flat settlement log at the top level
-    if "settlement_log" not in audit:
-        audit["settlement_log"] = []
+    dedup_key = (ticker, strategy, result, pnl, contracts)
+    for entry in audit["settlement_log"]:
+        if (entry.get("ticker"), entry.get("strategy"), entry.get("result"),
+                entry.get("pnl"), entry.get("contracts")) == dedup_key:
+            return False
 
-    # Build a set of existing settlement fingerprints once; O(1) lookup below.
-    existing_keys = {
-        (e.get("ticker"), e.get("strategy"), e.get("result"),
-         e.get("pnl"), e.get("contracts"))
-        for e in audit["settlement_log"]
-    }
+    audit["settlement_log"].append({
+        "ticker": ticker,
+        "strategy": strategy,
+        "result": result,
+        "pnl": pnl,
+        "contracts": contracts,
+        "sport": trade.get("sport", ""),
+        "resolved_at": trade.get("resolved_at", datetime.now(timezone.utc).isoformat()),
+    })
 
-    appended = 0
-    skipped_dup = 0
-    for r in resolved:
-        opp_type = r.get("opp_type", "unknown")
-        pnl = r.get("pnl", 0)
-        won = r.get("result") == "won"
-        filled = r.get("contracts", 0)
-
-        # Skip ghost trades (filled=0)
-        if filled <= 0:
-            continue
-
-        # Idempotency: skip if this exact settlement is already logged.
-        # Key is (ticker, strategy, result, pnl, contracts) — pnl and contracts
-        # are integer-cents-rounded floats/ints so equality is stable.
-        dedup_key = (r.get("ticker", ""), opp_type, r.get("result", ""), pnl, filled)
-        if dedup_key in existing_keys:
-            skipped_dup += 1
-            continue
-        existing_keys.add(dedup_key)
-
-        # Append to flat log
-        audit["settlement_log"].append({
-            "ticker": r.get("ticker", ""),
-            "strategy": opp_type,
-            "result": r.get("result", ""),
-            "pnl": pnl,
-            "contracts": filled,
-            "sport": r.get("sport", ""),
-            "resolved_at": r.get("resolved_at", datetime.now(timezone.utc).isoformat()),
-        })
-        appended += 1
-
-        # Update strategy totals (also gated by dedup so rollups stay clean)
-        if opp_type in strategies:
-            s = strategies[opp_type]
-            s["real_trades"] = s.get("real_trades", 0) + 1
-            s["real_pnl"] = round(s.get("real_pnl", 0) + pnl, 2)
-            if won:
-                s.setdefault("real_wins", 0)
-                s["real_wins"] += 1
-            else:
-                s.setdefault("real_losses", 0)
-                s["real_losses"] += 1
-            total = s.get("real_trades", 0)
-            wins = s.get("real_wins", 0)
-            s["real_wr"] = f"{wins}/{total} ({wins/total*100:.0f}%)" if total else "0%"
+    if strategy in strategies:
+        s = strategies[strategy]
+        s["real_trades"] = s.get("real_trades", 0) + 1
+        s["real_pnl"] = round(s.get("real_pnl", 0) + pnl, 2)
+        if result == "won":
+            s["real_wins"] = s.get("real_wins", 0) + 1
+        else:
+            s["real_losses"] = s.get("real_losses", 0) + 1
+        total = s["real_trades"]
+        wins = s.get("real_wins", 0)
+        s["real_wr"] = f"{wins}/{total} ({wins/total*100:.0f}%)" if total else "0%"
 
     audit["_meta"]["last_updated"] = datetime.now(timezone.utc).isoformat()
     audit_path.write_text(json.dumps(audit, indent=2))
-    if skipped_dup:
+    return True
+
+
+def check_settlement_invariant() -> bool:
+    """Warn if settlement_log, paper_trades resolved count, and rollup sum disagree.
+    Returns True if invariant holds. Call after settlement writes finish (single or batch).
+    """
+    audit_path = BOT_STATE_DIR / "strategy_audit.json"
+    if not audit_path.exists():
+        return True
+    try:
+        audit = json.loads(audit_path.read_text())
+        paper_trades = _load_json(PAPER_TRADES_FILE) or []
+        resolved_count = sum(
+            1 for t in paper_trades
+            if isinstance(t, dict)
+            and t.get("status") in ("won", "lost", "exited_early")
+            and (t.get("contracts") or t.get("filled") or 0) > 0
+        )
+        log_len = len(audit.get("settlement_log", []))
+        rollup_sum = sum(
+            s.get("real_trades", 0) for s in audit.get("strategies", {}).values()
+        )
+        if resolved_count == log_len == rollup_sum:
+            return True
+        logger.warning(
+            "Settlement invariant broken: paper=%d log=%d rollup=%d",
+            resolved_count, log_len, rollup_sum,
+        )
+        return False
+    except Exception as e:
+        logger.debug("Invariant check failed: %s", e)
+        return True
+
+
+def _log_settlements_to_audit(resolved: list[dict]):
+    """Thin wrapper: log each resolved trade via log_settlement(), then check invariant once."""
+    appended = 0
+    skipped = 0
+    for r in resolved:
+        if log_settlement(r):
+            appended += 1
+        else:
+            skipped += 1
+    if skipped:
         logger.info(
-            "Strategy audit updated: %d settlements logged (%d duplicate skipped)",
-            appended, skipped_dup,
+            "Strategy audit updated: %d settlements logged (%d duplicate/ghost skipped)",
+            appended, skipped,
         )
     else:
         logger.info("Strategy audit updated: %d settlements logged", appended)
+    check_settlement_invariant()
 
 
 # ---------------------------------------------------------------------------
