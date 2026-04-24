@@ -19,8 +19,15 @@ import asyncio
 import json
 import logging
 import pathlib
+import re
+import socket
+import ssl
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
+
+import certifi
 
 from bot.config import (
     ESPN_BASE, ESPN_SPORT_PATHS, ACTIVE_SPORTS,
@@ -42,6 +49,12 @@ import bot.odds_scraper as _odds
 from collections import deque
 
 logger = logging.getLogger("glint.live_watcher")
+
+_ESPN_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+
+# Strips "Game 3:", "Round 2:" and similar playoff-series prefixes from market
+# titles so team-name extraction still works during playoffs.
+_PLAYOFF_PREFIX_RE = re.compile(r"^(game|round)\s+\d+\s*:\s*", re.IGNORECASE)
 
 _LIVE_STATUSES = {"STATUS_IN_PROGRESS", "STATUS_HALFTIME", "STATUS_END_PERIOD"}
 _FINAL_STATUSES = {"STATUS_FINAL", "STATUS_POSTPONED", "STATUS_CANCELED"}
@@ -557,8 +570,14 @@ class LiveGameWatcher:
         - Tennis: "Will Harry Wendelken win the Fomin vs Wendelken..."
         - NBA:    "Phoenix at Los Angeles L Winner?" → extracts team matching query
         - Generic: "X at Y Winner?" or "X vs Y Winner?"
+        - Playoff series prefix: "Game 3: New York at Atlanta Winner?" → strips "game 3:"
         """
         title = title.lower()
+        # Strip playoff-series prefix ("game N:", "round N:") so downstream
+        # substring matching against ESPN's displayName works. NBA/NHL/MLB
+        # playoffs introduced these prefixes around Apr 19 2026 and broke
+        # `_fetch_espn_score()`'s `q in home_name or q in away_name` check.
+        title = _PLAYOFF_PREFIX_RE.sub("", title, count=1).strip()
         # Tennis / UFC style: "Will X win..."
         if "will " in title and " win " in title:
             name = title.split("will ", 1)[1].split(" win ", 1)[0].strip()
@@ -888,7 +907,10 @@ class LiveGameWatcher:
                 espn_data = await loop.run_in_executor(None, self._fetch_espn_score)
                 self._last_espn_data = espn_data
             except Exception:
-                pass
+                # _fetch_espn_score handles its own errors internally; this only
+                # catches executor-level failures (cancellation, loop teardown).
+                # Keep stale _last_espn_data rather than resetting to empty.
+                logger.exception("ESPN executor error (ticker=%s)", self.ticker)
         self._espn_tick_counter += 1
 
         # Derive score differential and update GameContext
@@ -1911,15 +1933,19 @@ class LiveGameWatcher:
         """
         if not self.sport:
             return {}
+        sport_path = ESPN_SPORT_PATHS.get(self.sport, "")
+        if not sport_path:
+            if not getattr(self, "_espn_unsupported_logged", False):
+                logger.warning(
+                    "ESPN not configured for sport=%r (ticker=%s); wp will stay at default 0.5",
+                    self.sport, self.ticker,
+                )
+                self._espn_unsupported_logged = True
+            return {}
+        url = f"{ESPN_BASE}/{sport_path}/scoreboard"
         try:
-            import json, ssl, urllib.request, certifi
-            sport_path = ESPN_SPORT_PATHS.get(self.sport, "")
-            if not sport_path:
-                return {}
-            url = f"{ESPN_BASE}/{sport_path}/scoreboard"
-            ctx = ssl.create_default_context(cafile=certifi.where())
             req = urllib.request.Request(url, headers={"User-Agent": "GlintBot/1.0"})
-            with urllib.request.urlopen(req, context=ctx, timeout=8) as resp:
+            with urllib.request.urlopen(req, context=_ESPN_SSL_CTX, timeout=8) as resp:
                 data = json.loads(resp.read().decode())
 
             _PERIOD_LABELS = {
@@ -1948,7 +1974,13 @@ class LiveGameWatcher:
                     else:
                         away_name, away_score = name, sc
                         away_linescores = ls
-                if q in home_name or q in away_name:
+                if q and (q in home_name or q in away_name):
+                    if not getattr(self, "_espn_success_logged", False):
+                        logger.info(
+                            "ESPN fetch OK (ticker=%s sport=%s): %s @ %s",
+                            self.ticker, self.sport, away_name, home_name,
+                        )
+                        self._espn_success_logged = True
                     sb = comp.get("status", {})
                     period = sb.get("period", 0)
                     labels = _PERIOD_LABELS.get(self.sport, {})
@@ -1981,8 +2013,25 @@ class LiveGameWatcher:
                         "situation": situation,
                         "last_play": last_play,
                     }
-        except Exception as e:
-            logger.debug("ESPN score fetch error: %s", e)
+            # Loop finished with no match — the query doesn't hit any competitor.
+            # Log once per watcher so we can see when team-name/query drift breaks matching.
+            if not getattr(self, "_espn_nomatch_logged", False):
+                sample = []
+                for ev in data.get("events", [])[:5]:
+                    comp0 = (ev.get("competitions", [{}]) or [{}])[0]
+                    for c in comp0.get("competitors", []):
+                        sample.append(_normalize(c.get("team", {}).get("displayName", "")))
+                logger.warning(
+                    "ESPN scoreboard had %d events, none matched query=%r (ticker=%s); sample names=%s",
+                    len(data.get("events", [])), q, self.ticker, sample[:8],
+                )
+                self._espn_nomatch_logged = True
+        except (urllib.error.URLError, socket.timeout, TimeoutError) as e:
+            logger.warning("ESPN fetch network error (ticker=%s): %s", self.ticker, e)
+        except json.JSONDecodeError as e:
+            logger.warning("ESPN fetch JSON parse error (ticker=%s): %s", self.ticker, e)
+        except Exception:
+            logger.exception("Unexpected ESPN fetch error (ticker=%s)", self.ticker)
         return {}
 
     def _compute_edge(
