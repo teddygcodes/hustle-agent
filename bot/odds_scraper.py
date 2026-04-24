@@ -1106,7 +1106,14 @@ def fetch_therundown_odds(sport: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _increment_odds_api_count(n: int = 1):
-    """Track Odds API usage in bot state."""
+    """Track The Odds API usage in bot state.
+
+    Only called from `_odds_api_fallback` — the paid last-resort source hit
+    after DK / FD / ESPN / TheRundown all fail. A stale `last_odds_api_request`
+    timestamp therefore means the paid fallback hasn't been hit, not that odds
+    data has stopped flowing. If ESPN/live watcher degrades, that's a Session 3
+    symptom, not this field.
+    """
     try:
         state = {}
         if BOT_STATE_FILE.exists():

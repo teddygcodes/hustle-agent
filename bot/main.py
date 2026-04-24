@@ -285,6 +285,25 @@ class GlintBot:
             except Exception:
                 pass
 
+        # Scheduler drift check: surface silent briefing failures so an 11-day
+        # stale morning briefing doesn't go unnoticed again (Session 4).
+        for _field, _label in (
+            ("last_morning_briefing", "morning briefing"),
+            ("last_nightly_summary", "nightly summary"),
+        ):
+            _last = state.get(_field)
+            if not _last:
+                continue
+            try:
+                _stale = (date.today() - date.fromisoformat(_last)).days
+                if _stale > 2:
+                    logger.warning(
+                        "Scheduler drift: %s %d days stale (last=%s) — check bot.log for exceptions",
+                        _label, _stale, _last,
+                    )
+            except Exception:
+                pass
+
         state["running"] = True
         state["started_at"] = datetime.now(timezone.utc).isoformat()
         _save_bot_state(state)
@@ -1035,6 +1054,7 @@ class GlintBot:
             today = date.today().isoformat()
             if state.get("current_date") != today:
                 state["scans_today"] = 0
+                state["crypto_trades_today"] = 0
                 state["current_date"] = today
             state["scans_today"] = state.get("scans_today", 0) + 1
             _save_bot_state(state)

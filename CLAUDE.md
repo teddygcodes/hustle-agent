@@ -467,20 +467,42 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 4 — Scheduler + bot_state revival
-**Problem.** Cron-style subsystems appear dead or disconnected:
-- `last_morning_briefing`: Apr 12 (9d stale).
-- `last_nightly_summary`: Apr 19 (2d+ stale).
-- `last_odds_api_request`: Apr 5 (16d stale — field may be dead code).
+### ☑ Session 4 — Scheduler + bot_state revival (Apr 23)
+**Problem (pre-fix).** Cron-style subsystems dead or drifting, five separate symptoms that turned out to be three distinct bugs plus one doc error plus one cosmetic stale counter:
+- `last_morning_briefing`: Apr 12 (11d stale on Apr 23).
+- `last_nightly_summary`: Apr 19 (4d stale).
+- `last_odds_api_request`: Apr 5 (18d stale).
 - `crypto_trades_today: 2902` despite `CRYPTO_ENABLED = False`.
 - `total_pnl: 0` — never written.
 
-**Changes.**
-- `scheduler.py` — verify morning briefing + nightly summary actually run. Confirm `GlintBot.start()` schedules `scheduler.run_forever` in its task group (likely missing or cancelled silently).
-- Reset `bot_state.json`: `crypto_trades_today = 0`, wire `total_pnl` from `paper_trades.json` on each nightly summary write.
-- Audit `last_odds_api_request`: either remove the field or reconnect whatever was supposed to write it.
+**Diagnosis.**
+- The Apr 20 plan assumed `GlintBot.start()` schedules `scheduler.run_forever` in a task group. **That function does not exist.** The scheduler is inline-polled from the main scan loop at `main.py:1015` via `check_scheduled_events(self)`. Correcting the architectural premise was step zero.
+- `scheduler.py` hour gate was `current_hour == MORNING_BRIEFING_HOUR`. Main loop sleeps 2-30 min. If the bot was restarting, crashed, or just polled during hour 7 then next hour 9, it saw the `==` fail and skipped the whole day. Hour 21 reconcile reliably fired because its window is an hour wide and the loop always hits it; hour 0 nightly + hour 8 morning were the narrow windows that kept getting missed. `==` is the bug; `>=` with a same-day fire-once flag is the fix.
+- `_send_nightly_summary` computed `total_pnl` from `compute_daily_summary()` but only used it in the Telegram message body. Never persisted back to `bot_state.json`.
+- Latent write-ordering bug discovered while fixing the above: outer `state` dict in `check_scheduled_events` was loaded once, then inner helpers mutated state on disk, then outer code wrote its stale copy back — clobbering `total_pnl`, `last_known_kalshi_balance`, `last_balance_reconcile`.
+- `crypto_trades_today: 2902` is a stale counter frozen at the last pre-Mar 1 `CRYPTO_ENABLED = True` session. The loop that increments it (`_crypto_scan_loop`) isn't even started now. Cosmetic, not a live bug.
+- `last_odds_api_request` is **not** dead code. `_increment_odds_api_count` at `odds_scraper.py:1108` writes it, but only from `_odds_api_fallback` — the paid-tier Odds API last-resort path hit after DK / FD / ESPN / TheRundown all fail. A stale timestamp just means the paid fallback hasn't been hit in 18 days, not that odds data stopped flowing. Doc error in the Apr 20 audit.
 
-**Verify.** Next configured morning time → Telegram briefing arrives. `bot_state.json.last_morning_briefing` advances. `total_pnl` updates after next nightly.
+**What shipped.**
+- `bot/scheduler.py` — Morning gate `== 8` → `8 <= hour < 20` (`MORNING_BRIEFING_CUTOFF_HOUR = 20` prevents "morning" briefing firing at 11pm after a late restart). Nightly gate gained a catch-up clause: `(hour == 0 and last != today) or (last and last < yesterday)` — if we missed a day, fire at any hour. Reconcile left at `== 21` (hour-long window, always fires). Three `except Exception as e: logger.error(...)` upgraded to `logger.exception(...)` so tracebacks surface in `bot.log`.
+- `bot/scheduler.py` — `_send_nightly_summary` now persists `total_pnl` + `today_pnl` to `bot_state.json` via `_load_bot_state` → mutate → `_save_bot_state`, matching Session 4's plan.
+- `bot/scheduler.py` — Write-ordering fix: after `_send_nightly_summary` and `_reconcile_daily_balance` return, `check_scheduled_events` now `_load_bot_state()` fresh before stamping `last_nightly_summary` / `last_balance_reconcile_date`. Outer no longer clobbers inner writes.
+- `bot/main.py` — Daily-rollover block at `main.py:1037` now zeroes `crypto_trades_today` alongside `scans_today` on date change. Still needs one-time hand-edit of `bot_state.json` to kill the existing 2902 (see coordination item below).
+- `bot/main.py` — New startup drift check in `GlintBot.start()` after the heartbeat watchdog: reads `last_morning_briefing` and `last_nightly_summary`, logs `WARNING` if either is >2 days stale. Surfaces silent scheduler failures next time instead of discovering them 11 days later.
+- `bot/odds_scraper.py` — Multi-line docstring on `_increment_odds_api_count` documenting that this is the paid-fallback liveness signal, not a general odds-flow signal.
+- `tests/test_scheduler.py` (new, 14 tests across 4 classes) — Mock-clock via `datetime` subclass. Covers: fires-at-8am-if-not-yet-today, catch-up-at-9:30am, no-refire-same-day, no-fire-before-8am, no-fire-after-8pm-cutoff, next-day-rollover, midnight-nightly, catch-up-missed-day, no-false-catch-up-if-fired-yesterday, 21:00-reconcile, outside-21-does-not-fire, no-refire-same-day-reconcile, total-pnl-persists-to-bot-state.
+
+**Test results.** `python3 -m pytest tests/test_scheduler.py -v` → 14 passed. The broader suite has 7 unrelated pre-existing failures (stale Apr 18 pin on `WEATHER_MIN_PRICE`, live_watcher `_trailing_active` attribute missing in two session-summary tests, one position-limit test that predates Session 2) plus 2 `test_watchdog_*` failures that are pre-existing (the watchdog alert path has `# Watchdog alert silenced` at `main.py:313` — alert is set then immediately cleared without sending, the tests expect `send_message` to be called). None are caused by Session 4 changes.
+
+**Coordination with user (pending).** Stop bot → hand-edit `bot/state/bot_state.json` to set `crypto_trades_today: 0` → restart. The daily-rollover fix prevents regrowth but can't retroactively zero the stale value.
+
+**What Session 4 was NOT.** Did not restructure the scheduler into a dedicated 60s asyncio task — the inline-polled architecture works once the gate is correct. Did not touch Session 3 ESPN restoration. Did not change `NIGHTLY_SUMMARY_HOUR` from 0 to 23 (arguably better semantics, but behavior preserved).
+
+**Verify (live, over next 24h).** After restart:
+1. `bot.log` shows `"Scheduler drift: morning briefing 11 days stale..."` and `"Scheduler drift: nightly summary 4 days stale..."` warnings at startup.
+2. Next 8am ET → Telegram morning briefing arrives. `bot_state.json.last_morning_briefing` advances to today.
+3. Next midnight ET → Telegram nightly summary arrives. `bot_state.json.last_nightly_summary` advances. `bot_state.json.total_pnl` becomes a non-zero number matching `compute_daily_summary()["total_pnl"]` (expected ≈ −$98 per post-Apr-20 ground truth).
+4. Day after: `crypto_trades_today` stays 0 after date rollover.
 
 ---
 

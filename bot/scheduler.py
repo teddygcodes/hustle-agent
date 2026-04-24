@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,7 @@ from bot.config import (
 )
 
 RECONCILE_BALANCE_HOUR = 21  # 9pm ET — after US markets close
+MORNING_BRIEFING_CUTOFF_HOUR = 20  # Don't fire "morning" briefing after 8pm ET
 
 logger = logging.getLogger("glint.scheduler")
 
@@ -49,13 +50,17 @@ async def check_scheduled_events(bot) -> None:
     """
     now_et = datetime.now(ET)
     today_str = now_et.strftime("%Y-%m-%d")
+    yesterday_str = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
     current_hour = now_et.hour
 
     state = _load_bot_state()
 
-    # --- Morning briefing (8am ET) ---
+    # --- Morning briefing (>= 8am ET, same-day fire-once, cutoff 8pm) ---
+    # Gate was `==` before Session 4 — missed any hour the bot wasn't polling
+    # at that minute. `>=` with a cutoff lets a restarted bot still send a
+    # useful briefing, without firing "morning" at 11pm.
     if (
-        current_hour == MORNING_BRIEFING_HOUR
+        MORNING_BRIEFING_HOUR <= current_hour < MORNING_BRIEFING_CUTOFF_HOUR
         and state.get("last_morning_briefing") != today_str
     ):
         logger.info("Sending morning briefing...")
@@ -63,21 +68,28 @@ async def check_scheduled_events(bot) -> None:
             await _send_morning_briefing(bot)
             state["last_morning_briefing"] = today_str
             _save_bot_state(state)
-        except Exception as e:
-            logger.error(f"Morning briefing failed: {e}")
+        except Exception:
+            logger.exception("Morning briefing failed")
 
-    # --- Nightly summary (midnight ET) ---
-    if (
-        current_hour == NIGHTLY_SUMMARY_HOUR
-        and state.get("last_nightly_summary") != today_str
-    ):
+    # --- Nightly summary (midnight ET, with catch-up) ---
+    # Normal fire: hour 0 and not yet fired today.
+    # Catch-up: any hour if last fire is older than yesterday (missed a day).
+    last_nightly = state.get("last_nightly_summary", "")
+    should_fire_nightly = (
+        (current_hour == NIGHTLY_SUMMARY_HOUR and last_nightly != today_str)
+        or (last_nightly and last_nightly < yesterday_str)
+    )
+    if should_fire_nightly:
         logger.info("Sending nightly summary...")
         try:
             await _send_nightly_summary(bot)
+            # Re-read: _send_nightly_summary persists total_pnl/today_pnl.
+            # Reload so we don't clobber it with the pre-briefing `state` copy.
+            state = _load_bot_state()
             state["last_nightly_summary"] = today_str
             _save_bot_state(state)
-        except Exception as e:
-            logger.error(f"Nightly summary failed: {e}")
+        except Exception:
+            logger.exception("Nightly summary failed")
 
     # --- Daily balance reconciliation (9pm ET) ---
     if (
@@ -87,10 +99,13 @@ async def check_scheduled_events(bot) -> None:
         logger.info("Running daily balance reconciliation...")
         try:
             await _reconcile_daily_balance(bot)
+            # Reload: _reconcile_daily_balance writes last_known_kalshi_balance
+            # and last_balance_reconcile internally.
+            state = _load_bot_state()
             state["last_balance_reconcile_date"] = today_str
             _save_bot_state(state)
-        except Exception as e:
-            logger.error(f"Balance reconciliation failed: {e}")
+        except Exception:
+            logger.exception("Balance reconciliation failed")
 
 
 async def _send_morning_briefing(bot):
@@ -169,6 +184,16 @@ async def _send_nightly_summary(bot):
     summary = compute_daily_summary()
     streak = get_streak()
     roi_by_type = get_roi_by_strategy()
+
+    # Persist headline P&L numbers to bot_state so STATUS/briefings and the
+    # dashboard read a live value instead of the default 0. (Session 4)
+    try:
+        persisted = _load_bot_state()
+        persisted["total_pnl"] = summary.get("total_pnl", 0)
+        persisted["today_pnl"] = summary.get("today_pnl", 0)
+        _save_bot_state(persisted)
+    except Exception as e:
+        logger.warning(f"Nightly summary: failed to persist P&L to bot_state: {e}")
 
     lines = [
         "🌙 NIGHTLY SUMMARY",
