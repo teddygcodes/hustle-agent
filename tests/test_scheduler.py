@@ -216,6 +216,99 @@ class TestBalanceReconcile:
         assert calls["reconcile"] == 0
 
 
+class TestLiveTicksRotation:
+    """Session 5: nightly live_ticks.jsonl → state/archive/*.jsonl.gz rotation."""
+
+    @pytest.fixture
+    def tmp_ticks(self, tmp_path, monkeypatch):
+        """Repoint TICK_LOG_FILE to a tmp directory."""
+        ticks = tmp_path / "live_ticks.jsonl"
+        from bot import live_watcher
+        monkeypatch.setattr(live_watcher, "TICK_LOG_FILE", ticks)
+        return ticks
+
+    def _seed_ticks(self, path, count=200):
+        # Each tick ≥ 50 bytes → comfortably above the 1KB rotation floor.
+        path.write_text("\n".join(
+            json.dumps({"ticker": f"T{i}", "price": 50 + i, "ts": "x"})
+            for i in range(count)
+        ) + "\n")
+
+    def test_fires_at_midnight_and_archives_file(self, tmp_state, tmp_ticks, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed_ticks(tmp_ticks)
+        original_size = tmp_ticks.stat().st_size
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        # Original file is gone; archive contains the gzip.
+        assert not tmp_ticks.exists()
+        archive_dir = tmp_ticks.parent / "archive"
+        gz = archive_dir / "live_ticks-2026-04-24.jsonl.gz"
+        assert gz.exists()
+        assert gz.stat().st_size < original_size  # gzip actually shrunk it
+
+        state = _read_state(tmp_state)
+        assert state["last_ticks_rotation"] == "2026-04-24"
+
+    def test_skips_if_file_too_small(self, tmp_state, tmp_ticks, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        tmp_ticks.write_text('{"x":1}\n')  # 8 bytes, below the 1KB floor
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        # File untouched, but flag still advances (we did "consider" rotation)
+        assert tmp_ticks.exists()
+        assert (tmp_ticks.parent / "archive").exists() is False
+        assert _read_state(tmp_state)["last_ticks_rotation"] == "2026-04-24"
+
+    def test_no_refire_same_day(self, tmp_state, tmp_ticks, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed_ticks(tmp_ticks)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 30, tzinfo=ET))
+        _set_state(tmp_state, last_ticks_rotation="2026-04-24")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        # File untouched because gate already fired today.
+        assert tmp_ticks.exists()
+        assert not (tmp_ticks.parent / "archive").exists()
+
+    def test_catch_up_if_missed_a_day(self, tmp_state, tmp_ticks, mock_bot, monkeypatch):
+        """If last_ticks_rotation is older than yesterday, rotate at any hour."""
+        _install_body_mocks(monkeypatch)
+        self._seed_ticks(tmp_ticks)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 14, 0, tzinfo=ET))
+        _set_state(tmp_state, last_ticks_rotation="2026-04-19")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        gz = tmp_ticks.parent / "archive" / "live_ticks-2026-04-24.jsonl.gz"
+        assert gz.exists()
+
+    def test_collision_appends_suffix(self, tmp_state, tmp_ticks, mock_bot, monkeypatch):
+        """If today's archive already exists, dest gets a -2 suffix."""
+        _install_body_mocks(monkeypatch)
+        self._seed_ticks(tmp_ticks)
+        archive_dir = tmp_ticks.parent / "archive"
+        archive_dir.mkdir()
+        # Pre-existing gzip from an earlier rotation today
+        (archive_dir / "live_ticks-2026-04-24.jsonl.gz").write_bytes(b"prior")
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert (archive_dir / "live_ticks-2026-04-24.jsonl.gz").read_bytes() == b"prior"
+        assert (archive_dir / "live_ticks-2026-04-24-2.jsonl.gz").exists()
+
+
 class TestTotalPnlPersist:
     """After nightly fires, bot_state['total_pnl'] reflects compute_daily_summary."""
 

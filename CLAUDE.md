@@ -288,25 +288,22 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 
 | File | Purpose |
 |---|---|
-| `bot.lock` | PID lockfile. Deleted on graceful shutdown. |
-| `bot_state.json` | Last scan time, heartbeat, scan counters, DK/FD disabled flags (12h TTL). |
+| `bot.lock` | PID lockfile. Deleted on graceful shutdown. **Mtime advances each heartbeat (Apr 23, Session 5)** — fresh mtime + dead PID means the process was killed between scans without releasing the lock. |
+| `bot_state.json` | Last scan time, heartbeat, scan counters, DK/FD disabled flags (12h TTL), Session-5 `last_ticks_rotation` flag. |
 | `positions.json` | **Source of truth for open positions.** Exposure calc reads this. |
-| `trade_history.json` | Append-only resolved trade log. |
-| `paper_trades.json` | Paper mode trade log — balance is reconstructed from this. |
-| `paper_trades_archive.json` | Old paper trades (rotated to prevent the main file from bloating). |
+| `trade_history.json` | **Order log.** Every `execute_trade()` and `execute_hedge()` appends a record (filled OR resting). `tracker.resolve_trades()` updates entries in-place when markets settle. Distinct from `paper_trades.json` (the paper-mode resolution log). Read by the Telegram `HISTORY` command and `patterns.analyze_patterns()`. |
+| `paper_trades.json` | **Paper resolution log.** Balance is reconstructed from this. NOT the same as `trade_history.json` (orders) — paper-mode resolutions live here, with `status ∈ {won, lost, exited_early}` driving the post-Session-1 settlement pipeline. |
+| `archive/live_ticks-YYYY-MM-DD.jsonl.gz` | Daily gzipped tick archives. Created by `scheduler._rotate_live_ticks()` at midnight ET (Apr 23, Session 5). |
 | `pending.json` | Queue of opportunities waiting for GO/SKIP. Max `PENDING_MAX = 20`. |
 | `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. |
 | `live_ticks.jsonl` | Append-only **enriched** tick log: price, leader, wp, momentum, lead_trend, completion, wp_edge, bid, opp_bid, volatility, espn_scores, game_state. Feeds ANALYZE. |
 | `strategy_audit.json` | **Read this to understand every strategy's real-money status.** Auto-updated by `tracker.py` on every settlement (append to `settlement_log`). |
 | `patterns.json` | Historical win rate per strategy type for dynamic confidence (`scanner.py:_get_dynamic_confidence`). |
-| `odds_snapshots.json` | Last 2 odds snapshots for line-movement detection. |
-| `price_cache.json` | Short-lived price cache used by `price_monitor.py`. |
-| `clv.json` | Closing-line value records per trade. |
+| `clv.json` | Closing-line value records per trade. **`clv._load()` filters to active strategies on read (Apr 23, Session 5)** — disabled-strategy records get dropped and never re-saved. |
 | `outcomes.db` | SQLite: alert → outcome log for calibration. |
 | `elo_ratings.json` | Sport ELO ratings (lightly used). |
 | `mm_positions.json` | Market-maker pair state. |
 | `daily_log.json` | Rolling daily performance snapshot. |
-| `watchlist.json` | Manual watchlist tickers. |
 
 **Never hand-edit these while the bot is running** — the bot re-reads on every scan and you'll lose writes. Stop bot → edit → restart.
 
@@ -339,6 +336,8 @@ YES-side trades compute edge from `yes_ask`. NO-side (vig_stack) trades MUST als
 
 ### 6. Watchdog heartbeat
 `GlintBot.start()` checks `last_heartbeat` in `bot_state.json`. If stale > 15 min and `running=True`, logs a watchdog alert (currently silenced before sending). Useful signal that the previous process crashed silently — check `bot.log` for what happened.
+
+**Apr 23 (Session 5):** `bot.lock` mtime now also advances each heartbeat (one-line `LOCK_FILE.touch()` after `_save_bot_state(state)` in the main scan loop). Two new failure signatures: (a) **fresh `bot.lock` mtime + dead PID** → process was killed between scans without releasing the lock (rm the lock and restart); (b) **`bot.lock` mtime > 15 min stale + `_pid_is_running` → True** → process is alive but the scan loop is wedged (check `bot.log` for stuck I/O or held asyncio lock).
 
 ### 7. Kalshi position reconcile on startup
 If the bot crashed between placing an order and writing to `positions.json`, the position exists on Kalshi but not locally. On startup, `GlintBot.start()` calls `kalshi_get_positions()` and merges any missing ones with `source: "kalshi_reconcile"`. If you see reconcile warnings on startup, that's why.
@@ -404,7 +403,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Apr 20 Audit — Remediation Plan
 
-The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions below. Each is self-contained, verifies against `bot/state/`, and can land independently. **Execution order: 1 → 2 → 5 → 3 → 4.** Session 1 is foundational (audit integrity) — every performance claim downstream depends on it. Session 2 stops the active dollar leaks. Session 5 is safe cleanup and can interleave. Sessions 3 and 4 are diagnose-then-fix.
+The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions below. Each is self-contained, verifies against `bot/state/`, and can land independently. **Planned order: 1 → 2 → 5 → 3 → 4.** All five sessions shipped (Apr 20 / Apr 23).
 
 Status legend: ☐ pending · ◐ in-progress · ☑ done.
 
@@ -453,17 +452,27 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 3 — Live-watcher ESPN restoration
-**Problem.** 3000/3000 recent live ticks have `espn_scores: None`. `wp` also missing on most. The watcher is running on Kalshi price alone — TP/SL still fire, but momentum/DQS/conviction logic is degraded (`wp_edge > 8%` gate never passes).
+### ☑ Session 3 — Live-watcher ESPN restoration (Apr 23)
+**Problem (pre-fix).** 3000/3000 recent live ticks had `espn_scores: None`; `wp` defaulted to 0.5 on most. Watcher was running on Kalshi price alone — TP/SL still fired, but momentum/DQS/conviction was degraded (`wp_edge > 8%` gate never passed).
 
-**Diagnose first.**
-1. `grep -i "espn\|_fetch_espn_score" bot/logs/bot.log | tail -100` — find last successful fetch timestamp + error pattern.
-2. Invoke `_fetch_espn_score()` manually against a known-live game; inspect response shape vs parser expectations in `live_watcher.py`.
-3. Rule out: API path change, required UA header, silent exception swallow, cert issue, rate limit.
+**Root cause.** The ESPN scoreboard fetch was silently failing on three fronts at once: missing User-Agent header (ESPN started 403'ing requests without one), default SSL context using the system store (intermittent cert validation failures), and exceptions getting swallowed by a bare `except:` so nothing ever surfaced in `bot.log`.
 
-**Fixes (pick one after diagnosis).** API path/query update · add UA header · replace bare except with logged exception · fallback to TheRundown or ESPN gamecast HTML scrape.
+**What shipped.**
+- `bot/config.py` — `ESPN_BASE` + `ESPN_SPORT_PATHS` constants (nba/mlb/nhl/nfl/ncaab path mapping) hoisted out of `live_watcher.py` and into config so they can be reused/tested.
+- `bot/live_watcher.py:_fetch_espn_score` — added `User-Agent: GlintBot/1.0` header; switched to `_ESPN_SSL_CTX = ssl.create_default_context(cafile=certifi.where())`; replaced bare except with structured error logging; added one-shot success log per (ticker, sport) so a working fetch is visible without log spam; added "no events matched query" warning with the sample of returned team names so pre-game-vs-tomorrow mismatches are debuggable.
+- Sports without ESPN scoreboard support (tennis variants, UFC) get a one-shot "ESPN not configured for sport=..." warning instead of silently returning empty — confirms the sport is recognized as unsupported, not broken.
 
-**Verify.** 10 minutes of new live ticks: `grep espn_scores bot/state/live_ticks.jsonl | tail -20` shows non-null for live games. `wp` field populates.
+**Test results (live, last 500 ticks 2026-04-23):**
+
+| Sport | Total | espn_scores | wp | wp_edge |
+|---|---|---|---|---|
+| nhl | 68 | 68/68 ✓ | 68/68 | 68/68 |
+| nba | 217 | (live games OK; pre-game queries against tomorrow's scoreboard return None as expected) | 217/217 | 217/217 |
+| atp_challenger | 215 | 0/215 (expected — tennis has no ESPN scoreboard) | 215/215 | 215/215 |
+
+`bot.log` confirms periodic `ESPN fetch OK` lines for in-progress NHL and NBA games (e.g., `colorado avalanche @ los angeles kings`, `denver nuggets @ minnesota timberwolves`). Pre-game NBA tickers (`KXNBAGAME-26APR24*`) get the new "events had N, none matched query" warning — surfacing the explainable miss instead of silent None.
+
+**Verify.** `grep espn_scores bot/state/live_ticks.jsonl | tail -100` — non-null for live NHL/NBA games. `grep "ESPN fetch OK\|ESPN not configured\|none matched query" bot/logs/bot.log | tail` — see the three success/info patterns above. `python3 -c "import json; ticks=[json.loads(l) for l in open('bot/state/live_ticks.jsonl')][-500:]; print(sum(1 for t in ticks if t.get('wp') is not None), '/', len(ticks))"` — should be 100%.
 
 ---
 
@@ -506,17 +515,29 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 5 — State hygiene
-**Problem.** 216MB of state with ~150MB bloat or zombies. No trading impact; just noise in tooling and dashboards.
+### ☑ Session 5 — State hygiene (Apr 23)
+**Problem (pre-fix).** Apr 20 audit cited 216MB of `bot/state/` with ~150MB bloat. Reality check at Apr 23 22:48 was 117MB (paper rotation already trimmed half), of which **108MB was `live_ticks.jsonl` alone** (148,851 lines, Apr 9 → Apr 24, growing unbounded). Other zombies: 236/448 (53%) of `clv.json` records were for disabled strategies; six confirmed-stale files (`odds_snapshots.json`, `price_cache.json`, `watchlist.json`, `paper_trades_archive.json`, two Apr 18 `.bak` leftovers); `bot.lock` mtime frozen since startup so it couldn't act as a liveness signal; CLAUDE.md state-files table conflated `trade_history.json` (order log) with `paper_trades.json` (paper resolution log). No trading impact — purely cleanup.
 
-**Changes (safe, cosmetic).**
-- Purge `clv.json` records where `opp_type` is in disabled strategies (227/424 entries). Add filter at read in `clv.py` to prevent re-accumulation.
-- Delete stale files: `odds_snapshots.json` (12d), `price_cache.json` (12d), `watchlist.json` (3 bytes, 15d), `strategy_audit.json.bak-*` (Apr 18 leftovers), `paper_trades_archive.json` if rotation is permanently retired.
-- Nightly rotation for `live_ticks.jsonl` (currently 108MB): at UTC midnight, move to `state/archive/live_ticks-YYYY-MM-DD.jsonl.gz` and truncate active file.
-- Document or deprecate `trade_history.json`. It's an order-level log (379 entries, 285 resting + 94 filled), not a resolution log like `paper_trades.json`. CLAUDE.md state-files table currently implies they're the same — fix the description or drop the file.
-- Refresh `bot.lock` mtime on every heartbeat so the lockfile is a liveness signal (currently written once at startup, then frozen — useless for detecting zombies).
+**What shipped.**
+- `bot/clv.py` — new `_active_strategies()` helper (returns `set(ACTIVE_STRATEGIES) | {"live_momentum"}`); `_load()` filters out any record whose `opp_type` isn't in that set. Single read site (`record_clv_entry`, `check_clv_settlements`, `get_clv_report` all go through it), so the next `_save` automatically drops disabled-strategy noise from disk.
+- `tools/purge_clv_disabled.py` — one-shot. Asserts `bot.lock` is gone or PID is dead, requires `--yes`, backs up `clv.json` → `clv.json.bak-YYYYMMDD`, drops 236 records (kept 212 active: live_momentum 110, vig_stack_series 101, vig_stack_futures 1).
+- `tools/clean_stale_state.py` — one-shot. Same safety gates. Deletes the six stale files (~210KB total). Explicitly preserves `strategy_audit.json.bak-20260421` (Session 1 backup, still cited above).
+- `bot/scheduler.py` — new `_rotate_live_ticks(today_str)` helper + new gate in `check_scheduled_events` mirroring the Session 4 pattern (hour 0 ET + same-day flag `last_ticks_rotation` + catch-up clause for missed days). Rotation: rename `live_ticks.jsonl` → `state/archive/live_ticks-YYYY-MM-DD.jsonl`, gzip via `shutil.copyfileobj`, unlink the .jsonl. Race-safe because `live_watcher._log_tick` reopens the file every write — a tick that fires mid-rotation lands in a fresh file at the original path. Collisions get `-2`, `-3` suffixes. Skip if file < 1KB.
+- `bot/main.py` — single line `LOCK_FILE.touch()` after `_save_bot_state(state)` in the heartbeat block (around line 1061). Lock mtime now advances every scan, becoming a real liveness signal. No code currently reads the mtime (Explore-agent verified), so this is purely additive — startup PID checks at `_acquire_lock` are unchanged.
+- `tests/test_scheduler.py` — new `TestLiveTicksRotation` class, 5 cases: fires-at-midnight-and-archives, skip-if-file-too-small, no-refire-same-day, catch-up-if-missed-a-day, collision-appends-suffix. Uses a tmp-path fixture that monkeypatches `live_watcher.TICK_LOG_FILE`.
+- `CLAUDE.md` — state-files table updated: `trade_history.json` and `paper_trades.json` rows now distinguish order log vs resolution log; `bot.lock`, `bot_state.json`, `clv.json` rows annotated with Session 5 changes; `archive/live_ticks-*.jsonl.gz` row added; deleted-file rows (`odds_snapshots`, `price_cache`, `watchlist`, `paper_trades_archive`) removed. Gotcha #6 extended with two new bot.lock failure signatures.
 
-**Verify.** `du -sh bot/state/` drops from ~216MB → ~110MB. `clv.json` has zero disabled-strategy records. `bot.lock` mtime advances with each scan cycle.
+**Test results.** `python3 -m pytest tests/test_scheduler.py -v` → 19 passed (14 existing + 5 new rotation cases). The broader suite still has the same 7+2 pre-existing failures noted in Session 4 — none are caused by Session 5 changes.
+
+**Coordination with user (deploy).** Stop bot → `python3 tools/purge_clv_disabled.py --yes` → `python3 tools/clean_stale_state.py --yes` → restart. Code-path changes (clv filter, scheduler rotation, lock touch) deploy via the restart itself.
+
+**Verify (live).**
+1. `du -sh bot/state/` — drops by ~210KB immediately after one-shots; drops by ~108MB at next midnight ET (rotation). Steady-state should be ~10MB after first rotation.
+2. `python3 -c "import json; clv=json.load(open('bot/state/clv.json')); print(sorted(set(r['opp_type'] for r in clv)))"` — only active strategies present.
+3. `ls bot/state/*.bak*` — only `strategy_audit.json.bak-20260421` remains.
+4. `stat -f "%Sm" bot/state/bot.lock` — sample twice 60s apart, mtime advances.
+5. After next midnight ET (or temporarily set `last_ticks_rotation` to a stale date in `bot_state.json` and trigger): `ls bot/state/archive/` shows `live_ticks-2026-04-24.jsonl.gz`; fresh `live_ticks.jsonl` is small; `gzip -dc bot/state/archive/live_ticks-2026-04-24.jsonl.gz | wc -l` matches the pre-rotation line count.
+6. Telegram `CLV` returns a report (no crash on empty disabled-strategy bins).
 
 ---
 

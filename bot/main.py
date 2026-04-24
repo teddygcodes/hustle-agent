@@ -1058,6 +1058,7 @@ class GlintBot:
                 state["current_date"] = today
             state["scans_today"] = state.get("scans_today", 0) + 1
             _save_bot_state(state)
+            LOCK_FILE.touch()  # Session 5: lock mtime is now a liveness signal
 
             # ----------------------------------------------------------
             # Step 3: Scan for opportunities (ESPN = FREE)

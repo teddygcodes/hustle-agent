@@ -36,15 +36,26 @@ def _get_file() -> Path:
     return _CLV_FILE
 
 
+def _active_strategies() -> set[str]:
+    # Scanner-driven strategies + live_momentum (runs via live_watcher,
+    # not in ACTIVE_STRATEGIES). Drop any record whose opp_type isn't here —
+    # disabled-strategy CLV records are noise (Apr 23 Session 5).
+    from bot.config import ACTIVE_STRATEGIES
+    return set(ACTIVE_STRATEGIES) | {"live_momentum"}
+
+
 def _load() -> list[dict]:
     f = _get_file()
-    if f.exists():
-        try:
-            data = json.loads(f.read_text())
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
-    return []
+    if not f.exists():
+        return []
+    try:
+        data = json.loads(f.read_text())
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    active = _active_strategies()
+    return [r for r in data if r.get("opp_type") in active]
 
 
 def _save(records: list[dict]):

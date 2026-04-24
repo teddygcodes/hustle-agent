@@ -7,8 +7,10 @@ Uses zoneinfo for timezone handling. Called each main loop iteration.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
+import shutil
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -106,6 +108,63 @@ async def check_scheduled_events(bot) -> None:
             _save_bot_state(state)
         except Exception:
             logger.exception("Balance reconciliation failed")
+
+    # --- Nightly live_ticks rotation (midnight ET, with catch-up) ---
+    # Session 5: file grew to 108MB unbounded. Rotate to gzipped daily archive.
+    last_rotation = state.get("last_ticks_rotation", "")
+    should_rotate = (
+        (current_hour == 0 and last_rotation != today_str)
+        or (last_rotation and last_rotation < yesterday_str)
+    )
+    if should_rotate:
+        logger.info("Rotating live_ticks.jsonl...")
+        try:
+            _rotate_live_ticks(today_str)
+            state = _load_bot_state()
+            state["last_ticks_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Live ticks rotation failed")
+
+
+def _rotate_live_ticks(today_str: str) -> None:
+    """Move live_ticks.jsonl → state/archive/live_ticks-YYYY-MM-DD.jsonl.gz.
+
+    Race-safe: live_watcher._log_tick reopens the file each write, so renaming
+    it out from under the writer is fine — the next tick creates a fresh file
+    at the original path.
+    """
+    from bot.live_watcher import TICK_LOG_FILE
+
+    if not TICK_LOG_FILE.exists() or TICK_LOG_FILE.stat().st_size < 1024:
+        logger.info("Live ticks: nothing to rotate (missing or <1KB)")
+        return
+
+    archive_dir = TICK_LOG_FILE.parent / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = archive_dir / f"live_ticks-{today_str}.jsonl"
+    suffix = 2
+    while dest.exists() or dest.with_suffix(".jsonl.gz").exists():
+        dest = archive_dir / f"live_ticks-{today_str}-{suffix}.jsonl"
+        suffix += 1
+
+    original_size = TICK_LOG_FILE.stat().st_size
+    TICK_LOG_FILE.rename(dest)
+
+    gz_dest = dest.with_suffix(".jsonl.gz")
+    with open(dest, "rb") as src, gzip.open(gz_dest, "wb") as gz:
+        shutil.copyfileobj(src, gz)
+    dest.unlink()
+
+    gz_size = gz_dest.stat().st_size
+    logger.info(
+        "Live ticks rotated: %s (%.1fMB → %.1fMB gzipped, %.0f%% saved)",
+        gz_dest.name,
+        original_size / 1_048_576,
+        gz_size / 1_048_576,
+        100 * (1 - gz_size / original_size) if original_size else 0,
+    )
 
 
 async def _send_morning_briefing(bot):
