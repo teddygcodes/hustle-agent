@@ -19,7 +19,8 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 - **STRATEGY_BUDGETS (Apr 16):** `vig_stack` 60%, `live_momentum` 20%, `arbs` 20% (fractions of equity). Prevents any one strategy from starving the others.
 - **Disabled (data-driven kills):** weather single-market (17% WR), series_game_edge (26% WR), all crypto (`CRYPTO_ENABLED=False`), economic indicators, parlay edge. See `config.py:ACTIVE_STRATEGIES` for the current truth.
 - **Apr 20 redemption plan: complete (Sessions 1–5).** Settlement-pipeline rebuild, active-strategy retuning, ESPN fetch restoration, scheduler hardening + drift warnings, state hygiene (live_ticks rotation + clv filter + lock heartbeat).
-- **Apr 24–25 closed-loop data collection: complete (Sessions 6–11).** Per-decision audit log, counterfactual CLV records, stratified sampling across (gate, opp_type), live-momentum edge proxy + 30s heartbeat lock-touch, per-position MFE/MAE, gate-context enrichment, fair-value calibration loop. The bot now self-instruments — every accept and every reject carries a gate fingerprint and downstream outcome attribution. Calibration data needs ~7 days to mature before reports become actionable. See [Recent Improvements](#recent-improvements-apr-2025) below.
+- **Apr 24–25 closed-loop data collection: complete (Sessions 6–11).** Per-decision audit log, counterfactual CLV records, stratified sampling across (gate, opp_type), live-momentum edge proxy + 30s heartbeat lock-touch, per-position MFE/MAE, gate-context enrichment, fair-value calibration loop. The bot now self-instruments — every accept and every reject carries a gate fingerprint and downstream outcome attribution.
+- **Apr 25 pivot-enabling instrumentation arc: complete (Sessions 12–15).** Universe log (every active Kalshi market each scan, with `scanned_by` attribution — first snapshot found 53% of markets ignored by every active strategy), Strategy Protocol contract (pure-function strategies that take Market data in, return Opportunity dicts out), offline back-tester sharing the same `compute_clv_cents` function as live trading (no parallel codepath), hypothetical-variant report (parameter sweeps without going live), Kalshi history fallback for back-testing tickers we never traded, regime tagger (time_of_day / day_of_week / sport_phase / event_horizon_hr on every record), live-order microstructure capture (plumbing-only — verification deferred until `PAPER_MODE=False`). The bot now genuinely supports evaluating alternatives: sweep known parameters, back-test brand-new strategies on never-traded markets, slice every report by regime. See [Recent Improvements](#recent-improvements-apr-2025) below. Calibration data still needs ~7 days to mature before retuning recommendations crystallize.
 
 ---
 
@@ -523,6 +524,14 @@ hustle-agent/
 │   ├── clv.py               # Closing-Line Value per strategy + counterfactual records for stratified rejected opportunities (Apr 24 Sessions 6/8); MFE/MAE propagation at settlement (Apr 24 Session 9); paired prediction emission (Apr 25 Session 11)
 │   ├── decisions.py         # Per-decision audit log — atomic JSONL append (Apr 24 Session 6)
 │   ├── calibration.py       # Per-prediction fair-value log + ±60s settlement matching (Apr 25 Session 11)
+│   ├── universe.py          # Per-scan snapshot of every active Kalshi market with scanned_by attribution; two-pass cursor + per-active-series shadow fetch (Apr 25 Session 12)
+│   ├── regime.py            # Pure-function regime tagger — time_of_day / day_of_week / sport_phase / event_horizon_hr (Apr 25 Session 14)
+│   ├── kalshi_history.py    # Settled-market close fetch + permanent cache for back-testing tickers we never traded (Apr 25 Session 13c)
+│   ├── order_microstructure.py # Per-live-order lifecycle capture (place / partial fills / terminal). Plumbing-only — empty until PAPER_MODE=False (Apr 25 Session 15)
+│   ├── strategies/          # Strategy contract + concrete implementations (Apr 25 Session 13)
+│   │   ├── __init__.py      # Strategy Protocol + Market dataclass — pure-function strategies that take Markets in, return Opportunities out
+│   │   ├── vig_stack_series.py  # Refactored from scan_vig_stack_series; supports parameter overrides via __init__ kwargs (13c)
+│   │   └── nba_game_momentum_strawman.py  # 60-line strawman targeting KXNBAGAME — verifies the contract is general (13c PART 4)
 │   │
 │   ├── live_watcher.py      # Per-game 10s-tick watcher — live_momentum + live arb; wp_edge proxy + dampened decision logging (Apr 24 Session 7)
 │   ├── game_context.py      # Live game intelligence: momentum, win_prob, DQS, instincts
@@ -537,16 +546,21 @@ hustle-agent/
 │   ├── outcome_tracker.py   # Trade outcome logging for calibration
 │   ├── notifier.py          # Telegram formatting and HTTP sender
 │   ├── patterns.py          # Historical win rate per strategy type (dynamic confidence)
-│   ├── scheduler.py         # Cron events (morning briefing, nightly summary, balance reconcile, live_ticks/decisions/predictions rotation)
+│   ├── scheduler.py         # Cron events (morning briefing, nightly summary, balance reconcile, live_ticks/decisions/predictions/universe/order_microstructure rotation)
 │   ├── daily_log.py         # Rolling daily performance log
 │   ├── state_io.py          # Atomic JSON read/write (write-to-tmp-then-rename)
 │   ├── logger.py            # RotatingFileHandler — bot/logs/bot.log, 10 MB × 5
 │   └── tools/               # In-package diagnostic scripts (e.g. clv_by_strategy.py)
 │
 ├── tools/                   # Top-level analysis tools (gitignored — local-only by convention)
-│   ├── cohort_report.py     # Per-(opp_type, gate) reject-rate + distance-from-threshold histograms (Apr 24 Sessions 6/10)
-│   ├── excursion_report.py  # Per-strategy median(MFE − exit) — flags exit-logic candidates (Apr 24 Session 9)
-│   └── calibration_report.py # Per-strategy mean-bias / Brier score / per-bucket hit-rate (Apr 25 Session 11)
+│   ├── cohort_report.py     # Per-(opp_type, gate) reject-rate + distance-from-threshold histograms; --regime-by axis flag (Apr 24 Sessions 6/10, Apr 25 Session 14)
+│   ├── excursion_report.py  # Per-strategy median(MFE − exit) — flags exit-logic candidates; --regime-by axis flag (Apr 24 Session 9, Apr 25 Session 14)
+│   ├── calibration_report.py # Per-strategy mean-bias / Brier score / per-bucket hit-rate; --regime-by axis flag (Apr 25 Sessions 11/14)
+│   ├── universe_report.py   # Per-(series prefix, event_type) ignored-vs-scanned breakdown — surfaces market families we don't touch; --regime-by axis flag (Apr 25 Sessions 12/14)
+│   ├── backtest.py          # Offline back-tester for refactored Strategy classes; reuses bot.clv.compute_clv_cents (single source of CLV math); --include-history pulls closes for never-traded tickers via bot.kalshi_history (Apr 25 Sessions 13b/13c)
+│   ├── hypothetical_report.py # Parameter sweep across N variants of a Strategy; markdown comparison table sorted by sum_clv_cents (Apr 25 Session 13c)
+│   ├── backfill_regime.py   # One-shot script that retroactively tags every existing record with regime via the same pure tagger; idempotent (Apr 25 Session 14)
+│   └── microstructure_report.py # Per-strategy slippage / fill-latency distributions + slippage-adjusted CLV vs paper CLV; flags execution-quality issues. Empty output until PAPER_MODE=False (Apr 25 Session 15)
 │
 ├── agent/
 │   ├── kalshi_client.py     # Kalshi REST API (used by bot for all API calls)
@@ -558,20 +572,26 @@ hustle-agent/
 ├── bot/state/               # Runtime state (gitignored)
 │   ├── bot.lock             # PID lockfile; touched every 30s by dedicated _heartbeat_loop task (Apr 24 Session 7); per-scan touch retained as belt-and-suspenders
 │   ├── bot_state.json       # Scan count, session stats, heartbeat, last_*_rotation flags, total_pnl
-│   ├── positions.json       # All open + resolved positions; carries mfe_cents/mae_cents/mfe_at/mae_at/ticks_observed (Apr 24 Session 9)
+│   ├── positions.json       # All open + resolved positions; carries mfe_cents/mae_cents/mfe_at/mae_at/ticks_observed (Apr 24 Session 9); regime tagged (Apr 25 Session 14)
 │   ├── paper_trades.json    # Paper RESOLUTION log — balance reconstructed from this. Ground truth
 │   ├── trade_history.json   # ORDER log — every execute_trade/execute_hedge appends here. Distinct from paper_trades
 │   ├── pending.json         # Queued opportunities with expiry
-│   ├── clv.json             # CLV records per trade. _load() filters to active strategies (Apr 23 Session 5). Also stores counterfactual records (status=counterfactual_open|counterfactual_settled, trade_id=CF-{scan_id}-{ticker}) for stratified rejected opportunities (Apr 24 Sessions 6/8). Settled records carry MFE/MAE (Apr 24 Session 9)
-│   ├── decisions.jsonl      # Per-decision audit log (Apr 24 Session 6). Every scan-time accept and reject with {ts, ticker, opp_type, edge, gates, decision, reason, extra}. extra carries gate-specific distance-from-threshold context (Apr 24 Session 10). Daily rotation to archive/
-│   ├── predictions.jsonl    # Per-prediction fair-value vs. actual log (Apr 25 Session 11). One row per opp evaluated (real trade or CF). Brier-scored by tools/calibration_report.py
+│   ├── clv.json             # CLV records per trade. _load() filters to active strategies (Apr 23 Session 5). Also stores counterfactual records (status=counterfactual_open|counterfactual_settled, trade_id=CF-{scan_id}-{ticker}) for stratified rejected opportunities (Apr 24 Sessions 6/8). Settled records carry MFE/MAE (Apr 24 Session 9). Every record regime-tagged (Apr 25 Session 14)
+│   ├── decisions.jsonl      # Per-decision audit log (Apr 24 Session 6). Every scan-time accept and reject with {ts, ticker, opp_type, edge, gates, decision, reason, extra, regime}. extra carries gate-specific distance-from-threshold context (Apr 24 Session 10); regime tags time_of_day/day_of_week/sport_phase/event_horizon_hr (Apr 25 Session 14). Daily rotation to archive/
+│   ├── predictions.jsonl    # Per-prediction fair-value vs. actual log (Apr 25 Session 11). One row per opp evaluated (real trade or CF). Brier-scored by tools/calibration_report.py. Regime tagged (Apr 25 Session 14)
+│   ├── universe.jsonl       # Per-scan snapshot of every active Kalshi market (Apr 25 Session 12). Schema {ts, scan_id, ticker, series_ticker, event_ticker, status, close_ts, yes_ask, yes_bid, no_ask, no_bid, volume_24h, open_interest, scanned_by[], regime}. Empty scanned_by = no active strategy looked at this market. Read by tools/universe_report.py and tools/backtest.py (Session 13). Daily rotation
+│   ├── order_microstructure.jsonl  # Per-live-order lifecycle (Apr 25 Session 15). EMPTY until PAPER_MODE=False — paper trades intentionally produce zero rows. Schema includes ts_placed/ts_filled/ts_canceled, requested vs filled price+qty, signed slippage_cents (positive = adverse), latency_ms, partial_fill_count, terminal_status, slippage_source enum. Read by tools/microstructure_report.py
+│   ├── cache/                # Permanent caches for settled-market data (Apr 25 Session 13c)
+│   │   └── kalshi_settled_closes.json  # Ticker → closing_yes_price for back-testing tickers we never traded. Settled markets never change so cache is permanent
 │   ├── strategy_audit.json  # Per-strategy status + settlement_log (idempotent, Apr 18; rebuilt Apr 20 Session 1)
 │   ├── live_journal.json    # Live-watcher events: scan_found, bet, exit, session_end
 │   ├── live_ticks.jsonl     # Enriched per-tick log: price, wp, momentum, DQS, game_state, espn_scores
 │   ├── archive/             # Daily gzipped JSONL archives — created by scheduler at midnight ET
-│   │   ├── live_ticks-YYYY-MM-DD.jsonl.gz   # (Apr 23 Session 5)
-│   │   ├── decisions-YYYY-MM-DD.jsonl.gz    # (Apr 24 Session 6)
-│   │   └── predictions-YYYY-MM-DD.jsonl.gz  # (Apr 25 Session 11)
+│   │   ├── live_ticks-YYYY-MM-DD.jsonl.gz           # (Apr 23 Session 5)
+│   │   ├── decisions-YYYY-MM-DD.jsonl.gz            # (Apr 24 Session 6)
+│   │   ├── predictions-YYYY-MM-DD.jsonl.gz          # (Apr 25 Session 11)
+│   │   ├── universe-YYYY-MM-DD.jsonl.gz             # (Apr 25 Session 12)
+│   │   └── order_microstructure-YYYY-MM-DD.jsonl.gz # (Apr 25 Session 15)
 │   ├── patterns.json        # Historical win rate per strategy type (dynamic confidence)
 │   ├── outcomes.db          # SQLite: alert → outcome log for calibration
 │   ├── elo_ratings.json     # Sport ELO ratings
@@ -655,7 +675,7 @@ The Telegram `STOP` command is the same path plus an `unload` against launchd; `
 
 ```bash
 python3 -m pytest tests/ -q
-# 616 tests collected across 20 test files (Apr 24–25: +109 tests across Sessions 6–11)
+# 772 tests collected across 30 test files (Apr 25: +156 tests across Sessions 12–15)
 # Current state: ~9 known pre-existing failures (5 stale, 2 watchdog harness, 2 misc), rest pass or are skipped behind live-call guards
 ```
 
@@ -678,6 +698,7 @@ All tests mock external APIs — no real Kalshi calls, no CoinGecko, no sportsbo
 - **CLV:** entry recording, settlement computation (YES and NO sides), report generation, active-strategy filter at `_load` (Apr 23), counterfactual schema + idempotency + stratified selection (Apr 24 Sessions 6/8), MFE/MAE propagation at settlement (Apr 24 Session 9)
 - **Parlay:** title parsing for multi-leg contracts, edge calculation with correlation discount
 - **Closed-loop instrumentation (Apr 24–25 — Sessions 6–11):** `test_decisions.py` (atomic JSONL append under contention, schema integrity, dampener), `test_tracker.py` (10 MFE/MAE cases — side-aware ratchet, lazy-init, monotonic, settlement propagation), `test_cohort_report.py` (distance-from-threshold histogram math), `test_calibration.py` (31 cases including Brier handcraft, ±60s settlement matching window, idempotency), `test_main.py` (heartbeat lock-touch task), `test_scheduler.py` extensions (decisions + predictions rotation)
+- **Pivot-enabling instrumentation (Apr 25 — Sessions 12–15):** `test_universe.py` (snapshot schema, MVE filter, scanned_by attribution, partial-cursor tolerance), `test_vig_stack_series_strategy.py` (12-case golden-file regression locking VigStackSeries == legacy scan_vig_stack_series byte-identical), `test_strategies.py` (parameter override flow into evaluate gate decisions), `test_backtest.py` (replay loop, ±60s clv join, --include-history fallback, --verify-against-clv-report mode, no-parallel-codepath assertion), `test_kalshi_history.py` (12 cases — settle-result branches, finalized-status regression, cache behavior), `test_hypothetical_report.py` (parameter sweep markdown rendering), `test_nba_game_momentum_strawman.py` (9-case strawman strategy contract verification), `test_regime.py` (42 cases — DST boundaries, all 7 days, sport phase transitions, event_horizon buckets, 100x determinism property), `test_backfill_regime.py` (idempotency, dry-run, gzipped archive handling), `test_order_microstructure.py` (10+ cases — placement / partial / terminal / synchronous-rejection paths, paper-mode untouched, daily rotation)
 - **Regression guards:** `test_bot_improvements.py` + `test_data_driven_fixes.py` lock in the specific fixes from the Apr 14/16/18/20 audits (edge cap, cooldown, UW-exit removal, SCORE-FLIP momentum gate, Filter F, tennis disable, etc.) so they cannot silently regress
 
 ---
@@ -726,11 +747,13 @@ A few decisions that shaped the system:
 
 ## Recent Improvements (Apr 20–25)
 
-Two arcs.
+Three arcs.
 
 **Apr 20–23 — Redemption (Sessions 1–5).** The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions, all shipped.
 
-**Apr 24–25 — Closed-loop data collection (Sessions 6–11).** With the bot stable, the missing piece for retuning was outcome attribution: the trade log told us *what fired* but not *what almost fired and was killed by which gate, and what would have happened if we'd taken it anyway*. Sessions 6–11 instrument the bot end-to-end so gate calibration becomes a regression problem instead of folklore. All shipped; calibration data needs ~7 days to mature before reports become actionable.
+**Apr 24–25 — Closed-loop data collection (Sessions 6–11).** With the bot stable, the missing piece for retuning was outcome attribution: the trade log told us *what fired* but not *what almost fired and was killed by which gate, and what would have happened if we'd taken it anyway*. Sessions 6–11 instrument the bot end-to-end so gate calibration becomes a regression problem instead of folklore. All shipped.
+
+**Apr 25 — Pivot-enabling instrumentation (Sessions 12–15).** Sessions 6–11 made the bot able to *tune itself* inside its existing strategy frame. The remaining question — "are the strategies we're running the right ones?" — required different instrumentation: capture the universe of markets we ignore, build a strategy contract + back-tester so alternatives can be evaluated without going live, tag every record with regime context, and (deferred verification) capture live-order microstructure. All shipped; the bot now genuinely supports evaluating alternatives. Calibration / cohort / excursion data still needs ~7 days to mature before retuning recommendations crystallize.
 
 ### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)
 58 of 93 resolved paper trades (`exited_early`) were silently missing from `strategy_audit.settlement_log` because `executor._paper_record_exit` never called `_log_settlements_to_audit` or `patterns.record_resolution`. Fixed by extracting `tracker.log_settlement(trade)` per-trade helper, adding `patterns.record_resolution`, wiring both into `_paper_record_exit`, and rebuilding the audit via `tools/rebuild_strategy_audit.py`. Post-rebuild: paper / settlement_log / rollup all reconcile to 93 trades. Backup at `bot/state/strategy_audit.json.bak-20260421`.
@@ -806,3 +829,52 @@ Every edge calc is `(fair_value - market_price) / market_price` — the whole bo
 - 31 new tests including atomic append under contention, idempotency, settlement matching window, missing-archive rotation, and Brier handcraft (5 records → 0.082 by hand).
 
 **Result**: the bot is now self-instrumented end-to-end. Every accept and every reject carries a gate fingerprint with distance-from-threshold context. Every prediction (acted-on or counterfactual) is paired with its eventual closing price. Every position carries excursion data. Three local-only analysis tools (`cohort_report`, `excursion_report`, `calibration_report`) join the streams. Once 7 days of data accumulate, gate retuning becomes a regression problem instead of folklore.
+
+### ☑ Session 12 — Universe log (Apr 25)
+Existing collection points (`decisions.jsonl`, CFs, `predictions.jsonl`) only fired on opportunities a strategy scanner already considered. Kalshi has 50K+ active markets at any time (95% MVE parlay expansions); we scanned a curated handful. Without a record of the full universe, we couldn't ask "what alpha is hiding in markets we don't even look at?"
+- `bot/universe.py` — buffer-and-flush snapshot writer that captures the active Kalshi universe alongside each `scan_cycle`. `scanned_by` attribution on every row links each market to whichever active scanner(s) evaluated it. Empty `scanned_by` = no active strategy looked at this market — that's the join key Session 13's back-tester needs.
+- **Two-pass design** discovered empirically: cursor pagination captures the long-tail (KXMVE* parlay expansions filtered out — 95% of raw response volume), then a per-active-series shadow fetch guarantees buffer coverage of every ticker active scanners will attribute against. Without the shadow pass, cursor order made attribution silently fail under the 90s deadline.
+- `bot/main.py:_main_loop` hoists `scan_id` once per loop iteration and wraps `scan_cycle` in `try/finally` so flush runs even on scanner exception.
+- Daily rotation in `bot/scheduler.py` mirrors predictions: archive to `state/archive/universe-YYYY-MM-DD.jsonl.gz`. Universe is the largest of any log.
+- `tools/universe_report.py` (gitignored) reads current + 7-day archives, surfaces ignored families with high volume + spread as Session-13 candidate territory.
+- **Verified live:** first post-deploy snapshot captured 976 markets (47% scanned, 53% ignored) — immediately surfaced `KXNBAGAME` with $262K avg volume completely ignored by every active scanner. Concrete actionable signal before Session 13 even shipped.
+- 8 tests in `test_universe.py` + 5 rotation tests. Bonus fix: discovered + fixed a pre-existing test isolation bug where every rotation test class shared a midnight-boundary fixture, causing cross-test pollution on real state files; fixed with autouse fixture.
+
+### ☑ Session 13 — Hypothetical strategy framework (Apr 25, 3 sub-sessions)
+
+The biggest session of the arc. The session where frame-escape actually became possible.
+
+**13a — Strategy contract.** New `bot/strategies/__init__.py` defines a `Strategy` Protocol with `candidate_markets()` and `evaluate()` methods, plus a frozen `Market` dataclass. Strategies take Market data in (no Kalshi API calls), return Opportunity dicts out — back-testable trivially. Refactored `vig_stack_series` (the smallest, most mechanical scanner) into `bot/strategies/vig_stack_series.py`. **Behavior preservation enforced via 12-case golden-file test** (`test_vig_stack_series_strategy.py`): same accepted ticker set, 1e-6 epsilon on every float field, identical decision-log call set across 5 hand-crafted scenarios. Lock the regression THEN delete the legacy. Also added: `name_for(market)` for one-class-spans-multiple-opp_types attribution, `finalize(scan_id)` for end-of-loop side effects.
+
+**13b — Offline back-tester.** New `tools/backtest.py` (gitignored) replays refactored Strategy classes against `universe.jsonl` archives (current + gzipped 7-day window), joins emitted opportunities to settled CLV records via `(ticker, recorded_at±60s)`, reports per-day P&L / win rate / mean edge / mean CLV. **Critical discipline:** REUSES `bot.clv.compute_clv_cents` extracted from inline math at `bot/clv.py:284-299` as the prereq commit — single source of truth, no parallel codepath. The `--verify-against-clv-report` flag prints back-test mean alongside live `clv_report` mean and asserts `|diff| < 1e-6` on the actually-taken subset. Asymmetric vacuous handling: bt-empty is OK (universe coverage gap), bt-non-empty + live-empty IS FAIL.
+
+**13c — Hypothetical strategy report + Kalshi history fallback + strawman.** Four parts:
+1. Threaded tunable parameters through `VigStackSeries.__init__` (defaults to existing constants) so back-tester can sweep variants without touching live code. Re-ran 13a golden test to verify behavior preservation.
+2. New `bot/kalshi_history.py` — `fetch_settled_close(ticker)` with permanent caching to `state/cache/kalshi_settled_closes.json` for back-testing tickers we never traded. **Caught a real production bug in flight:** Kalshi reports resolved markets with `status="finalized"`, NOT `"settled"` — the authoritative settle signal is the `result` field. Added regression test `test_finalized_status_resolves_via_result`.
+3. Refactored `tools/backtest.py` to expose a programmatic `run_backtest()` entry point. New `tools/hypothetical_report.py` runs N variants of a strategy against captured universe and prints markdown comparison sorted by sum_clv. **Sweep verification (vig_stack_series, min_relative_edge across [0.05–0.25], 7 days):** opps strictly monotonic descending (47 → 28 → 18 → 3 → 0), mean_edge strictly increasing — proves the param refactor wires through correctly.
+4. New `bot/strategies/nba_game_momentum_strawman.py` — 60-line strawman targeting the KXNBAGAME family Session 12 surfaced. **The contract held cleanly.** Zero changes to `bot/strategies/__init__.py` were needed for the strawman — proves the Protocol is general, not secretly molded around vig_stack's specifics.
+
+56 tests across 6 files. The bot can now genuinely evaluate alternatives without going live.
+
+### ☑ Session 14 — Regime tags (Apr 25)
+A strategy net-negative on average might be +EV in a specific regime — NBA playoffs, weekday mornings, close-to-settlement markets. Without regime context on records, that signal is invisible.
+- `bot/regime.py` — pure function `tag(ts, ticker, market_state) -> dict` returns a fixed-key dict with 4 axes: `time_of_day` (morning/afternoon/evening/overnight in ET), `day_of_week`, `sport_phase` (preseason/regular/playoffs/off — NBA/NHL/MLB/NCAAB only in v1), `event_horizon_hr` (hours-to-settle bucket).
+- `sport_phase` from a hardcoded date table — ESPN cache reuse not viable (live_watcher caches per-game live state, not season schedule). Yearly bump documented in module docstring.
+- 5 writers tag at write time: `decisions.py`, `calibration.py`, `clv.py` (real + CF), `tracker.py` (positions), `universe.py`.
+- `tools/backfill_regime.py` (gitignored) ran clean on production state: **18,515 records → 100% coverage on every state file**.
+- 4 reports gain `--regime-by` axis flag: cohort, excursion, calibration, universe.
+- `market_vol_tier` deferred — needs per-ticker price history infra; worth its own session.
+- 165 Session-14 tests including 42 in `test_regime.py` covering DST boundaries, all 7 days, sport phase transitions, and a 100x-iteration determinism property.
+
+### ☑ Session 15 — Live order microstructure (Apr 25, plumbing-only)
+YAGNI per spec: only matters when `PAPER_MODE=False`. The plumbing ships now; first real verification waits for live trading.
+- `bot/order_microstructure.py` — atomic JSONL append mirroring `decisions.py`, with 4 lifecycle functions: `record_placement`, `observe_fill_progress`, `record_terminal`, `record_synchronous_rejection`. In-memory `_PENDING` dict bridges place→terminal across the place_order call and the check_fills polling loop.
+- Sign convention documented: `slippage_cents = filled - requested`, positive = adverse for both YES and NO buys. `slippage_source` enum (`limit_price_echo` / `fills_endpoint` / `none`) preserves audit trail for v2's fills-endpoint upgrade.
+- Hooked in `bot/executor.py` LIVE branch only at lines 909-917 (place) and `check_fills` (terminal). PAPER_MODE branch byte-identical and explicitly tested to produce zero microstructure rows.
+- `queue_depth_at_place` pulled from existing `opportunity['market'][f'{side}_ask']` (top-of-book) — no extra API call.
+- Daily rotation via the same `_rotate_jsonl` helper that emerged across earlier sessions.
+- `tools/microstructure_report.py` (gitignored) — per-strategy slippage / latency distributions + slippage-adjusted CLV vs paper CLV. Flags strategies where divergence > 2¢ as "paper-mode over-optimistic" candidates. **REUSES** `bot.clv.compute_clv_cents` (single source of truth from 13b) and `bot.calibration._within_window` (±60s join from 13b).
+- Known v1 gaps documented in module docstring: `_PENDING` lost on restart (process-local), Kalshi cancellation pruning, `limit_price_echo` slippage approximation pending v2 fills-endpoint integration.
+- Verification deferred: first live order populates a row; after 50 live orders run `microstructure_report` and check median slippage > 2¢ or fill latency > 5s p95 (Session 16+ execution-tuning candidates).
+
+**Arc result:** Sessions 12–15 transformed the bot from "well-instrumented inside its own frame" into "able to evaluate alternatives outside it." The Strategy contract + back-tester + Kalshi history fallback let any new strategy idea be tested against historical data in 50 lines without a live deploy. Universe log surfaces what we're not looking at. Regime tags slice everything by time/sport/horizon. Microstructure plumbing is ready for live. The retuning signal will arrive when the data matures (~7 days from Apr 25).
