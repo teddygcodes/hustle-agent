@@ -465,13 +465,19 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
 
     market = get_market(ticker)
     if "error" in market:
-        _log_edge_reject(opportunity, "market_data")
+        _log_edge_reject(
+            opportunity, "market_data",
+            extra={"error": str(market.get("error", ""))[:120]},
+        )
         return False, f"Could not re-fetch market: {market['error']}"
 
     # Always read yes_ask — it's the price basis for both YES and NO edge calculations
     current_yes_ask = market.get("yes_ask", 0)
     if not current_yes_ask or current_yes_ask <= 0:
-        _log_edge_reject(opportunity, "yes_ask")
+        _log_edge_reject(
+            opportunity, "yes_ask",
+            extra={"current_yes_ask": current_yes_ask},
+        )
         return False, "No valid yes_ask price on re-fetch"
 
     current_yes_price = current_yes_ask / 100.0
@@ -498,7 +504,16 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_yes_price) * 100
         if move_cents > kill_cents:
-            _log_edge_reject(opportunity, "price_moved")
+            _log_edge_reject(
+                opportunity, "price_moved",
+                extra={
+                    "move_cents": round(move_cents, 2),
+                    "kill_cents": kill_cents,
+                    "trade_type": trade_type,
+                    "original_yes_price": round(original_yes_price, 4),
+                    "current_yes_price": round(current_yes_price, 4),
+                },
+            )
             return False, (
                 f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
@@ -532,7 +547,16 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_price) * 100
         if move_cents > kill_cents:
-            _log_edge_reject(opportunity, "price_moved")
+            _log_edge_reject(
+                opportunity, "price_moved",
+                extra={
+                    "move_cents": round(move_cents, 2),
+                    "kill_cents": kill_cents,
+                    "trade_type": trade_type,
+                    "original_yes_price": round(original_price, 4),
+                    "current_yes_price": round(current_yes_price, 4),
+                },
+            )
             return False, (
                 f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
@@ -559,7 +583,14 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             f"[EdgeCheck] EVAPORATED: {ticker} | "
             f"was {opportunity.get('relative_edge', 0):.2%}, now {new_relative:.2%}"
         )
-        _log_edge_reject(opportunity, "edge_evaporated")
+        _log_edge_reject(
+            opportunity, "edge_evaporated",
+            extra={
+                "new_relative": round(new_relative, 4),
+                "original_relative": round(opportunity.get("relative_edge", 0), 4),
+                "edge_threshold": round(edge_threshold, 4),
+            },
+        )
         return False, (
             f"Edge evaporated: was {opportunity.get('relative_edge', 0):.2%}, "
             f"now {new_relative:.2%} (threshold: {edge_threshold:.2%})"
@@ -816,6 +847,10 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                        "cooldown": True, "daily_loss": True, "strategy_budget": True,
                        "total_exposure": True, "edge_recheck": True, "self_check": False},
                 decision="reject", reason="self_check_failed",
+                extra={
+                    "edge": opportunity.get("edge"),
+                    "warnings": (edge_result.get("warnings") or [])[:3],
+                },
             )
         except Exception:
             pass
