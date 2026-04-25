@@ -360,8 +360,8 @@ class GlintBot:
         else:
             logger.warning("No Telegram token — running in console-only mode")
 
-        # Run main loop + crypto loop + live match scanner concurrently
-        tasks = [self._main_loop(), self._live_scan_loop()]
+        # Run main loop + crypto loop + live match scanner + heartbeat concurrently
+        tasks = [self._main_loop(), self._live_scan_loop(), self._heartbeat_loop()]
         if CRYPTO_ENABLED:
             tasks.append(self._crypto_scan_loop())
         else:
@@ -968,6 +968,16 @@ class GlintBot:
                 _recently_watched.discard(event_ticker)
         finally:
             self._active_watchers.pop(query, None)
+
+    async def _heartbeat_loop(self):
+        """Touch bot.lock every 30s so wedged-loop detection (Gotcha #6) isn't
+        masked by long scan_interval. Independent of _main_loop's per-scan touch."""
+        while self._running:
+            try:
+                LOCK_FILE.touch()
+            except Exception:
+                logger.debug("heartbeat touch failed", exc_info=True)
+            await asyncio.sleep(30)
 
     async def _live_scan_loop(self):
         """

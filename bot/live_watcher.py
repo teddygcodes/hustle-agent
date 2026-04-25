@@ -1037,6 +1037,18 @@ class LiveGameWatcher:
             and (self.sport or "").lower() not in MOMENTUM_DISABLED_SPORTS
         )
 
+        # Session 7 — edge proxy + context for decision log.
+        # wp_edge mirrors live_ticks.jsonl enrichment (same formula as the
+        # tick logger and the conviction block below).
+        gc_wp = self._game_ctx.win_probability if self._game_ctx else None
+        wp_edge = round(gc_wp - yes_ask / 100.0, 3) if gc_wp is not None else None
+        mom_ctx = {
+            "wp": round(gc_wp, 3) if gc_wp is not None else None,
+            "kalshi_price": yes_ask,
+            "dip_cents": dip_cents,
+            "dqs": None,  # filled at sites where DQS was actually computed
+        }
+
         if not can_enter:
             sport_lc = (self.sport or "").lower()
             if sport_lc in MOMENTUM_DISABLED_SPORTS:
@@ -1056,7 +1068,9 @@ class LiveGameWatcher:
                 _gates = {"can_enter": False}
             self._log_decision_dampened(
                 decision="reject", reason=_reason, gates=_gates,
-                extra={"sport": sport_lc, "entry_count": self._entry_count,
+                edge=wp_edge,
+                extra={**mom_ctx, "sport": sport_lc,
+                       "entry_count": self._entry_count,
                        "cooldown_remaining": self._cooldown_remaining,
                        "open_bets": len(self.bets_placed)},
             )
@@ -1095,8 +1109,8 @@ class LiveGameWatcher:
                                 decision="reject", reason="variance_quality",
                                 gates={"can_enter": True, "is_leader": True,
                                        "dip_window": True, "variance_quality": False},
-                                extra={"q_reason": q_reason, "dip_cents": dip_cents,
-                                       "yes_ask": yes_ask},
+                                edge=wp_edge,
+                                extra={**mom_ctx, "q_reason": q_reason},
                             )
                         else:
                             # DATA-DRIVEN: Tennis/UFC — skip DQS, pure price action
@@ -1146,9 +1160,9 @@ class LiveGameWatcher:
                                 decision="reject", reason="dqs_fail",
                                 gates={"can_enter": True, "is_leader": True,
                                        "dip_window": True, "dqs": False},
-                                extra={"dqs": round(dqs, 3),
-                                       "threshold": MOMENTUM_DQS_THRESHOLD,
-                                       "dip_cents": dip_cents, "yes_ask": yes_ask},
+                                edge=wp_edge,
+                                extra={**mom_ctx, "dqs": round(dqs, 3),
+                                       "threshold": MOMENTUM_DQS_THRESHOLD},
                             )
                 else:
                     logger.info(
@@ -1160,8 +1174,8 @@ class LiveGameWatcher:
                         decision="reject", reason="dip_too_big",
                         gates={"can_enter": True, "is_leader": True,
                                "dip_min": True, "dip_max": False},
-                        extra={"dip_cents": dip_cents, "max_dip": max_dip,
-                               "yes_ask": yes_ask},
+                        edge=wp_edge,
+                        extra={**mom_ctx, "max_dip": max_dip},
                     )
 
             # Check opponent side (if primary didn't qualify)
@@ -1381,9 +1395,10 @@ class LiveGameWatcher:
                 reason="conviction" if conviction_mode else "dip_buy",
                 gates={"can_enter": True, "is_leader": True,
                        "dip_window": True, "dqs": True},
-                edge=buy_dqs if buy_dqs and buy_dqs < 1.0 else None,
-                extra={"buy_price": buy_price, "buy_dip": buy_dip,
-                       "buy_dqs": round(buy_dqs, 3) if buy_dqs else None,
+                edge=wp_edge,
+                extra={**mom_ctx,
+                       "dqs": round(buy_dqs, 3) if buy_dqs else None,
+                       "buy_price": buy_price, "buy_dip": buy_dip,
                        "ticker": buy_ticker},
             )
             await self._auto_bet_momentum(

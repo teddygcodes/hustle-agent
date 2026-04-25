@@ -204,3 +204,67 @@ def test_watch_command_registered():
     src = inspect.getsource(GlintBot._register_commands)
     assert "WATCH" in src
     assert "UNWATCH" in src
+
+
+# ---------------------------------------------------------------------------
+# Session 7: edge proxy + mom_ctx in _log_decision_dampened
+# ---------------------------------------------------------------------------
+
+def test_log_decision_dampened_writes_wp_edge_and_mom_ctx(tmp_path, monkeypatch):
+    """live_momentum rejects/accepts carry wp_edge as edge and extra includes
+    wp, kalshi_price, dip_cents, dqs."""
+    import json
+    from bot import decisions
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXTEST-T1"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject", reason="dqs_fail",
+        gates={"can_enter": True, "dqs": False},
+        edge=0.07,
+        extra={"wp": 0.62, "kalshi_price": 55, "dip_cents": 6,
+               "dqs": 0.31, "threshold": 0.4},
+    )
+
+    rec = json.loads(f.read_text().splitlines()[0])
+    assert rec["opp_type"] == "live_momentum"
+    assert rec["edge"] == 0.07
+    assert rec["extra"]["wp"] == 0.62
+    assert rec["extra"]["kalshi_price"] == 55
+    assert rec["extra"]["dip_cents"] == 6
+    assert rec["extra"]["dqs"] == 0.31
+
+
+def test_log_decision_dampened_handles_missing_wp(tmp_path, monkeypatch):
+    """Pre-GameContext ticks log wp=None / edge=None — no crash, valid JSON."""
+    import json
+    from bot import decisions
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXTEST-T2"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject", reason="sport_disabled",
+        gates={"can_enter": False, "sport_enabled": False},
+        edge=None,
+        extra={"wp": None, "kalshi_price": 50, "dip_cents": 0, "dqs": None,
+               "sport": "atp_challenger"},
+    )
+
+    rec = json.loads(f.read_text().splitlines()[0])
+    assert rec["edge"] is None
+    assert rec["extra"]["wp"] is None
+    assert rec["extra"]["sport"] == "atp_challenger"

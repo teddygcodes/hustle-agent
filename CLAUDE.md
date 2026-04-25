@@ -288,7 +288,7 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 
 | File | Purpose |
 |---|---|
-| `bot.lock` | PID lockfile. Deleted on graceful shutdown. **Mtime advances each heartbeat (Apr 23, Session 5)** — fresh mtime + dead PID means the process was killed between scans without releasing the lock. |
+| `bot.lock` | PID lockfile. Deleted on graceful shutdown. **Mtime advances every 30s via a dedicated heartbeat task (Apr 24, Session 7; was per-scan in Session 5)** — fresh mtime + dead PID means the process was killed between heartbeats without releasing the lock. |
 | `bot_state.json` | Last scan time, heartbeat, scan counters, DK/FD disabled flags (12h TTL), Session-5 `last_ticks_rotation` flag. |
 | `positions.json` | **Source of truth for open positions.** Exposure calc reads this. |
 | `trade_history.json` | **Order log.** Every `execute_trade()` and `execute_hedge()` appends a record (filled OR resting). `tracker.resolve_trades()` updates entries in-place when markets settle. Distinct from `paper_trades.json` (the paper-mode resolution log). Read by the Telegram `HISTORY` command and `patterns.analyze_patterns()`. |
@@ -339,7 +339,7 @@ YES-side trades compute edge from `yes_ask`. NO-side (vig_stack) trades MUST als
 ### 6. Watchdog heartbeat
 `GlintBot.start()` checks `last_heartbeat` in `bot_state.json`. If stale > 15 min and `running=True`, logs a watchdog alert (currently silenced before sending). Useful signal that the previous process crashed silently — check `bot.log` for what happened.
 
-**Apr 23 (Session 5):** `bot.lock` mtime now also advances each heartbeat (one-line `LOCK_FILE.touch()` after `_save_bot_state(state)` in the main scan loop). Two new failure signatures: (a) **fresh `bot.lock` mtime + dead PID** → process was killed between scans without releasing the lock (rm the lock and restart); (b) **`bot.lock` mtime > 15 min stale + `_pid_is_running` → True** → process is alive but the scan loop is wedged (check `bot.log` for stuck I/O or held asyncio lock).
+**Apr 24 (Session 7):** A dedicated 30s heartbeat task in `GlintBot.start()` now touches `bot.lock` independently of `scan_interval`, so worst-case stale gap is ≤60s rather than ≤30 min. Failure signatures: (a) **fresh `bot.lock` mtime + dead PID** → killed between heartbeats without releasing the lock (`rm` the lock and restart); (b) **`bot.lock` mtime > 60s stale + `_pid_is_running` → True** → heartbeat task wedged or event loop blocked (check `bot.log` for stuck I/O or held asyncio lock). The Session-5 per-scan `LOCK_FILE.touch()` after `_save_bot_state()` in `_main_loop` is preserved as an extra signal.
 
 ### 7. Kalshi position reconcile on startup
 If the bot crashed between placing an order and writing to `positions.json`, the position exists on Kalshi but not locally. On startup, `GlintBot.start()` calls `kalshi_get_positions()` and merges any missing ones with `source: "kalshi_reconcile"`. If you see reconcile warnings on startup, that's why.
@@ -573,7 +573,7 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 7 — Decision-log observability gaps (Apr 24, planned)
+### ☑ Session 7 — Decision-log observability gaps (Apr 24, planned)
 **Problem (post-Session-6 audit, first 24h of decisions data).** Two gaps surfaced once the Session-6 audit log went live:
 
 1. **Live-momentum decisions are info-poor.** 12/15 records carry `edge=null` because `_tick_momentum` has no scalar edge concept — momentum trades are pure price-action with no model fair value. Reject *rate* per gate (sport_disabled, dqs_fail, dip_too_big, variance_quality) is queryable today; "edge surrendered by gate" is not. Live-side gate retuning (DQS threshold, dip floor, conviction zone, leader_min) is blind without it.
