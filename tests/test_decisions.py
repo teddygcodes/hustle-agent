@@ -146,3 +146,66 @@ class TestNeverRaises:
             )
         # Nothing got written.
         assert _read_records(tmp_decisions_file) == []
+
+
+class TestScannerGateExtra:
+    """Session 10 — scanner gate rejects must include distance-from-threshold
+    fields in extra. Schema tests confirm the shape; helper tests pin the
+    distance math."""
+
+    def test_low_liquidity_extra_includes_min_required(self, tmp_decisions_file):
+        decisions.log_decision(
+            ticker="KX-T", opp_type="vig_stack_series", edge=None,
+            gates={"low_liquidity": False, "no_vig": True},
+            decision="reject", reason="low_liquidity",
+            extra={"volume": 5, "open_interest": 2,
+                   "min_volume": 10, "min_open_interest": 5},
+        )
+        recs = _read_records(tmp_decisions_file)
+        e = recs[0]["extra"]
+        assert e["min_volume"] == 10
+        assert e["min_open_interest"] == 5
+        assert e["volume"] < e["min_volume"]
+        assert e["open_interest"] < e["min_open_interest"]
+
+    def test_forecast_in_bucket_distance_negative_when_inside(self):
+        from bot.scanner import _forecast_distance_from_bucket
+        # forecast=72, bucket [70,80]: inside, depth = min(72-70, 80-72) = 2 → distance = -2.0
+        assert _forecast_distance_from_bucket(72.0, 70.0, 80.0) == -2.0
+        # forecast=75, dead-center: depth = min(5, 5) = 5 → distance = -5.0
+        assert _forecast_distance_from_bucket(75.0, 70.0, 80.0) == -5.0
+
+    def test_forecast_in_bucket_distance_positive_when_outside_margin(self):
+        from bot.scanner import _forecast_distance_from_bucket
+        # forecast=81, bucket [70,80]: outside but within +1° → distance = 1.0
+        assert _forecast_distance_from_bucket(81.0, 70.0, 80.0) == 1.0
+        # forecast=68, bucket [70,80]: outside on low side, 2° below
+        assert _forecast_distance_from_bucket(68.0, 70.0, 80.0) == 2.0
+        # forecast at exact edge → distance = 0
+        assert _forecast_distance_from_bucket(70.0, 70.0, 80.0) == 0.0
+
+    def test_edge_below_threshold_extra_includes_edge_vig_tts(self, tmp_decisions_file):
+        decisions.log_decision(
+            ticker="KX-E", opp_type="vig_stack_series", edge=0.0150,
+            gates={"low_liquidity": True, "edge_below_threshold": False},
+            decision="reject", reason="edge_below_threshold",
+            extra={"min_edge": 0.02, "edge": 0.015,
+                   "vig": 7.5, "time_to_settle_hr": 6.5},
+        )
+        e = _read_records(tmp_decisions_file)[0]["extra"]
+        assert e["edge"] == 0.015
+        assert e["min_edge"] == 0.02
+        assert e["vig"] == 7.5
+        assert e["time_to_settle_hr"] == 6.5
+
+    def test_edge_below_threshold_tolerates_none_tts(self, tmp_decisions_file):
+        # If close_time can't be parsed, time_to_settle_hr should be null
+        decisions.log_decision(
+            ticker="KX-E2", opp_type="vig_stack_series", edge=0.005,
+            gates={"edge_below_threshold": False}, decision="reject",
+            reason="edge_below_threshold",
+            extra={"min_edge": 0.02, "edge": 0.005,
+                   "vig": 6.0, "time_to_settle_hr": None},
+        )
+        e = _read_records(tmp_decisions_file)[0]["extra"]
+        assert e["time_to_settle_hr"] is None
