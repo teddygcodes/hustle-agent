@@ -908,6 +908,16 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         }
     else:
         logger.info(f"  🚀 Placing order: {contracts}x {side.upper()} @ {price_cents}¢ on {ticker}")
+        # Session 15: live-only microstructure capture. Paper branch above
+        # does NOT call into order_microstructure.* — that's the gate.
+        from bot import order_microstructure
+        ts_placed = datetime.now(timezone.utc)
+        market_snapshot = (
+            opportunity.get("market", {})
+            if isinstance(opportunity.get("market"), dict)
+            else {}
+        )
+        queue_depth = market_snapshot.get(f"{side}_ask")
         order_result = place_order(
             ticker=ticker,
             side=side,
@@ -917,6 +927,14 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         )
 
         if "error" in order_result:
+            order_microstructure.record_synchronous_rejection(
+                opportunity=opportunity,
+                requested_price_cents=price_cents,
+                requested_qty=contracts,
+                side=side,
+                ts_placed=ts_placed,
+                error=str(order_result["error"]),
+            )
             logger.error(f"ORDER FAILED: {order_result['error']}")
             return {
                 "success": False,
@@ -924,6 +942,27 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                 "checks": checks,
                 "reason": f"Order failed: {order_result['error']}",
             }
+
+        # Order accepted. Stash placement info; terminal write happens in
+        # check_fills (or here if Kalshi reports immediate full fill).
+        order_microstructure.record_placement(
+            order_id=order_result.get("order_id", ""),
+            opportunity=opportunity,
+            requested_price_cents=price_cents,
+            requested_qty=contracts,
+            side=side,
+            ts_placed=ts_placed,
+            queue_depth_at_place=queue_depth,
+        )
+        immediate_filled = order_result.get("filled_count", 0)
+        if immediate_filled > 0 and immediate_filled >= contracts:
+            order_microstructure.record_terminal(
+                order_id=order_result.get("order_id", ""),
+                kalshi_status=order_result.get("status", "filled"),
+                filled_count=immediate_filled,
+                cost_dollars=order_result.get("cost_dollars"),
+                ts_terminal=datetime.now(timezone.utc),
+            )
 
     # Log to positions and trade history
     filled = order_result.get("filled_count", 0)

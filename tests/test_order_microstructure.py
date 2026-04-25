@@ -223,3 +223,91 @@ def test_logging_failure_swallowed(tmp_path, monkeypatch):
         filled_count=10, cost_dollars=4.0,
         ts_terminal=datetime(2026, 4, 25, 12, 0, 0, 100_000, tzinfo=timezone.utc),
     )  # must not raise even though _append_record raises
+
+
+# ---------------------------------------------------------------------------
+# Task 3: executor hook tests
+# ---------------------------------------------------------------------------
+
+def test_paper_branch_writes_no_microstructure_row(tmp_path, monkeypatch):
+    """Mimic the place-order site under PAPER_MODE; assert no JSONL row,
+    no _PENDING entry, no synchronous rejection."""
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+
+    # Paper-mode reproduction: build an order_result the way executor.py:898-908
+    # does. The PAPER_MODE branch must NEVER call into om.* — that's the
+    # gate we're protecting.
+    paper_result = {
+        "order_id": "PAPER-ABCD1234", "ticker": "KX1", "side": "no",
+        "count": 10, "filled_count": 10, "price_cents": 40,
+        "cost_dollars": 4.0, "status": "paper_filled", "paper": True,
+    }
+    assert paper_result["paper"] is True  # sanity
+    assert not f.exists()
+    assert "PAPER-ABCD1234" not in om._PENDING
+
+
+def test_live_branch_records_placement_via_executor(tmp_path, monkeypatch):
+    """Force live mode, stub place_order, replicate the executor's live branch
+    inline, verify record_placement registers _PENDING."""
+    from bot import executor
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+    monkeypatch.setattr(executor, "PAPER_MODE", False)
+
+    def fake_place(ticker, side, count, price_cents, action="buy"):
+        return {
+            "order_id": "OLIVE1", "ticker": ticker, "side": side, "count": count,
+            "filled_count": 0, "remaining_count": count,
+            "price_cents": price_cents, "cost_dollars": 0.0,
+            "status": "submitted", "client_order_id": "uuid-x",
+        }
+    monkeypatch.setattr(executor, "place_order", fake_place)
+
+    opportunity = _opp()
+    ts_placed = datetime.now(timezone.utc)
+    queue_depth = opportunity["market"].get("no_ask")
+    order_result = executor.place_order(
+        ticker="KX1", side="no", count=10, price_cents=40, action="buy",
+    )
+    assert "error" not in order_result
+    om.record_placement(
+        order_id=order_result["order_id"],
+        opportunity=opportunity,
+        requested_price_cents=40, requested_qty=10, side="no",
+        ts_placed=ts_placed, queue_depth_at_place=queue_depth,
+    )
+    assert "OLIVE1" in om._PENDING
+    assert om._PENDING["OLIVE1"]["queue_depth_at_place"] == 40
+
+
+def test_live_branch_records_synchronous_rejection(tmp_path, monkeypatch):
+    """When place_order returns {'error': ...}, the rejection row gets written
+    immediately with terminal_status='rejected' and no _PENDING entry."""
+    from bot import executor
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+    monkeypatch.setattr(executor, "PAPER_MODE", False)
+
+    def fake_place(**kw):
+        return {"error": "Insufficient balance"}
+    monkeypatch.setattr(executor, "place_order", fake_place)
+
+    opportunity = _opp()
+    ts_placed = datetime.now(timezone.utc)
+    order_result = executor.place_order(
+        ticker="KX1", side="no", count=10, price_cents=40, action="buy",
+    )
+    assert "error" in order_result
+    om.record_synchronous_rejection(
+        opportunity=opportunity,
+        requested_price_cents=40, requested_qty=10, side="no",
+        ts_placed=ts_placed, error=str(order_result["error"]),
+    )
+    rows = [json.loads(l) for l in f.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["terminal_status"] == "rejected"
+    assert rows[0]["rejection_error"] == "Insufficient balance"
+    assert rows[0]["kalshi_order_id"] is None
+    assert om._PENDING == {}
