@@ -132,7 +132,7 @@ class TestAggregateWithDistances:
              "decision": "reject", "edge": 0.010},
         ]
         bins = aggregate_decisions(decisions)
-        bin_ = bins[("vig_stack_series", "edge_below_threshold")]
+        bin_ = bins[("vig_stack_series", "_all_", "edge_below_threshold")]
         assert bin_["rejects"] == 3
         assert len(bin_["distances"]) == 2  # only records with extra
         assert bin_["distances"][0] == pytest.approx(0.10)
@@ -147,6 +147,50 @@ class TestAggregateWithDistances:
              "extra": {"yes_sum": 102, "group_size": 4}},
         ]
         bins = aggregate_decisions(decisions)
-        bin_ = bins[("vig_stack_series", "no_vig")]
+        bin_ = bins[("vig_stack_series", "_all_", "no_vig")]
         assert bin_["rejects"] == 1
         assert bin_["distances"] == []
+
+
+class TestRegimeBy:
+
+    def test_regime_by_splits_buckets(self):
+        """--regime-by=sport_phase produces separate bins per regime value."""
+        decisions = [
+            {"opp_type": "vig_stack_series", "reason": "no_vig",
+             "decision": "reject", "edge": 0.01,
+             "regime": {"sport_phase": "playoffs"}},
+            {"opp_type": "vig_stack_series", "reason": "no_vig",
+             "decision": "reject", "edge": 0.02,
+             "regime": {"sport_phase": "regular"}},
+        ]
+        bins = aggregate_decisions(decisions, regime_by="sport_phase")
+        assert ("vig_stack_series", "playoffs", "no_vig") in bins
+        assert ("vig_stack_series", "regular", "no_vig") in bins
+        assert bins[("vig_stack_series", "playoffs", "no_vig")]["rejects"] == 1
+        assert bins[("vig_stack_series", "regular", "no_vig")]["rejects"] == 1
+
+    def test_regime_missing_field_buckets_as_unknown(self):
+        """Pre-Session-14 records without regime field bucket as unknown_regime."""
+        decisions = [
+            {"opp_type": "vig_stack_series", "reason": "x",
+             "decision": "reject", "edge": 0.01},  # no regime field
+        ]
+        bins = aggregate_decisions(decisions, regime_by="sport_phase")
+        assert ("vig_stack_series", "unknown_regime", "x") in bins
+
+    def test_regime_by_none_collapses_to_single_bucket(self):
+        """Without --regime-by, every bin uses the sentinel '_all_' so output
+        is identical to pre-Session-14 grouping."""
+        decisions = [
+            {"opp_type": "vig_stack_series", "reason": "x",
+             "decision": "reject", "edge": 0.01,
+             "regime": {"sport_phase": "playoffs"}},
+            {"opp_type": "vig_stack_series", "reason": "x",
+             "decision": "reject", "edge": 0.02,
+             "regime": {"sport_phase": "regular"}},
+        ]
+        bins = aggregate_decisions(decisions, regime_by=None)
+        # Both records collapse into the same bin under "_all_"
+        assert ("vig_stack_series", "_all_", "x") in bins
+        assert bins[("vig_stack_series", "_all_", "x")]["rejects"] == 2
