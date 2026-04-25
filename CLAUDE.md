@@ -298,6 +298,8 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | `archive/decisions-YYYY-MM-DD.jsonl.gz` | Daily gzipped decision archives. Created by `scheduler._rotate_decisions_log()` at midnight ET (Apr 24, Session 6). |
 | `predictions.jsonl` | **Per-prediction fair-value vs. actual log (Apr 25, Session 11).** One row per opp evaluated (acted-on or counterfactual). Settlement poller fills `closing_yes_price`. Read by `tools/calibration_report.py`. Daily rotation to `archive/`. |
 | `archive/predictions-YYYY-MM-DD.jsonl.gz` | Daily gzipped prediction archives. Created by `scheduler._rotate_predictions_log()` at midnight ET (Apr 25, Session 11). |
+| `order_microstructure.jsonl` | **Per-live-order microstructure log (Apr 25, Session 15).** One row per live Kalshi order at terminal status (filled / canceled / rejected). Schema: `{ts_placed, ts_filled, ts_canceled, requested/filled price+qty, slippage_cents, slippage_source, latency_ms, queue_depth_at_place, partial_fill_count, strategy_name, opp_type, ticker, side, terminal_status, kalshi_order_id, regime}`. Read by `tools/microstructure_report.py`. **Empty until PAPER_MODE=False.** Paper trades do NOT write here — paper write path is unchanged. Daily rotation to `archive/`. |
+| `archive/order_microstructure-YYYY-MM-DD.jsonl.gz` | Daily gzipped microstructure archives. Created by `scheduler._rotate_order_microstructure_log()` at midnight ET (Apr 25, Session 15). |
 | `pending.json` | Queue of opportunities waiting for GO/SKIP. Max `PENDING_MAX = 20`. |
 | `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. |
 | `live_ticks.jsonl` | Append-only **enriched** tick log: price, leader, wp, momentum, lead_trend, completion, wp_edge, bid, opp_bid, volatility, espn_scores, game_state. Feeds ANALYZE. |
@@ -709,6 +711,8 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 
 ## Apr 25+ Pivot-Enabling Instrumentation Arc (Sessions 12–15)
 
+> **Sessions 12-15 shipped 2026-04-25 — pivot-enabling instrumentation arc complete.** Session 15 verification deferred until `PAPER_MODE=False`; the live-mode verification checks fire when going live, not on the day Session 15 ships.
+
 Sessions 6–11 instrumented the bot to *tune itself* — every accept/reject, every prediction-vs-actual, every position's MFE/MAE. That answers "is the bot we have well-calibrated?" but **not** "are the strategies we're running the right ones to be running?" The current data only records what happens inside markets we already chose to look at, framed as opportunities for strategies we already wrote.
 
 This arc instruments the *escape route from our current strategy frame*. Sessions sequenced so the chat reading the reports gets to "I can tell you what we should be doing differently" fastest:
@@ -825,7 +829,7 @@ Refactor `vig_stack_series` first (smallest, most mechanical) into `bot/strategi
 
 ---
 
-### ☐ Session 15 — Live order microstructure (Apr 25+, planned, defer until PAPER_MODE=False)
+### ☑ Session 15 — Live order microstructure (Apr 25+, shipped, plumbing-only — verification deferred until PAPER_MODE=False)
 
 **Problem.** Once we flip to live trading, real orders introduce variables we currently can't measure: fill latency, partial fills, slippage on market orders, queue position on limit orders, order rejection patterns. Without microstructure capture, a strategy that paper-traded green could be quietly unprofitable after live execution costs eat the edge. **Building this now is YAGNI** — only matters when going live.
 
@@ -848,6 +852,12 @@ Refactor `vig_stack_series` first (smallest, most mechanical) into `bot/strategi
 1. First live order: row appears in `order_microstructure.jsonl` with all fields populated.
 2. After 50 live orders: `microstructure_report` produces median slippage / latency. Any strategy with median slippage > 2¢ or latency > 5s p95 is a Session-16+ execution-tuning candidate.
 3. Slippage-adjusted CLV per strategy matches paper CLV within ~1–2¢. If it diverges by >3¢, paper-mode is over-optimistic and we need to bake a slippage assumption into paper-trade simulation.
+
+*Shipped 2026-04-25.* New module `bot/order_microstructure.py` mirrors `bot/decisions.py` exactly: module-level `threading.Lock`, atomic JSONL append, never-raises wrapper. Three public write functions — `record_placement` (stash placement in in-memory `_PENDING[order_id]` dict), `observe_fill_progress` (increment partial-fill count when a non-terminal fill grows the count), `record_terminal` (compute slippage + latency, append the row, pop from `_PENDING`) — plus `record_synchronous_rejection` for orders that fail at `place_order` (`{"error": ...}`). Hooked into [bot/executor.py:909-944](hustle-agent/bot/executor.py:909) (live branch only — paper-mode codepath at [bot/executor.py:881-908](hustle-agent/bot/executor.py:881) is byte-identical to pre-Session-15) and [bot/executor.py:1054-1090](hustle-agent/bot/executor.py:1054) (`check_fills` LIVE branch — terminal observation triggered by Kalshi-side status OR local `filled` transition; intermediate partial increments via `observe_fill_progress`). Daily rotation in `bot/scheduler.py` reuses the shared `_rotate_jsonl` helper (Session 5). `tools/microstructure_report.py` (local, .gitignored) reads current + last 7 archives, joins to `clv.json` via `(ticker, ts_placed)` ±60s window REUSING `bot.calibration._within_window` and `_parse_iso` (Session 13b precedent), and computes per-strategy slippage / latency / fill-rate stats plus slippage-adjusted CLV. Microstructure rows carry `regime` tags (Session 14 discipline; 6th writer to do so).
+
+**v1 limitations** (documented in module docstring): (1) `slippage_source: "limit_price_echo"` — Kalshi's `place_order` SDK return computes `cost_dollars = round(filled * price_cents / 100.0, 2)` ([agent/kalshi_client.py:390](hustle-agent/agent/kalshi_client.py:390)), echoing the limit price. So slippage will read 0 in production until v2 wires the `/portfolio/fills` endpoint. The schema's `slippage_source` field makes the migration observable. (2) Bot crashes between `place_order` and terminal observation lose that order's microstructure row (`_PENDING` is process-local). Acceptable at tens-to-hundreds of orders/day. (3) Orders pruned from Kalshi after cancellation return `{"error": ...}` from `get_order`; `check_fills` swallows the error today. Punt to v2 (stale-pending sweep).
+
+Tests: 16 cases in `tests/test_order_microstructure.py` (mocked Kalshi client throughout) + 5 cases in `tests/test_scheduler.py::TestOrderMicrostructureRotation` mirroring `TestPredictionsRotation`. Bot restarted at end (Telegram STOP → launchd kickstart). Paper mode behavior verified unchanged — `MICROSTRUCTURE_FILE` is empty after a paper trade fires (regression test in suite).
 
 ---
 
@@ -938,6 +948,15 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Caveat — file size:** ≤30 MB/day before rotation. If you see growth that exceeds this, the MVE filter regressed or `status="open"` isn't sticking.
 - **Known gaps:** `live_watcher` per-tick scanning is not attributed (per-game, not per-scan; revisit when Session 13 ships). The `_active_series_tickers()` list in `bot/universe.py` is hand-maintained — if a new active scanner ships, add its series prefixes there or attribution will go missing.
 - **Session 14:** every row carries `regime` (event_horizon_hr resolves from each row's close_ts).
+
+### 11. `bot/state/order_microstructure.jsonl` — per-live-order microstructure (Session 15)
+- **Inspect:** `wc -l bot/state/order_microstructure.jsonl 2>/dev/null && tail -3 bot/state/order_microstructure.jsonl 2>/dev/null | jq .`
+- **Expect (PAPER_MODE=True, current state):** file does not exist, OR exists empty. **Paper trades do not write here by design.** If non-zero rows appear while PAPER_MODE=True, investigate immediately — the paper-mode regression test caught a regression.
+- **Expect (PAPER_MODE=False, post-flip):** ≥1 row per live order at terminal status. Schema in `bot/order_microstructure.py` module docstring.
+- **Run report (post-flip):** `python3 tools/microstructure_report.py --days 7` produces per-strategy slippage / latency / fill-rate breakdown plus slippage-adjusted CLV (joins to `clv.json` via `(ticker, ts_placed)` ±60s window).
+- **Deferred verification (post-flip):** (1) First live order writes a row with all fields populated. (2) After 50 live orders: any strategy with median slippage > 2¢ or p95 latency > 5s is a Session-16+ tuning candidate. (3) Per-strategy `slippage_adjusted_clv` should match paper-CLV within ~1-2¢; divergence > 3¢ means paper-mode is over-optimistic and we need to bake slippage into paper simulation (its own session).
+- **v1 known gaps:** (a) `slippage_source: "limit_price_echo"` means production slippage will read 0 until a `/portfolio/fills` endpoint integration (Kalshi's `place_order` SDK echoes limit price as `cost_dollars`). (b) Bot crashes between place_order and terminal observation lose that row (in-memory `_PENDING` dict is process-local). (c) Kalshi-side cancellation pruning returns errors that get_order swallows.
+- **Session 14:** every row carries `regime` (event_horizon_hr resolves from the order's market close_ts).
 
 ### Cross-cutting checks
 - **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.
