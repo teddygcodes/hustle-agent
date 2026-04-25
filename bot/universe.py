@@ -285,6 +285,43 @@ def on_market_seen(scan_id: str, ticker: str, scanner_name: str) -> None:
         )
 
 
+def get_buffered_markets(scan_id: str) -> list:
+    """Return buffered Market rows for a scan_id as a list of
+    bot.strategies.Market. Read-only — does not mutate the buffer.
+    Returns [] if scan_id unknown.
+
+    Added in Session 13a so scan_cycle can pass the universe to
+    Strategy.candidate_markets without strategies calling Kalshi
+    directly. The list is a snapshot — strategies that mutate the
+    rows (e.g., on_market_seen) keep going through the existing
+    callback path.
+    """
+    from bot.strategies import Market
+    with _LOCK:
+        scan = _BUFFER.get(scan_id)
+        if scan is None:
+            return []
+        return [
+            Market(
+                ticker=r["ticker"],
+                series_ticker=r["series_ticker"],
+                event_ticker=r.get("event_ticker"),
+                status=r.get("status") or "",
+                close_ts=r.get("close_ts"),
+                yes_ask=r.get("yes_ask"),
+                yes_bid=r.get("yes_bid"),
+                no_ask=r.get("no_ask"),
+                no_bid=r.get("no_bid"),
+                volume_24h=r.get("volume_24h"),
+                open_interest=r.get("open_interest"),
+                ts=r.get("ts"),
+                scan_id=r.get("scan_id"),
+                raw=r,
+            )
+            for r in scan.values()
+        ]
+
+
 def flush_universe(scan_id: str) -> int:
     """Atomically append every buffered row for `scan_id` to universe.jsonl.
     Returns count flushed. Pops the buffer entry whether or not the write
