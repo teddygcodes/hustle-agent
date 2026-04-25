@@ -91,19 +91,21 @@ def _edge_gate_fingerprint(reason: str) -> dict[str, bool]:
     return out
 
 
-def _log_position_reject(ticker: str, opp_type: str | None, reason: str) -> None:
+def _log_position_reject(ticker: str, opp_type: str | None, reason: str,
+                          extra: dict | None = None) -> None:
     try:
         from bot import decisions
         decisions.log_decision(
             ticker=ticker, opp_type=opp_type or "unknown", edge=None,
             gates=_pos_gate_fingerprint(reason),
-            decision="reject", reason=reason,
+            decision="reject", reason=reason, extra=extra,
         )
     except Exception:
         pass  # never block trades because logging failed
 
 
-def _log_edge_reject(opportunity: dict, reason: str) -> None:
+def _log_edge_reject(opportunity: dict, reason: str,
+                      extra: dict | None = None) -> None:
     try:
         from bot import decisions
         decisions.log_decision(
@@ -111,7 +113,7 @@ def _log_edge_reject(opportunity: dict, reason: str) -> None:
             opp_type=opportunity.get("type", "unknown"),
             edge=opportunity.get("edge"),
             gates=_edge_gate_fingerprint(reason),
-            decision="reject", reason=reason,
+            decision="reject", reason=reason, extra=extra,
         )
     except Exception:
         pass
