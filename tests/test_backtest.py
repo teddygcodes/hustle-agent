@@ -11,6 +11,7 @@ import json
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -108,3 +109,72 @@ class TestClvJoin:
                "status": "counterfactual_settled", "clv_cents": -3.0}
         assert match_clv_record("KXTEST-1",
                                 "2026-04-25T12:00:00+00:00", [rec]) is rec
+
+
+@pytest.fixture
+def _no_network():
+    """Patch the NWS fetch so replay tests don't hit the network.
+    replay_strategy calls _fetch_vig_stack_forecasts() once at start to
+    cache. Tests don't care about the forecast content — short-circuit to {}."""
+    with patch(
+        "bot.strategies.vig_stack_series._fetch_vig_stack_forecasts",
+        return_value={},
+    ):
+        yield
+
+
+class TestReplayStrategy:
+    """Test 3: stub Strategy + 2 hand-crafted snapshots -> opps as expected.
+    Asserts candidate_markets called once per snapshot, evaluate per market,
+    finalize NEVER called (CF emission would write production state)."""
+
+    def test_replay_calls_candidate_then_evaluate_skips_finalize(self, _no_network):
+        m1 = Market(
+            ticker="KXTEST-1", series_ticker="KXTEST", event_ticker="EV",
+            status="active", close_ts=None,
+            yes_ask=60, yes_bid=58, no_ask=42, no_bid=40,
+            volume_24h=100, open_interest=50,
+            ts="2026-04-25T12:00:00+00:00", scan_id="S1",
+        )
+        m2 = Market(
+            ticker="KXTEST-2", series_ticker="KXTEST", event_ticker="EV",
+            status="active", close_ts=None,
+            yes_ask=80, yes_bid=78, no_ask=22, no_bid=20,
+            volume_24h=100, open_interest=50,
+            ts="2026-04-25T12:00:00+00:00", scan_id="S1",
+        )
+        snapshots = {"S1": [m1, m2]}
+
+        class StubStrategy:
+            name = "stub"
+
+            def __init__(self):
+                self.calls = {"candidate": 0, "evaluate": 0, "finalize": 0}
+
+            def name_for(self, market):
+                return self.name
+
+            def candidate_markets(self, universe):
+                self.calls["candidate"] += 1
+                return universe
+
+            def evaluate(self, market):
+                self.calls["evaluate"] += 1
+                return {"ticker": market.ticker, "edge": 0.05,
+                        "opp_type": "stub", "recommended_side": "yes",
+                        "price_cents": int(market.yes_ask)}
+
+            def finalize(self, scan_id):
+                self.calls["finalize"] += 1
+                raise RuntimeError(
+                    "finalize() must NOT be called by back-tester")
+
+        strat = StubStrategy()
+        results = replay_strategy(strat, snapshots)
+
+        assert strat.calls["candidate"] == 1
+        assert strat.calls["evaluate"] == 2
+        assert strat.calls["finalize"] == 0
+        assert len(results) == 2
+        assert all("scan_id" in r and "snapshot_ts" in r for r in results)
+        assert {r["opp"]["ticker"] for r in results} == {"KXTEST-1", "KXTEST-2"}
