@@ -49,6 +49,24 @@ _price_monitor = PriceMonitor()
 
 
 # ---------------------------------------------------------------------------
+# Session 10: gate diagnostics
+# ---------------------------------------------------------------------------
+
+def _forecast_distance_from_bucket(forecast_temp: float, lo: float, hi: float) -> float:
+    """Signed distance in degrees from a forecast to a contract bucket.
+
+    Negative when the forecast is INSIDE [lo, hi] (magnitude = depth from
+    nearest edge). Positive when the forecast is OUTSIDE the bucket
+    (magnitude = gap from nearest edge). Used by the forecast_in_bucket
+    reject log so cohort_report can distinguish "deep inside" from
+    "just outside the ±2° margin".
+    """
+    if lo <= forecast_temp <= hi:
+        return -min(forecast_temp - lo, hi - forecast_temp)
+    return min(abs(forecast_temp - lo), abs(forecast_temp - hi))
+
+
+# ---------------------------------------------------------------------------
 # Dynamic confidence based on historical win rate
 # ---------------------------------------------------------------------------
 
@@ -701,7 +719,8 @@ def scan_vig_stack_series() -> list[dict]:
                             gates=_vig_stack_gate_fingerprint("low_liquidity"),
                             decision="reject",
                             reason="low_liquidity",
-                            extra={"volume": volume, "open_interest": open_interest},
+                            extra={"volume": volume, "open_interest": open_interest,
+                                   "min_volume": 10, "min_open_interest": 5},
                         )
                         continue
                     yes_asks.append(ya)
@@ -813,7 +832,9 @@ def scan_vig_stack_series() -> list[dict]:
                                 gates=_vig_stack_gate_fingerprint("forecast_in_bucket"),
                                 decision="reject",
                                 reason="forecast_in_bucket",
-                                extra={"forecast_temp": forecast_temp, "bucket_lo": lo, "bucket_hi": hi},
+                                extra={"forecast_temp": forecast_temp,
+                                       "bucket_lo": lo, "bucket_hi": hi,
+                                       "distance": round(_forecast_distance_from_bucket(forecast_temp, lo, hi), 2)},
                             )
                             rejected_opps.append(_build_reject_opp("forecast_in_bucket"))
                             continue
@@ -873,12 +894,23 @@ def scan_vig_stack_series() -> list[dict]:
                 VIG_STACK_MIN_EDGE = 0.02
                 if relative_no_edge < VIG_STACK_MIN_EDGE:
                     _telem[_sub]["edge_below_threshold"] += 1
+                    _close_str = market.get("close_time") or market.get("expiration_time", "")
+                    _tts_hr = None
+                    if _close_str:
+                        try:
+                            _close_dt = datetime.fromisoformat(_close_str.replace("Z", "+00:00"))
+                            _tts_hr = round((_close_dt - _now_utc).total_seconds() / 3600.0, 2)
+                        except (ValueError, TypeError):
+                            _tts_hr = None
                     decisions.log_decision(
                         ticker=ticker, opp_type=_opp_type_now,
                         edge=round(relative_no_edge, 4),
                         gates=_vig_stack_gate_fingerprint("edge_below_threshold"),
                         decision="reject", reason="edge_below_threshold",
-                        extra={"min_edge": VIG_STACK_MIN_EDGE},
+                        extra={"min_edge": VIG_STACK_MIN_EDGE,
+                               "edge": round(relative_no_edge, 4),
+                               "vig": round(yes_sum - 100.0, 2),
+                               "time_to_settle_hr": _tts_hr},
                     )
                     rejected_opps.append(_build_reject_opp("edge_below_threshold"))
                     continue
