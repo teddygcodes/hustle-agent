@@ -400,7 +400,9 @@ class VigStackSeries:
                 # Silently skip markets without prices — legacy does the
                 # same (no telemetry, no log_decision).
                 continue
-            volume = m.volume_24h or 0
+            # Match legacy: lifetime `volume` field (Kalshi `volume_fp`),
+            # not the 24h rolling window. universe.jsonl stores both.
+            volume = (m.raw.get("volume") if m.raw else None) or 0
             open_interest = m.open_interest or 0
             if volume < 10 and open_interest < 5:
                 self._telem[sub]["low_liquidity"] += 1

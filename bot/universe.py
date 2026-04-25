@@ -162,8 +162,14 @@ def snapshot_universe(scan_id: str) -> int:
             "yes_bid": m.get("yes_bid"),
             "no_ask": m.get("no_ask"),
             "no_bid": m.get("no_bid"),
+            # Capture both volume series. Lifetime `volume` is what the
+            # vig_stack low_liquidity gate reads; volume_24h is the
+            # rolling-window field reported in dashboards. Session 13a
+            # added volume to support strategy back-testing.
+            "volume": m.get("volume"),
             "volume_24h": m.get("volume_24h"),
             "open_interest": m.get("open_interest"),
+            "title": m.get("title"),
             "scanned_by": [],
         }
 
