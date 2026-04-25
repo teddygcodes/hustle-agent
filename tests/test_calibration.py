@@ -102,6 +102,28 @@ class TestSchemaIntegrity:
         recs = _read_records(tmp_predictions_file)
         assert recs[0]["ts"] == ts
 
+    def test_record_carries_regime_dict(self, tmp_predictions_file):
+        """Session 14: every prediction row gets `regime` with all 4 axes.
+        market_state is not threaded through this writer, so event_horizon_hr
+        is expected to be None — other axes still populate."""
+        calibration.record_prediction(
+            ticker="KXMLBGAME-26APR25-LAA",
+            opp_type="vig_stack_series",
+            predicted_fair_cents=42.0,
+            market_price_cents=38,
+            scan_id="scan-x",
+        )
+        r = _read_records(tmp_predictions_file)[-1]
+        assert "regime" in r
+        regime = r["regime"]
+        assert set(regime.keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        # MLB ticker → sport_phase resolves
+        assert regime["sport_phase"] in {"preseason", "regular", "playoffs", "off"}
+        # No market_state at this writer
+        assert regime["event_horizon_hr"] is None
+
 
 class TestAtomicAppend:
 

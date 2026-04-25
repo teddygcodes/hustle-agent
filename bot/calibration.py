@@ -21,6 +21,7 @@ import threading
 from datetime import datetime, timezone
 
 from bot.config import BOT_STATE_DIR
+from bot.regime import tag as regime_tag
 
 PREDICTIONS_FILE = BOT_STATE_DIR / "predictions.jsonl"
 
@@ -67,6 +68,14 @@ def record_prediction(
         "market_price_cents": int(market_price_cents),
         "closing_yes_price": None,
     }
+    try:
+        record["regime"] = regime_tag(
+            ts=datetime.fromisoformat(record["ts"]),
+            ticker=ticker,
+            market_state=None,
+        )
+    except Exception:
+        _logger.exception("calibration.record_prediction: regime_tag failed for %s", ticker)
     line = json.dumps(record, separators=(",", ":")) + "\n"
     try:
         with _LOCK:
