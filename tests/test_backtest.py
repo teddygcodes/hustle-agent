@@ -268,3 +268,24 @@ class TestVerificationMode:
         assert "Verification" in out
         # Either OK (numbers matched) or vacuous OK (no overlap)
         assert "[VERIFICATION] OK" in out
+
+
+class TestComputeClvReuse:
+    """Test 6 / discipline guard: tools/backtest.py MUST import
+    compute_clv_cents from bot.clv. No parallel codepath. If a future edit
+    accidentally inlines or re-defines the math here, this test fails."""
+
+    def test_no_local_definition(self):
+        import tools.backtest as bt
+        source = inspect.getsource(bt)
+        for line in source.splitlines():
+            assert not line.strip().startswith("def compute_clv_cents"), (
+                "tools/backtest.py defines its own compute_clv_cents — that's "
+                "a parallel codepath. Use bot.clv.compute_clv_cents."
+            )
+
+    def test_runtime_reference_is_bot_clv(self):
+        """Stronger: at runtime, the function reference is identical."""
+        import tools.backtest as bt
+        from bot import clv as live_clv
+        assert bt.bot_clv.compute_clv_cents is live_clv.compute_clv_cents
