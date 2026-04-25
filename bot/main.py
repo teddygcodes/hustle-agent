@@ -37,6 +37,7 @@ from bot.config import (
 from bot.state_io import load_json as _load_json_state
 from bot.clv import check_clv_settlements, format_clv_report
 from bot.scanner import scan_cycle
+from bot import universe as _universe
 from bot.daily_log import update_daily_log
 from bot.market_maker import (
     scan_market_making_opportunities, format_mm_opportunity,
@@ -1073,10 +1074,24 @@ class GlintBot:
             # ----------------------------------------------------------
             # Step 3: Scan for opportunities (ESPN = FREE)
             # ----------------------------------------------------------
+            # Session 12: snapshot the full active Kalshi universe before
+            # the scan so scanners can attribute which markets they touched
+            # via on_market_seen. flush_universe runs in `finally` so a
+            # scanner exception doesn't strand the buffered rows.
+            scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            _universe.snapshot_universe(scan_id)
+            scan_failed = False
             try:
-                scan_result = scan_cycle()
+                scan_result = scan_cycle(
+                    scan_id=scan_id,
+                    on_market_seen=_universe.on_market_seen,
+                )
             except Exception as e:
                 logger.error(f"Scan cycle error: {e}", exc_info=True)
+                scan_failed = True
+            finally:
+                _universe.flush_universe(scan_id)
+            if scan_failed:
                 await asyncio.sleep(60)
                 continue
 

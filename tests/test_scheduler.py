@@ -505,6 +505,96 @@ class TestPredictionsRotation:
         assert (archive_dir / "predictions-2026-04-25-2.jsonl.gz").exists()
 
 
+class TestUniverseRotation:
+    """Session 12: nightly universe.jsonl → state/archive/*.jsonl.gz rotation."""
+
+    @pytest.fixture
+    def tmp_universe(self, tmp_path, monkeypatch):
+        """Repoint UNIVERSE_FILE to a tmp directory."""
+        uni = tmp_path / "universe.jsonl"
+        from bot import universe
+        monkeypatch.setattr(universe, "UNIVERSE_FILE", uni)
+        return uni
+
+    def _seed(self, path, count=200):
+        # Each line ≥ 50 bytes → comfortably above the 1KB rotation floor.
+        path.write_text("\n".join(
+            json.dumps({"ts": "x", "scan_id": f"S{i}", "ticker": f"T{i}",
+                        "series_ticker": "KXTEMP", "scanned_by": []})
+            for i in range(count)
+        ) + "\n")
+
+    def test_fires_at_midnight_and_archives_file(self, tmp_state, tmp_universe, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_universe)
+        original_size = tmp_universe.stat().st_size
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert not tmp_universe.exists()
+        archive_dir = tmp_universe.parent / "archive"
+        gz = archive_dir / "universe-2026-04-25.jsonl.gz"
+        assert gz.exists()
+        assert gz.stat().st_size < original_size
+
+        state = _read_state(tmp_state)
+        assert state["last_universe_rotation"] == "2026-04-25"
+
+    def test_skips_if_file_too_small(self, tmp_state, tmp_universe, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        tmp_universe.write_text('{"x":1}\n')
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_universe.exists()
+        assert (tmp_universe.parent / "archive").exists() is False
+        assert _read_state(tmp_state)["last_universe_rotation"] == "2026-04-25"
+
+    def test_no_refire_same_day(self, tmp_state, tmp_universe, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_universe)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 30, tzinfo=ET))
+        _set_state(tmp_state, last_universe_rotation="2026-04-25")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_universe.exists()
+        assert not (tmp_universe.parent / "archive").exists()
+
+    def test_catch_up_if_missed_a_day(self, tmp_state, tmp_universe, mock_bot, monkeypatch):
+        """If last_universe_rotation is older than yesterday, rotate at any hour."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_universe)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 14, 0, tzinfo=ET))
+        _set_state(tmp_state, last_universe_rotation="2026-04-19")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        gz = tmp_universe.parent / "archive" / "universe-2026-04-25.jsonl.gz"
+        assert gz.exists()
+
+    def test_collision_appends_suffix(self, tmp_state, tmp_universe, mock_bot, monkeypatch):
+        """If today's archive already exists, dest gets a -2 suffix."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_universe)
+        archive_dir = tmp_universe.parent / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "universe-2026-04-25.jsonl.gz").write_bytes(b"prior")
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert (archive_dir / "universe-2026-04-25.jsonl.gz").read_bytes() == b"prior"
+        assert (archive_dir / "universe-2026-04-25-2.jsonl.gz").exists()
+
+
 class TestTotalPnlPersist:
     """After nightly fires, bot_state['total_pnl'] reflects compute_daily_summary."""
 

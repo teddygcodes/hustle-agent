@@ -87,7 +87,8 @@ def _parse_total_threshold(ticker: str) -> float | None:
         return None
 
 
-def scan_monotonicity_violations() -> list[dict]:
+def scan_monotonicity_violations(scan_id: str | None = None,
+                                 on_market_seen=None) -> list[dict]:
     """
     Check threshold markets (spreads + totals) for monotonicity violations.
 
@@ -96,9 +97,18 @@ def scan_monotonicity_violations() -> list[dict]:
 
     A violation means you can buy YES on the lower threshold (cheap)
     and buy NO on the higher threshold (cheap) for guaranteed profit.
+
+    Session 12: optional `scan_id` and `on_market_seen` callback let the
+    main loop attribute every spread/total ticker this scanner touched to
+    its universe.jsonl row. None for both = no-op (Telegram handlers, tests).
     """
     opportunities = []
     _telem = {"sports_scanned": 0, "spread_markets": 0, "total_markets": 0, "events": 0, "pairs_checked": 0, "violations": 0}
+
+    def _attribute(markets_list):
+        if on_market_seen and scan_id:
+            for _m in markets_list:
+                on_market_seen(scan_id, _m.get("ticker", ""), "sports_monotonicity_arb")
 
     for sport in ("nba",):  # Start with NBA, extend as needed
         _telem["sports_scanned"] += 1
@@ -112,6 +122,8 @@ def scan_monotonicity_violations() -> list[dict]:
             except Exception as e:
                 logger.warning("SportsArb/%s spread API error: %s", sport, e)
                 markets = []
+
+            _attribute(markets)
 
             # Group by event (game)
             events: dict[str, list] = {}
@@ -211,6 +223,8 @@ def scan_monotonicity_violations() -> list[dict]:
                 logger.warning("SportsArb/%s total API error: %s", sport, e)
                 markets = []
 
+            _attribute(markets)
+
             events = {}
             for m in markets:
                 evt = m.get("event_ticker", "")
@@ -284,13 +298,17 @@ def scan_monotonicity_violations() -> list[dict]:
     return opportunities
 
 
-def scan_championship_series_violations() -> list[dict]:
+def scan_championship_series_violations(scan_id: str | None = None,
+                                        on_market_seen=None) -> list[dict]:
     """
     Check that P(team wins championship) ≤ P(team wins current series).
 
     Winning the series is a PREREQUISITE for winning the championship.
     If the championship price exceeds the series price, that's mathematically
     impossible and a guaranteed arb.
+
+    Session 12: scan_id + on_market_seen attribute every champ/playoff
+    ticker to its universe.jsonl row. None = no-op.
     """
     opportunities = []
 
@@ -316,6 +334,12 @@ def scan_championship_series_violations() -> list[dict]:
         except Exception as e:
             logger.warning("SportsArb/%s series API error: %s", sport, e)
             continue
+
+        if on_market_seen and scan_id:
+            for _m in champ_markets:
+                on_market_seen(scan_id, _m.get("ticker", ""), "sports_consistency_arb")
+            for _m in series_markets:
+                on_market_seen(scan_id, _m.get("ticker", ""), "sports_consistency_arb")
 
         # Build team → price maps
         champ_prices = {}  # team_code → yes_ask (cents)
@@ -412,7 +436,9 @@ def scan_championship_series_violations() -> list[dict]:
     return opportunities
 
 
-def scan_game_vig(min_vig_pct: float = 0.08) -> list[dict]:
+def scan_game_vig(min_vig_pct: float = 0.08,
+                  scan_id: str | None = None,
+                  on_market_seen=None) -> list[dict]:
     """
     Check binary game markets where YES sum is high enough for structural NO edge.
 
@@ -421,6 +447,11 @@ def scan_game_vig(min_vig_pct: float = 0.08) -> list[dict]:
     per-contract edge can still be significant at high vig levels.
 
     Only scans games with meaningful volume (>100) to avoid illiquid spreads.
+
+    Session 12: scan_id + on_market_seen attribute every game-series ticker
+    to its universe.jsonl row. Emits the same opp_type (vig_stack_futures)
+    as scan_vig_stack_series's futures branch, so we attribute under the
+    same name for consistency. None = no-op.
     """
     opportunities = []
 
@@ -435,6 +466,10 @@ def scan_game_vig(min_vig_pct: float = 0.08) -> list[dict]:
         except Exception as e:
             logger.warning("SportsArb/%s game vig API error: %s", sport, e)
             continue
+
+        if on_market_seen and scan_id:
+            for _m in markets:
+                on_market_seen(scan_id, _m.get("ticker", ""), "vig_stack_futures")
 
         # Group by event
         events: dict[str, list] = {}
@@ -519,25 +554,31 @@ def scan_game_vig(min_vig_pct: float = 0.08) -> list[dict]:
     return opportunities
 
 
-def scan_sports_arb() -> list[dict]:
+def scan_sports_arb(scan_id: str | None = None,
+                    on_market_seen=None) -> list[dict]:
     """
     Master function: run all cross-market consistency checks.
     Called from scan_cycle() in scanner.py.
+
+    Session 12: passes scan_id + on_market_seen to each sub-scanner so
+    every ticker they evaluate gets attributed to the matching universe.jsonl
+    row. None for both = no-op (Telegram handlers, tests).
     """
     all_opps = []
 
     logger.info("SPORTS_ARB: scanning spread/total monotonicity")
-    mono_opps = scan_monotonicity_violations()
+    mono_opps = scan_monotonicity_violations(scan_id=scan_id, on_market_seen=on_market_seen)
     all_opps.extend(mono_opps)
     logger.info("SPORTS_ARB: %d monotonicity violations found", len(mono_opps))
 
     logger.info("SPORTS_ARB: scanning championship≤series consistency")
-    consistency_opps = scan_championship_series_violations()
+    consistency_opps = scan_championship_series_violations(
+        scan_id=scan_id, on_market_seen=on_market_seen)
     all_opps.extend(consistency_opps)
     logger.info("SPORTS_ARB: %d championship>series violations found", len(consistency_opps))
 
     logger.info("SPORTS_ARB: scanning high-vig game markets")
-    vig_opps = scan_game_vig()
+    vig_opps = scan_game_vig(scan_id=scan_id, on_market_seen=on_market_seen)
     all_opps.extend(vig_opps)
     logger.info("SPORTS_ARB: %d high-vig game opportunities found", len(vig_opps))
 

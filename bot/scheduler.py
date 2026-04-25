@@ -158,6 +158,22 @@ async def check_scheduled_events(bot) -> None:
         except Exception:
             logger.exception("Predictions rotation failed")
 
+    # --- Nightly universe.jsonl rotation (Session 12, midnight ET, catch-up) ---
+    last_uni_rotation = state.get("last_universe_rotation", "")
+    should_rotate_uni = (
+        (current_hour == 0 and last_uni_rotation != today_str)
+        or (last_uni_rotation and last_uni_rotation < yesterday_str)
+    )
+    if should_rotate_uni:
+        logger.info("Rotating universe.jsonl...")
+        try:
+            _rotate_universe_log(today_str)
+            state = _load_bot_state()
+            state["last_universe_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Universe rotation failed")
+
 
 def _rotate_jsonl(source: Path, prefix: str, today_str: str) -> None:
     """Move source.jsonl → source.parent/archive/<prefix>-YYYY-MM-DD.jsonl.gz.
@@ -211,6 +227,11 @@ def _rotate_decisions_log(today_str: str) -> None:
 def _rotate_predictions_log(today_str: str) -> None:
     from bot.calibration import PREDICTIONS_FILE
     _rotate_jsonl(PREDICTIONS_FILE, "predictions", today_str)
+
+
+def _rotate_universe_log(today_str: str) -> None:
+    from bot.universe import UNIVERSE_FILE
+    _rotate_jsonl(UNIVERSE_FILE, "universe", today_str)
 
 
 async def _send_morning_briefing(bot):

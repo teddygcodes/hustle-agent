@@ -728,7 +728,7 @@ Session 15: Live order microstructure (1 session — defer until PAPER_MODE=Fals
 
 ---
 
-### ☐ Session 12 — Universe log (Apr 25+, planned)
+### ☑ Session 12 — Universe log (Apr 25, shipped)
 
 **Problem.** Every existing collection point (`decisions.jsonl`, CFs in `clv.json`, `predictions.jsonl`) only fires on opportunities a strategy scanner already considered. Kalshi has thousands of active markets at any time; we scan a curated handful. We have **zero signal** on what's happening in the rest — political markets, single-event futures, contract types our scanners don't template. Without a record of the full universe, we can't ask "what alpha is hiding in markets we don't even look at?" The current reports answer "are our strategies well-tuned?"; the universe log answers "are our strategies the right ones to be running?"
 
@@ -902,6 +902,18 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Settlement coverage:** `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/predictions.jsonl')]; n=len(r); s=sum(1 for x in r if x.get('closing_yes_price') is not None); print(f'{s}/{n} settled ({100*s/n if n else 0:.0f}%)')"` — 0% same-day, climbs to ~100% within 7 days for resolved markets.
 - **Run report:** `python3 tools/calibration_report.py` — needs ≥7 days of settled data for stable Brier scores.
 - **Known gaps:** live_momentum predictions skipped (`predicted_fair_cents=None` is silently dropped). Pre-Session-11 trades have no prediction record. Predictions count ≈ count of `clv.json` records where `status in (open, counterfactual_open)` minus live_momentum CLV rows.
+
+### 10. `bot/state/universe.jsonl` — active-market snapshot per scan (Session 12)
+- **Inspect:** `wc -l bot/state/universe.jsonl && tail -3 bot/state/universe.jsonl | jq .`
+- **Expect:** ~800–1,500 rows per scan after dedupe. Schema: `{ts, scan_id, ticker, series_ticker, event_ticker, status, close_ts, yes_ask, yes_bid, no_ask, no_bid, volume_24h, open_interest, scanned_by, partial?}`. Roughly 50/50 scanned vs. ignored — shadow-fetch-by-active-series guarantees coverage of strategy-relevant tickers; cursor walk picks up the long-tail ignored families.
+- **Coverage check:** `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/universe.jsonl')]; print(f'total: {len(r)}, unscanned: {sum(1 for x in r if not x[\"scanned_by\"])}, scanned: {sum(1 for x in r if x[\"scanned_by\"])}')"`.
+- **Run report:** `python3 tools/universe_report.py [--by-scanner]` — per-prefix breakdown with ignored-volume + ignored-spread; surfaces Session-13 candidates (e.g. observed Apr 25: KXNBAGAME with $262K vol completely unscanned, KXMLBTOTAL with 165 ignored markets despite TOTAL_SERIES["mlb"] being defined, full KXNHL* series uncovered).
+- **Architecture:** two-pass snapshot. Pass 1 cursor-paginates `status=open` markets (bounded by 90s deadline); pass 2 explicitly fetches each active-strategy series (`WEATHER_SERIES_TICKERS` / `INDEX_RANGE_SERIES_TICKERS` / `SPORTS_FUTURES_TICKERS` / sports-arb series dicts). Rows are written to `universe.jsonl` after `scan_cycle` returns so `scanned_by` is fully populated by `on_market_seen` callbacks fired during scanning.
+- **Rotation:** `ls bot/state/archive/universe-*.jsonl.gz | tail -3` — yesterday's archive present after midnight ET.
+- **Caveat — KXMVE filter:** Multi-Variate Event parlay expansions (`KXMVE*` tickers) are dropped at write time. Kalshi creates 50K+ at any moment (parlay product variants); they overwhelm the log without informing strategy gaps. Lift the filter in `bot/universe.py:_MVE_PREFIX` if Session 13 wants to back-test parlay strategies.
+- **Caveat — `partial: true`:** Cursor pass under load (live_watcher polling Kalshi during games) often hits the 90s deadline before exhausting the cursor — those rows carry `partial: true`. Shadow pass still runs and populates active-series coverage. Reports include partial rows in per-prefix breakdown but flag the partial percentage at the top so absolute long-tail counts can be discounted.
+- **Caveat — file size:** ≤30 MB/day before rotation. If you see growth that exceeds this, the MVE filter regressed or `status="open"` isn't sticking.
+- **Known gaps:** `live_watcher` per-tick scanning is not attributed (per-game, not per-scan; revisit when Session 13 ships). The `_active_series_tickers()` list in `bot/universe.py` is hand-maintained — if a new active scanner ships, add its series prefixes there or attribution will go missing.
 
 ### Cross-cutting checks
 - **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.

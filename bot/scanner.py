@@ -613,7 +613,8 @@ def _stratified_cf_rejects(
     return selected[:hard_cap]
 
 
-def scan_vig_stack_series() -> list[dict]:
+def scan_vig_stack_series(scan_id: str | None = None,
+                          on_market_seen=None) -> list[dict]:
     """
     Scan Kalshi series ladders for structural NO edges caused by vig stacking.
 
@@ -626,6 +627,12 @@ def scan_vig_stack_series() -> list[dict]:
 
     This scanner is completely independent of external odds sources.
     Wide-spread thin markets are NOT filtered out — thin markets are the opportunity.
+
+    Session 12: optional `scan_id` and `on_market_seen` callback let
+    `_main_loop` attribute every ticker this scanner touched to the matching
+    universe.jsonl row (`scanned_by`). When called without these (Telegram
+    `/scan` handler, tests), scan_id is generated locally for CF idempotency
+    and the callback is a no-op.
     """
     from bot import decisions  # lazy import (circular safety)
 
@@ -700,11 +707,18 @@ def scan_vig_stack_series() -> list[dict]:
             event_groups = [markets]  # Weather/futures: all contracts are one ladder
 
         _sub = "futures" if is_futures else "series"
+        _scanner_name = "vig_stack_futures" if is_futures else "vig_stack_series"
         for event_markets in event_groups:
             # Collect YES ask prices for all contracts in this event
             yes_asks = []
             valid_markets = []
             for m in event_markets:
+                # Session 12: attribute every ticker this scanner looked at —
+                # including low-liquidity / no-vig rejects below — so the
+                # universe row's `scanned_by` reflects "active strategy
+                # considered this," not just "passed all filters."
+                if on_market_seen and scan_id:
+                    on_market_seen(scan_id, m.get("ticker", ""), _scanner_name)
                 ya = m.get("yes_ask")
                 na = m.get("no_ask")
                 if ya and ya > 0 and na and na > 0:
@@ -1000,7 +1014,11 @@ def scan_vig_stack_series() -> list[dict]:
     if rejected_opps:
         try:
             from bot import clv
-            scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            # Session 12: scan_id may be hoisted from _main_loop (so universe
+            # rows can be joined to CF/prediction records on (scan_id, ticker)).
+            # Fall back to local generation when called from Telegram handlers
+            # / tests that don't pass it.
+            scan_id = scan_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             for opp in _stratified_cf_rejects(rejected_opps):
                 try:
                     clv.record_counterfactual_skip(opp, opp["skip_reason"], scan_id)
@@ -1016,9 +1034,22 @@ def scan_vig_stack_series() -> list[dict]:
 # Main scan cycle
 # ---------------------------------------------------------------------------
 
-def scan_cycle(sports: Optional[list[str]] = None) -> dict:
+def scan_cycle(sports: Optional[list[str]] = None,
+               scan_id: str | None = None,
+               on_market_seen=None) -> dict:
     """
     Run a full scan cycle across all active sports and weather markets.
+
+    Args:
+        sports: Optional sports filter (defaults to ACTIVE_SPORTS).
+        scan_id: Session 12 — hoisted from `_main_loop` so universe.jsonl
+            rows can be joined to decisions/predictions/CF records on
+            `(scan_id, ticker)`. When `None` (Telegram `/scan` handler,
+            tests), each scanner falls back to local generation.
+        on_market_seen: Session 12 — `bot.universe.on_market_seen` callback,
+            wired through so each scanner can attribute every ticker it
+            evaluates. `None` makes the callback a no-op for non-loop
+            callers that don't snapshot the universe.
 
     Returns:
         {
@@ -1122,7 +1153,7 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
 
     # Scan vig stack series (structural NO edge — no external odds, no liquidity filter)
     logger.info("VIG_STACK: scanning series ladders for structural NO edges")
-    vig_stack_opps = scan_vig_stack_series()
+    vig_stack_opps = scan_vig_stack_series(scan_id=scan_id, on_market_seen=on_market_seen)
     if _weather_yes_tickers:
         _before = len(vig_stack_opps)
         vig_stack_opps = [o for o in vig_stack_opps if o["ticker"] not in _weather_yes_tickers]
@@ -1142,7 +1173,7 @@ def scan_cycle(sports: Optional[list[str]] = None) -> dict:
     logger.info("SPORTS_ARB: scanning cross-market consistency")
     try:
         from bot.scanner_sports_arb import scan_sports_arb
-        sports_arb_opps = scan_sports_arb()
+        sports_arb_opps = scan_sports_arb(scan_id=scan_id, on_market_seen=on_market_seen)
         all_opportunities.extend(sports_arb_opps)
         logger.info("SPORTS_ARB: found %d total cross-market opportunities", len(sports_arb_opps))
     except Exception as e:
