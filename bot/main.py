@@ -1321,7 +1321,18 @@ class GlintBot:
             # Step 9: Sleep until next scan
             # ----------------------------------------------------------
             logger.info(f"Next scan in {scan_interval}s ({scan_interval // 60}m)")
-            await asyncio.sleep(scan_interval)
+            # Wall-clock sleep — asyncio.sleep uses time.monotonic() which
+            # does not advance during macOS system sleep. On a battery laptop
+            # in DarkWake (2-180s wake windows), a single 30-min sleep never
+            # accumulates a long enough contiguous awake period to fire.
+            # Polling every 30s lets each DarkWake window check the wall
+            # clock and resume the loop when due.
+            target = datetime.now(timezone.utc) + timedelta(seconds=scan_interval)
+            while True:
+                remaining = (target - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(30.0, remaining))
 
 
 # ---------------------------------------------------------------------------
