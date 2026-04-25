@@ -1,0 +1,112 @@
+{
+  "input": [
+    {
+      "ticker": "KXHIGHDEN-26APR26-T70",
+      "series_ticker": "KXHIGHDEN",
+      "title": "KXHIGHDEN-26APR26-T70 test",
+      "event_ticker": "KXHIGHDEN-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 85,
+      "no_bid": 84,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHDEN-26APR26-B72.5",
+      "series_ticker": "KXHIGHDEN",
+      "title": "KXHIGHDEN-26APR26-B72.5 test",
+      "event_ticker": "KXHIGHDEN-EV",
+      "status": "active",
+      "yes_ask": 30,
+      "yes_bid": 29,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHDEN-26APR26-B74.5",
+      "series_ticker": "KXHIGHDEN",
+      "title": "KXHIGHDEN-26APR26-B74.5 test",
+      "event_ticker": "KXHIGHDEN-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 85,
+      "no_bid": 84,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHDEN-26APR26-B76.5",
+      "series_ticker": "KXHIGHDEN",
+      "title": "KXHIGHDEN-26APR26-B76.5 test",
+      "event_ticker": "KXHIGHDEN-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 85,
+      "no_bid": 84,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHDEN-26APR26-T78",
+      "series_ticker": "KXHIGHDEN",
+      "title": "KXHIGHDEN-26APR26-T78 test",
+      "event_ticker": "KXHIGHDEN-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 85,
+      "no_bid": 84,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    }
+  ],
+  "expected_opps": [],
+  "expected_calls": [
+    [
+      "KXHIGHDEN-26APR26-T70",
+      "reject",
+      "non_stable_below_weather_floor"
+    ],
+    [
+      "KXHIGHDEN-26APR26-B72.5",
+      "reject",
+      "non_stable_below_weather_floor"
+    ],
+    [
+      "KXHIGHDEN-26APR26-B74.5",
+      "reject",
+      "non_stable_below_weather_floor"
+    ],
+    [
+      "KXHIGHDEN-26APR26-B76.5",
+      "reject",
+      "non_stable_below_weather_floor"
+    ],
+    [
+      "KXHIGHDEN-26APR26-T78",
+      "reject",
+      "non_stable_below_weather_floor"
+    ]
+  ]
+}

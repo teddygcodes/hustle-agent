@@ -169,14 +169,14 @@ class TestScannerGateExtra:
         assert e["open_interest"] < e["min_open_interest"]
 
     def test_forecast_in_bucket_distance_negative_when_inside(self):
-        from bot.scanner import _forecast_distance_from_bucket
+        from bot.strategies.vig_stack_series import _forecast_distance_from_bucket
         # forecast=72, bucket [70,80]: inside, depth = min(72-70, 80-72) = 2 → distance = -2.0
         assert _forecast_distance_from_bucket(72.0, 70.0, 80.0) == -2.0
         # forecast=75, dead-center: depth = min(5, 5) = 5 → distance = -5.0
         assert _forecast_distance_from_bucket(75.0, 70.0, 80.0) == -5.0
 
     def test_forecast_in_bucket_distance_positive_when_outside_margin(self):
-        from bot.scanner import _forecast_distance_from_bucket
+        from bot.strategies.vig_stack_series import _forecast_distance_from_bucket
         # forecast=81, bucket [70,80]: outside but within +1° → distance = 1.0
         assert _forecast_distance_from_bucket(81.0, 70.0, 80.0) == 1.0
         # forecast=68, bucket [70,80]: outside on low side, 2° below

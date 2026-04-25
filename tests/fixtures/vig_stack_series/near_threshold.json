@@ -1,0 +1,156 @@
+{
+  "input": [
+    {
+      "ticker": "KXINX-26APR26-B5400.5",
+      "series_ticker": "KXINX",
+      "title": "KXINX-26APR26-B5400.5 test",
+      "event_ticker": "KXINX-EV",
+      "status": "active",
+      "yes_ask": 2,
+      "yes_bid": 1,
+      "no_ask": 98,
+      "no_bid": 97,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXINX-26APR26-B5500.5",
+      "series_ticker": "KXINX",
+      "title": "KXINX-26APR26-B5500.5 test",
+      "event_ticker": "KXINX-EV",
+      "status": "active",
+      "yes_ask": 27,
+      "yes_bid": 26,
+      "no_ask": 73,
+      "no_bid": 72,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXINX-26APR26-B5600.5",
+      "series_ticker": "KXINX",
+      "title": "KXINX-26APR26-B5600.5 test",
+      "event_ticker": "KXINX-EV",
+      "status": "active",
+      "yes_ask": 27,
+      "yes_bid": 26,
+      "no_ask": 73,
+      "no_bid": 72,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXINX-26APR26-B5700.5",
+      "series_ticker": "KXINX",
+      "title": "KXINX-26APR26-B5700.5 test",
+      "event_ticker": "KXINX-EV",
+      "status": "active",
+      "yes_ask": 50,
+      "yes_bid": 49,
+      "no_ask": 50,
+      "no_bid": 49,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    }
+  ],
+  "expected_opps": [
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXINX-26APR26-B5500.5",
+      "title": "KXINX-26APR26-B5500.5 test",
+      "series_ticker": "KXINX",
+      "edge": 0.0153,
+      "relative_edge": 0.0209,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 106,
+      "vig_factor": 1.06,
+      "no_fair_cents": 74.53,
+      "no_ask_cents": 73,
+      "edge_result": {
+        "fair_value": 0.7453,
+        "kalshi_price": 0.73,
+        "edge": 0.0153,
+        "relative_edge": 0.0209,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXINX | 4 contracts",
+          "YES sum: 106\u00a2 (1.060) \u2014 vig_factor=1.0600",
+          "This contract YES_ask=27\u00a2",
+          "YES_fair = 27\u00a2 / 1.0600 = 25.47\u00a2",
+          "NO_fair = 100 - 25.47 = 74.53\u00a2",
+          "NO_ask = 73\u00a2 | Edge = 0.0153 (2.1% relative)",
+          "Edge check: 0.7453 - 0.7300 = 0.0153 (expected 0.0153) | backward: 0.7300 + 0.0153 = 0.7453 (expected 0.7453) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXINX-26APR26-B5600.5",
+      "title": "KXINX-26APR26-B5600.5 test",
+      "series_ticker": "KXINX",
+      "edge": 0.0153,
+      "relative_edge": 0.0209,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 106,
+      "vig_factor": 1.06,
+      "no_fair_cents": 74.53,
+      "no_ask_cents": 73,
+      "edge_result": {
+        "fair_value": 0.7453,
+        "kalshi_price": 0.73,
+        "edge": 0.0153,
+        "relative_edge": 0.0209,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXINX | 4 contracts",
+          "YES sum: 106\u00a2 (1.060) \u2014 vig_factor=1.0600",
+          "This contract YES_ask=27\u00a2",
+          "YES_fair = 27\u00a2 / 1.0600 = 25.47\u00a2",
+          "NO_fair = 100 - 25.47 = 74.53\u00a2",
+          "NO_ask = 73\u00a2 | Edge = 0.0153 (2.1% relative)",
+          "Edge check: 0.7453 - 0.7300 = 0.0153 (expected 0.0153) | backward: 0.7300 + 0.0153 = 0.7453 (expected 0.7453) \u2705"
+        ],
+        "warnings": []
+      }
+    }
+  ],
+  "expected_calls": [
+    [
+      "KXINX-26APR26-B5400.5",
+      "reject",
+      "edge_below_threshold"
+    ],
+    [
+      "KXINX-26APR26-B5500.5",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXINX-26APR26-B5600.5",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXINX-26APR26-B5700.5",
+      "reject",
+      "no_price_below_floor"
+    ]
+  ]
+}

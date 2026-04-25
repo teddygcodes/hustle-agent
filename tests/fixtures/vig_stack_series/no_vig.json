@@ -1,0 +1,92 @@
+{
+  "input": [
+    {
+      "ticker": "KXHIGHCHI-26APR26-T60",
+      "series_ticker": "KXHIGHCHI",
+      "title": "KXHIGHCHI-26APR26-T60 test",
+      "event_ticker": "KXHIGHCHI-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHCHI-26APR26-B62.5",
+      "series_ticker": "KXHIGHCHI",
+      "title": "KXHIGHCHI-26APR26-B62.5 test",
+      "event_ticker": "KXHIGHCHI-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHCHI-26APR26-B64.5",
+      "series_ticker": "KXHIGHCHI",
+      "title": "KXHIGHCHI-26APR26-B64.5 test",
+      "event_ticker": "KXHIGHCHI-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHCHI-26APR26-B66.5",
+      "series_ticker": "KXHIGHCHI",
+      "title": "KXHIGHCHI-26APR26-B66.5 test",
+      "event_ticker": "KXHIGHCHI-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHCHI-26APR26-T68",
+      "series_ticker": "KXHIGHCHI",
+      "title": "KXHIGHCHI-26APR26-T68 test",
+      "event_ticker": "KXHIGHCHI-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    }
+  ],
+  "expected_opps": [],
+  "expected_calls": [
+    [
+      "KXHIGHCHI-26APR26-T60",
+      "reject",
+      "no_vig"
+    ]
+  ]
+}

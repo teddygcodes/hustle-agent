@@ -1,19 +1,29 @@
 """Behavior-preservation golden-file test for VigStackSeries.
 
-Locks the contract: VigStackSeries produces output identical to the
-legacy scan_vig_stack_series on the same market input, to within
-float-epsilon (1e-6).
+Locks the contract: VigStackSeries produces output identical to what
+the legacy scan_vig_stack_series produced on the same market input, to
+within float-epsilon (1e-6).
 
-Session 13a — without this test, deleting the legacy function in the
-follow-up commit is unsafe. The test runs both code paths against
-hand-crafted Kalshi-shaped market dicts and asserts:
-  - Same opportunity set (same tickers accepted).
-  - Same edge math on every accepted opp (1e-6 epsilon on floats).
-  - Same decisions.log_decision call set (sorted (ticker, decision,
-    reason) tuples match).
+Session 13a built up the test in two phases:
+  1. While the legacy function still existed, the test ran BOTH code
+     paths and compared them directly. Fixtures captured the legacy
+     outputs as JSON.
+  2. After the legacy function was deleted, the test compares the new
+     code against the FROZEN fixtures. The fixtures ARE the legacy
+     output — captured at the moment Phase 1's parity was locked.
+
+If a fixture needs to be regenerated (e.g. constants change in a way
+that's intentional), regenerate by running:
+
+    python3 tools/regenerate_vig_stack_fixtures.py
+
+(That tool doesn't exist yet; if you need it, look at the build code
+in tests/fixtures/vig_stack_series/*.json and write the regenerator.)
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -21,6 +31,8 @@ import pytest
 
 from bot.strategies import Market
 from bot.strategies.vig_stack_series import VigStackSeries
+
+FIXTURES = Path(__file__).parent / "fixtures" / "vig_stack_series"
 
 
 # ---------------------------------------------------------------------------
@@ -179,31 +191,12 @@ def _markets_to_market_objs(market_dicts: list[dict]) -> list[Market]:
     ]
 
 
-def _legacy_run(market_dicts: list[dict]) -> tuple[list[dict], list[tuple[str, str, str]]]:
-    """Run scan_vig_stack_series with get_markets patched. Returns
-    (opportunities, decision_calls)."""
-    from bot import scanner
-
-    by_series: dict[str, list[dict]] = {}
-    for m in market_dicts:
-        by_series.setdefault(m["series_ticker"], []).append(m)
-
-    def fake_get_markets(**kw):
-        st = kw.get("series_ticker")
-        if st is None:
-            return {"markets": []}
-        return {"markets": by_series.get(st, [])}
-
-    decision_calls: list[tuple[str, str, str]] = []
-    def capture_decision(**kw):
-        decision_calls.append((kw.get("ticker", ""), kw.get("decision", ""), kw.get("reason", "")))
-
-    with patch.object(scanner, "get_markets", side_effect=fake_get_markets), \
-         patch.object(scanner, "_fetch_vig_stack_forecasts", return_value={}), \
-         patch("bot.decisions.log_decision", side_effect=capture_decision), \
-         patch("bot.clv.record_counterfactual_skip"):
-        opps = scanner.scan_vig_stack_series(scan_id="test_scan", on_market_seen=None)
-    return opps, decision_calls
+def _load_legacy_fixture(name: str) -> tuple[list[dict], list[dict], list[tuple[str, str, str]]]:
+    """Load a frozen fixture captured at the time scan_vig_stack_series
+    was deleted. Returns (input_market_dicts, expected_opps, expected_calls)."""
+    payload = json.loads((FIXTURES / f"{name}.json").read_text())
+    expected_calls = [tuple(c) for c in payload["expected_calls"]]
+    return payload["input"], payload["expected_opps"], expected_calls
 
 
 def _new_run(market_dicts: list[dict]) -> tuple[list[dict], list[tuple[str, str, str]]]:
@@ -272,37 +265,36 @@ def _assert_equivalent(legacy_opps: list[dict], new_opps: list[dict]) -> None:
 
 @pytest.mark.parametrize("scenario_name", list(SCENARIOS.keys()))
 def test_byte_identical_opportunities(scenario_name: str) -> None:
-    market_dicts = SCENARIOS[scenario_name]()
-    legacy_opps, _ = _legacy_run(market_dicts)
+    market_dicts, expected_opps, _ = _load_legacy_fixture(scenario_name)
     new_opps, _ = _new_run(market_dicts)
-    _assert_equivalent(legacy_opps, new_opps)
+    _assert_equivalent(expected_opps, new_opps)
 
 
 @pytest.mark.parametrize("scenario_name", list(SCENARIOS.keys()))
 def test_decision_log_calls_match(scenario_name: str) -> None:
-    market_dicts = SCENARIOS[scenario_name]()
-    _, legacy_calls = _legacy_run(market_dicts)
+    market_dicts, _, expected_calls = _load_legacy_fixture(scenario_name)
     _, new_calls = _new_run(market_dicts)
-    assert sorted(legacy_calls) == sorted(new_calls), (
-        f"\nLegacy-only: {sorted(set(legacy_calls) - set(new_calls))}\n"
-        f"New-only:    {sorted(set(new_calls) - set(legacy_calls))}"
+    assert sorted(expected_calls) == sorted(new_calls), (
+        f"\nExpected-only: {sorted(set(expected_calls) - set(new_calls))}\n"
+        f"New-only:      {sorted(set(new_calls) - set(expected_calls))}"
     )
 
 
 def test_stable_with_edge_produces_accepts() -> None:
-    """Sanity check: the stable_with_edge scenario actually produces opps.
-    If this fails, the fixture is too defensive (every gate rejects)."""
-    legacy_opps, _ = _legacy_run(scenario_stable_with_edge())
-    assert len(legacy_opps) > 0, "stable_with_edge fixture produced no accepts"
+    """Sanity check: the frozen stable_with_edge fixture actually has opps.
+    If this fails, the fixture has decayed and needs to be regenerated."""
+    _, expected_opps, _ = _load_legacy_fixture("stable_with_edge")
+    assert len(expected_opps) > 0, "stable_with_edge fixture produced no accepts"
 
 
 def test_no_vig_emits_single_decision() -> None:
-    """no_vig gate logs ONCE per ladder — not per-rung. This regression
-    guard catches a refactor mistake where evaluate emits per-market."""
-    _, legacy_calls = _legacy_run(scenario_no_vig())
-    _, new_calls = _new_run(scenario_no_vig())
-    legacy_no_vig = [c for c in legacy_calls if c[2] == "no_vig"]
+    """no_vig gate logs ONCE per ladder — not per-rung. Regression
+    guard against the obvious refactor mistake where evaluate emits
+    per-market."""
+    market_dicts, _, expected_calls = _load_legacy_fixture("no_vig")
+    _, new_calls = _new_run(market_dicts)
+    expected_no_vig = [c for c in expected_calls if c[2] == "no_vig"]
     new_no_vig = [c for c in new_calls if c[2] == "no_vig"]
-    assert len(legacy_no_vig) == len(new_no_vig) == 1, (
-        f"no_vig: legacy={legacy_no_vig} new={new_no_vig}"
+    assert len(expected_no_vig) == len(new_no_vig) == 1, (
+        f"no_vig: expected={expected_no_vig} new={new_no_vig}"
     )

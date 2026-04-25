@@ -20,6 +20,58 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _run_vig_stack_strategy(
+    markets: list[dict],
+    weather: list[str] | None = None,
+    index: list[str] | None = None,
+    futures: list[str] | None = None,
+) -> list[dict]:
+    """Session 13a port of the test pattern that previously called
+    scan_vig_stack_series() directly. Patches the family lists on the
+    strategy module, builds Market objects from the test's mock dicts,
+    runs VigStackSeries.candidate_markets/evaluate. Mirrors the legacy
+    scan_vig_stack_series semantics for backward-compat tests."""
+    from unittest.mock import patch
+    from bot.strategies import Market
+    from bot.strategies.vig_stack_series import VigStackSeries
+    import bot.strategies.vig_stack_series as _vss
+
+    universe = [
+        Market(
+            ticker=m["ticker"],
+            series_ticker=m.get("series_ticker") or m["ticker"].split("-", 1)[0],
+            event_ticker=None,
+            status="active",
+            close_ts=m.get("close_time"),
+            yes_ask=m.get("yes_ask"),
+            yes_bid=m.get("yes_bid", max((m.get("yes_ask") or 1) - 1, 1)),
+            no_ask=m.get("no_ask"),
+            no_bid=m.get("no_bid", max((m.get("no_ask") or 1) - 1, 1)),
+            volume_24h=m.get("volume_24h", m.get("volume")),
+            open_interest=m.get("open_interest"),
+            raw=dict(m),
+        )
+        for m in markets
+    ]
+
+    with patch.object(_vss, "WEATHER_SERIES_TICKERS", weather or []), \
+         patch.object(_vss, "INDEX_RANGE_SERIES_TICKERS", index or []), \
+         patch.object(_vss, "SPORTS_FUTURES_TICKERS", futures or []), \
+         patch.object(_vss, "_fetch_vig_stack_forecasts", return_value={}):
+        s = VigStackSeries()
+        opps = []
+        for m in s.candidate_markets(universe):
+            opp = s.evaluate(m)
+            if opp is not None:
+                opps.append(opp)
+        s.finalize("test_scan")
+    return opps
+
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -317,8 +369,6 @@ class TestVigStackMinNoPrice:
     def test_floor_filters_sub_70_no_contracts(self):
         """Scanner should drop NO contracts with no_ask < 70¢ via the price floor."""
         from bot.config import VIG_STACK_MIN_NO_ENTRY_PRICE
-        from unittest.mock import patch
-        from bot import scanner as _scanner
 
         # Build a minimal 2-contract ladder: YES prices sum to 110¢ (vig present),
         # NO asks at 60¢ (below floor) and 80¢ (above floor). Only the 80¢ one
@@ -330,16 +380,9 @@ class TestVigStackMinNoPrice:
              "volume": 100, "open_interest": 100},
         ]
 
-        # Force deterministic series list: one made-up futures ticker so we hit
-        # the futures code path without weather/forecast side-effects.
-        with patch.object(_scanner, "WEATHER_SERIES_TICKERS", []), \
-             patch.object(_scanner, "INDEX_RANGE_SERIES_TICKERS", []), \
-             patch.object(_scanner, "SPORTS_FUTURES_TICKERS", ["KXTEST"]), \
-             patch.object(_scanner, "get_markets",
-                          return_value={"markets": markets}), \
-             patch.object(_scanner, "_fetch_vig_stack_forecasts",
-                          return_value={}):
-            opps = _scanner.scan_vig_stack_series()
+        # Made-up futures ticker hits the futures code path, no
+        # weather/forecast side-effects.
+        opps = _run_vig_stack_strategy(markets, futures=["KXTEST"])
 
         surfaced_tickers = {o["ticker"] for o in opps}
         # 60¢ rung must be dropped by the floor; 80¢ rung may or may not
@@ -506,9 +549,6 @@ class TestVigStackFamilyFloor:
 
     def test_volatile_family_below_weather_floor_is_filtered(self):
         """KXHIGHDEN @ 0.80 NO must be dropped (below 0.90 weather floor)."""
-        from unittest.mock import patch
-        from bot import scanner as _scanner
-
         # Volatile family ticker (DEN), NO ask at 80¢ (below 0.90 weather floor).
         # YES/NO sum well above 100¢ so vig is present; only the floor should
         # stop this from surfacing.
@@ -516,14 +556,7 @@ class TestVigStackFamilyFloor:
             {"ticker": "KXHIGHDEN-A", "title": "A", "yes_ask": 35, "no_ask": 80,
              "volume": 100, "open_interest": 100},
         ]
-        with patch.object(_scanner, "WEATHER_SERIES_TICKERS", ["KXHIGHDEN"]), \
-             patch.object(_scanner, "INDEX_RANGE_SERIES_TICKERS", []), \
-             patch.object(_scanner, "SPORTS_FUTURES_TICKERS", []), \
-             patch.object(_scanner, "get_markets",
-                          return_value={"markets": markets}), \
-             patch.object(_scanner, "_fetch_vig_stack_forecasts",
-                          return_value={}):
-            opps = _scanner.scan_vig_stack_series()
+        opps = _run_vig_stack_strategy(markets, weather=["KXHIGHDEN"])
         assert not any(o["ticker"] == "KXHIGHDEN-A" for o in opps), (
             "Volatile family KXHIGHDEN @ 0.80 NO should be blocked by the "
             "0.90 weather floor."
@@ -531,9 +564,6 @@ class TestVigStackFamilyFloor:
 
     def test_stable_family_below_weather_floor_survives(self):
         """KXINX @ 0.75 NO must pass the family check (stable → 0.70 floor)."""
-        from unittest.mock import patch
-        from bot import scanner as _scanner
-
         # Stable family (KXINX — non-weather, runs through futures path), NO
         # ask at 75¢: above the 0.70 baseline, below the 0.90 weather floor.
         # Must surface because stable families use the looser 0.70 floor.
@@ -548,14 +578,7 @@ class TestVigStackFamilyFloor:
             {"ticker": "KXINX-B", "title": "B", "yes_ask": 99, "no_ask": 1,
              "volume": 100, "open_interest": 100},
         ]
-        with patch.object(_scanner, "WEATHER_SERIES_TICKERS", []), \
-             patch.object(_scanner, "INDEX_RANGE_SERIES_TICKERS", []), \
-             patch.object(_scanner, "SPORTS_FUTURES_TICKERS", ["KXINX"]), \
-             patch.object(_scanner, "get_markets",
-                          return_value={"markets": markets}), \
-             patch.object(_scanner, "_fetch_vig_stack_forecasts",
-                          return_value={}):
-            opps = _scanner.scan_vig_stack_series()
+        opps = _run_vig_stack_strategy(markets, futures=["KXINX"])
 
         surfaced = {o["ticker"] for o in opps}
         # KXINX-A at 0.75 must survive the floor check (it may or may not
@@ -568,9 +591,6 @@ class TestVigStackFamilyFloor:
 
     def test_volatile_family_at_weather_floor_survives(self):
         """KXHIGHDEN @ 0.90 NO must pass (meets the weather floor exactly)."""
-        from unittest.mock import patch
-        from bot import scanner as _scanner
-
         # Volatile family, NO at 0.90 (meets weather floor exactly). Scanner
         # requires yes_sum_prob >= 1.05 ladder-level before any contract is
         # considered; at NO=0.90, the complement YES is ~5-10¢ which alone
@@ -587,14 +607,7 @@ class TestVigStackFamilyFloor:
             {"ticker": "KXHIGHDEN-C", "title": "C", "yes_ask": 99, "no_ask": 1,
              "volume": 100, "open_interest": 100},
         ]
-        with patch.object(_scanner, "WEATHER_SERIES_TICKERS", ["KXHIGHDEN"]), \
-             patch.object(_scanner, "INDEX_RANGE_SERIES_TICKERS", []), \
-             patch.object(_scanner, "SPORTS_FUTURES_TICKERS", []), \
-             patch.object(_scanner, "get_markets",
-                          return_value={"markets": markets}), \
-             patch.object(_scanner, "_fetch_vig_stack_forecasts",
-                          return_value={}):
-            opps = _scanner.scan_vig_stack_series()
+        opps = _run_vig_stack_strategy(markets, weather=["KXHIGHDEN"])
         surfaced = {o["ticker"] for o in opps}
         assert "KXHIGHDEN-A" in surfaced, (
             f"Volatile family KXHIGHDEN @ 0.90 NO meets weather floor and "

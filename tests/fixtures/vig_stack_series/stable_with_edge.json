@@ -1,0 +1,273 @@
+{
+  "input": [
+    {
+      "ticker": "KXHIGHMIA-26APR26-T70",
+      "series_ticker": "KXHIGHMIA",
+      "title": "KXHIGHMIA-26APR26-T70 test",
+      "event_ticker": "KXHIGHMIA-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 75,
+      "no_bid": 74,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHMIA-26APR26-B71.5",
+      "series_ticker": "KXHIGHMIA",
+      "title": "KXHIGHMIA-26APR26-B71.5 test",
+      "event_ticker": "KXHIGHMIA-EV",
+      "status": "active",
+      "yes_ask": 30,
+      "yes_bid": 29,
+      "no_ask": 70,
+      "no_bid": 69,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHMIA-26APR26-B73.5",
+      "series_ticker": "KXHIGHMIA",
+      "title": "KXHIGHMIA-26APR26-B73.5 test",
+      "event_ticker": "KXHIGHMIA-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 75,
+      "no_bid": 74,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHMIA-26APR26-B75.5",
+      "series_ticker": "KXHIGHMIA",
+      "title": "KXHIGHMIA-26APR26-B75.5 test",
+      "event_ticker": "KXHIGHMIA-EV",
+      "status": "active",
+      "yes_ask": 25,
+      "yes_bid": 24,
+      "no_ask": 75,
+      "no_bid": 74,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHMIA-26APR26-T78",
+      "series_ticker": "KXHIGHMIA",
+      "title": "KXHIGHMIA-26APR26-T78 test",
+      "event_ticker": "KXHIGHMIA-EV",
+      "status": "active",
+      "yes_ask": 30,
+      "yes_bid": 29,
+      "no_ask": 70,
+      "no_bid": 69,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    }
+  ],
+  "expected_opps": [
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHMIA-26APR26-T70",
+      "title": "KXHIGHMIA-26APR26-T70 test",
+      "series_ticker": "KXHIGHMIA",
+      "edge": 0.0648,
+      "relative_edge": 0.0864,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 135,
+      "vig_factor": 1.35,
+      "no_fair_cents": 81.48,
+      "no_ask_cents": 75,
+      "edge_result": {
+        "fair_value": 0.8148,
+        "kalshi_price": 0.75,
+        "edge": 0.0648,
+        "relative_edge": 0.0864,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHMIA | 5 contracts",
+          "YES sum: 135\u00a2 (1.350) \u2014 vig_factor=1.3500",
+          "This contract YES_ask=25\u00a2",
+          "YES_fair = 25\u00a2 / 1.3500 = 18.52\u00a2",
+          "NO_fair = 100 - 18.52 = 81.48\u00a2",
+          "NO_ask = 75\u00a2 | Edge = 0.0648 (8.6% relative)",
+          "Edge check: 0.8148 - 0.7500 = 0.0648 (expected 0.0648) | backward: 0.7500 + 0.0648 = 0.8148 (expected 0.8148) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHMIA-26APR26-B71.5",
+      "title": "KXHIGHMIA-26APR26-B71.5 test",
+      "series_ticker": "KXHIGHMIA",
+      "edge": 0.0778,
+      "relative_edge": 0.1111,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 135,
+      "vig_factor": 1.35,
+      "no_fair_cents": 77.78,
+      "no_ask_cents": 70,
+      "edge_result": {
+        "fair_value": 0.7778,
+        "kalshi_price": 0.7,
+        "edge": 0.0778,
+        "relative_edge": 0.1111,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHMIA | 5 contracts",
+          "YES sum: 135\u00a2 (1.350) \u2014 vig_factor=1.3500",
+          "This contract YES_ask=30\u00a2",
+          "YES_fair = 30\u00a2 / 1.3500 = 22.22\u00a2",
+          "NO_fair = 100 - 22.22 = 77.78\u00a2",
+          "NO_ask = 70\u00a2 | Edge = 0.0778 (11.1% relative)",
+          "Edge check: 0.7778 - 0.7000 = 0.0778 (expected 0.0778) | backward: 0.7000 + 0.0778 = 0.7778 (expected 0.7778) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHMIA-26APR26-B73.5",
+      "title": "KXHIGHMIA-26APR26-B73.5 test",
+      "series_ticker": "KXHIGHMIA",
+      "edge": 0.0648,
+      "relative_edge": 0.0864,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 135,
+      "vig_factor": 1.35,
+      "no_fair_cents": 81.48,
+      "no_ask_cents": 75,
+      "edge_result": {
+        "fair_value": 0.8148,
+        "kalshi_price": 0.75,
+        "edge": 0.0648,
+        "relative_edge": 0.0864,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHMIA | 5 contracts",
+          "YES sum: 135\u00a2 (1.350) \u2014 vig_factor=1.3500",
+          "This contract YES_ask=25\u00a2",
+          "YES_fair = 25\u00a2 / 1.3500 = 18.52\u00a2",
+          "NO_fair = 100 - 18.52 = 81.48\u00a2",
+          "NO_ask = 75\u00a2 | Edge = 0.0648 (8.6% relative)",
+          "Edge check: 0.8148 - 0.7500 = 0.0648 (expected 0.0648) | backward: 0.7500 + 0.0648 = 0.8148 (expected 0.8148) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHMIA-26APR26-B75.5",
+      "title": "KXHIGHMIA-26APR26-B75.5 test",
+      "series_ticker": "KXHIGHMIA",
+      "edge": 0.0648,
+      "relative_edge": 0.0864,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 135,
+      "vig_factor": 1.35,
+      "no_fair_cents": 81.48,
+      "no_ask_cents": 75,
+      "edge_result": {
+        "fair_value": 0.8148,
+        "kalshi_price": 0.75,
+        "edge": 0.0648,
+        "relative_edge": 0.0864,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHMIA | 5 contracts",
+          "YES sum: 135\u00a2 (1.350) \u2014 vig_factor=1.3500",
+          "This contract YES_ask=25\u00a2",
+          "YES_fair = 25\u00a2 / 1.3500 = 18.52\u00a2",
+          "NO_fair = 100 - 18.52 = 81.48\u00a2",
+          "NO_ask = 75\u00a2 | Edge = 0.0648 (8.6% relative)",
+          "Edge check: 0.8148 - 0.7500 = 0.0648 (expected 0.0648) | backward: 0.7500 + 0.0648 = 0.8148 (expected 0.8148) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHMIA-26APR26-T78",
+      "title": "KXHIGHMIA-26APR26-T78 test",
+      "series_ticker": "KXHIGHMIA",
+      "edge": 0.0778,
+      "relative_edge": 0.1111,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 135,
+      "vig_factor": 1.35,
+      "no_fair_cents": 77.78,
+      "no_ask_cents": 70,
+      "edge_result": {
+        "fair_value": 0.7778,
+        "kalshi_price": 0.7,
+        "edge": 0.0778,
+        "relative_edge": 0.1111,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHMIA | 5 contracts",
+          "YES sum: 135\u00a2 (1.350) \u2014 vig_factor=1.3500",
+          "This contract YES_ask=30\u00a2",
+          "YES_fair = 30\u00a2 / 1.3500 = 22.22\u00a2",
+          "NO_fair = 100 - 22.22 = 77.78\u00a2",
+          "NO_ask = 70\u00a2 | Edge = 0.0778 (11.1% relative)",
+          "Edge check: 0.7778 - 0.7000 = 0.0778 (expected 0.0778) | backward: 0.7000 + 0.0778 = 0.7778 (expected 0.7778) \u2705"
+        ],
+        "warnings": []
+      }
+    }
+  ],
+  "expected_calls": [
+    [
+      "KXHIGHMIA-26APR26-T70",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXHIGHMIA-26APR26-B71.5",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXHIGHMIA-26APR26-B73.5",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXHIGHMIA-26APR26-B75.5",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXHIGHMIA-26APR26-T78",
+      "accept",
+      "all_gates_passed"
+    ]
+  ]
+}

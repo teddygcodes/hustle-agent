@@ -220,7 +220,7 @@ class TestStratifiedCFSampling:
 
     def test_every_gate_gets_at_least_one_cf(self):
         """20 rejects across 4 gates × 2 opp_types — every pair selected."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             # forecast_in_bucket on vig_stack_series — low edges
             _mk_reject("A1", "vig_stack_series", "forecast_in_bucket", 0.005),
@@ -259,7 +259,7 @@ class TestStratifiedCFSampling:
 
     def test_respects_hard_cap(self):
         """30 rejects across 2 gates — result ≤ hard_cap."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             _mk_reject(f"T{i}", "vig_stack_series",
                        "forecast_in_bucket" if i % 2 else "edge_below_threshold",
@@ -271,7 +271,7 @@ class TestStratifiedCFSampling:
 
     def test_entry_below_3_cents_filtered(self):
         """Even the highest-edge reject is dropped if entry < 3¢."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             _mk_reject("LOW", "vig_stack_series", "edge_below_threshold", 50.0, price_cents=2),
             _mk_reject("OK", "vig_stack_series", "edge_below_threshold", 0.01, price_cents=5),
@@ -283,7 +283,7 @@ class TestStratifiedCFSampling:
 
     def test_none_edge_filtered(self):
         """Rejects with edge=None are filtered (they'd break the sort)."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         no_edge = _mk_reject("NOEDGE", "vig_stack_series", "x", 0.1)
         no_edge["edge"] = None
         with_edge = _mk_reject("OK", "vig_stack_series", "x", 0.05)
@@ -294,7 +294,7 @@ class TestStratifiedCFSampling:
 
     def test_duplicate_ticker_deduped_keeps_higher_edge(self):
         """Same ticker in two groups: keep one copy, higher edge wins."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             _mk_reject("DUP", "vig_stack_series", "forecast_in_bucket", 0.02),
             _mk_reject("DUP", "vig_stack_series", "edge_below_threshold", 0.08),
@@ -308,7 +308,7 @@ class TestStratifiedCFSampling:
     def test_opp_type_preserved_for_active_strategy_filter(self):
         """Selected opps must keep opp_type so clv._load() active-strategy
         filter (clv.py:39-44) doesn't silently drop the resulting CFs."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             _mk_reject("A", "vig_stack_series", "edge_below_threshold", 0.02),
             _mk_reject("B", "vig_stack_futures", "edge_below_threshold", 0.02),
@@ -318,12 +318,12 @@ class TestStratifiedCFSampling:
             assert r["opp_type"] in ("vig_stack_series", "vig_stack_futures")
 
     def test_empty_input_returns_empty(self):
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         assert _stratified_cf_rejects([]) == []
 
     def test_budget_fill_adds_high_edge_leftovers(self):
         """With 1 gate × 8 rejects and total_budget=5: 1 stratified core + 4 fill."""
-        from bot.scanner import _stratified_cf_rejects
+        from bot.strategies.vig_stack_series import _stratified_cf_rejects
         rejects = [
             _mk_reject(f"T{i}", "vig_stack_series", "forecast_in_bucket", 0.01 + i * 0.001)
             for i in range(8)

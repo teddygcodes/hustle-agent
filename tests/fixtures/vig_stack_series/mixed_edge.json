@@ -1,0 +1,177 @@
+{
+  "input": [
+    {
+      "ticker": "KXHIGHAUS-26APR26-T70",
+      "series_ticker": "KXHIGHAUS",
+      "title": "KXHIGHAUS-26APR26-T70 test",
+      "event_ticker": "KXHIGHAUS-EV",
+      "status": "active",
+      "yes_ask": 20,
+      "yes_bid": 19,
+      "no_ask": 80,
+      "no_bid": 79,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHAUS-26APR26-B72.5",
+      "series_ticker": "KXHIGHAUS",
+      "title": "KXHIGHAUS-26APR26-B72.5 test",
+      "event_ticker": "KXHIGHAUS-EV",
+      "status": "active",
+      "yes_ask": 40,
+      "yes_bid": 39,
+      "no_ask": 60,
+      "no_bid": 59,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHAUS-26APR26-B74.5",
+      "series_ticker": "KXHIGHAUS",
+      "title": "KXHIGHAUS-26APR26-B74.5 test",
+      "event_ticker": "KXHIGHAUS-EV",
+      "status": "active",
+      "yes_ask": 50,
+      "yes_bid": 49,
+      "no_ask": 51,
+      "no_bid": 50,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHAUS-26APR26-B76.5",
+      "series_ticker": "KXHIGHAUS",
+      "title": "KXHIGHAUS-26APR26-B76.5 test",
+      "event_ticker": "KXHIGHAUS-EV",
+      "status": "active",
+      "yes_ask": 10,
+      "yes_bid": 9,
+      "no_ask": 91,
+      "no_bid": 90,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    },
+    {
+      "ticker": "KXHIGHAUS-26APR26-T78",
+      "series_ticker": "KXHIGHAUS",
+      "title": "KXHIGHAUS-26APR26-T78 test",
+      "event_ticker": "KXHIGHAUS-EV",
+      "status": "active",
+      "yes_ask": 10,
+      "yes_bid": 9,
+      "no_ask": 89,
+      "no_bid": 88,
+      "volume": 200,
+      "volume_24h": 200,
+      "open_interest": 50,
+      "close_time": "2026-12-31T23:59:00Z",
+      "expiration_time": "2026-12-31T23:59:00Z"
+    }
+  ],
+  "expected_opps": [
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHAUS-26APR26-T70",
+      "title": "KXHIGHAUS-26APR26-T70 test",
+      "series_ticker": "KXHIGHAUS",
+      "edge": 0.0462,
+      "relative_edge": 0.0577,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 130,
+      "vig_factor": 1.3,
+      "no_fair_cents": 84.62,
+      "no_ask_cents": 80,
+      "edge_result": {
+        "fair_value": 0.8462,
+        "kalshi_price": 0.8,
+        "edge": 0.0462,
+        "relative_edge": 0.0577,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHAUS | 5 contracts",
+          "YES sum: 130\u00a2 (1.300) \u2014 vig_factor=1.3000",
+          "This contract YES_ask=20\u00a2",
+          "YES_fair = 20\u00a2 / 1.3000 = 15.38\u00a2",
+          "NO_fair = 100 - 15.38 = 84.62\u00a2",
+          "NO_ask = 80\u00a2 | Edge = 0.0462 (5.8% relative)",
+          "Edge check: 0.8462 - 0.8000 = 0.0462 (expected 0.0462) | backward: 0.8000 + 0.0462 = 0.8462 (expected 0.8462) \u2705"
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "type": "vig_stack_series",
+      "ticker": "KXHIGHAUS-26APR26-T78",
+      "title": "KXHIGHAUS-26APR26-T78 test",
+      "series_ticker": "KXHIGHAUS",
+      "edge": 0.0331,
+      "relative_edge": 0.0372,
+      "confidence": 0.9,
+      "recommended_side": "no",
+      "yes_sum_cents": 130,
+      "vig_factor": 1.3,
+      "no_fair_cents": 92.31,
+      "no_ask_cents": 89,
+      "edge_result": {
+        "fair_value": 0.9231,
+        "kalshi_price": 0.89,
+        "edge": 0.0331,
+        "relative_edge": 0.0372,
+        "confidence": 0.9,
+        "self_check_passed": true,
+        "math_chain": [
+          "Series: KXHIGHAUS | 5 contracts",
+          "YES sum: 130\u00a2 (1.300) \u2014 vig_factor=1.3000",
+          "This contract YES_ask=10\u00a2",
+          "YES_fair = 10\u00a2 / 1.3000 = 7.69\u00a2",
+          "NO_fair = 100 - 7.69 = 92.31\u00a2",
+          "NO_ask = 89\u00a2 | Edge = 0.0331 (3.7% relative)",
+          "Edge check: 0.9231 - 0.8900 = 0.0331 (expected 0.0331) | backward: 0.8900 + 0.0331 = 0.9231 (expected 0.9231) \u2705"
+        ],
+        "warnings": []
+      }
+    }
+  ],
+  "expected_calls": [
+    [
+      "KXHIGHAUS-26APR26-T70",
+      "accept",
+      "all_gates_passed"
+    ],
+    [
+      "KXHIGHAUS-26APR26-B72.5",
+      "reject",
+      "no_price_below_floor"
+    ],
+    [
+      "KXHIGHAUS-26APR26-B74.5",
+      "reject",
+      "no_price_below_floor"
+    ],
+    [
+      "KXHIGHAUS-26APR26-B76.5",
+      "reject",
+      "edge_below_threshold"
+    ],
+    [
+      "KXHIGHAUS-26APR26-T78",
+      "accept",
+      "all_gates_passed"
+    ]
+  ]
+}
