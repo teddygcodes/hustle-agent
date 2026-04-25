@@ -192,7 +192,16 @@ def _check_position_limits(
     """
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
-        _log_position_reject(ticker, opp_type, "position_cap")
+        _log_position_reject(
+            ticker, opp_type, "position_cap",
+            extra={
+                "cost_dollars": round(cost_dollars, 2),
+                "max_allowed": round(balance * MAX_POSITION_PERCENT, 2),
+                "balance": round(balance, 2),
+                "exposure_pct": round(cost_dollars / balance, 4) if balance > 0 else None,
+                "max_pct": MAX_POSITION_PERCENT,
+            },
+        )
         return False, (
             f"Position too large: ${cost_dollars:.2f} > "
             f"{MAX_POSITION_PERCENT:.0%} of ${balance:.2f} (${balance * MAX_POSITION_PERCENT:.2f})"
@@ -260,7 +269,14 @@ def _check_position_limits(
                     _save_json(PAPER_TRADES_FILE, _pt)
                 # Position cleared — allow new entry
             else:
-                _log_position_reject(ticker, opp_type, "duplicate")
+                _log_position_reject(
+                    ticker, opp_type, "duplicate",
+                    extra={
+                        "existing_count": len(existing),
+                        "existing_status": existing[0].get("status") if existing else None,
+                        "existing_filled": existing[0].get("filled", 0) if existing else 0,
+                    },
+                )
                 return False, f"Already hold open position in {ticker} — skipping duplicate entry"
         except Exception as e:
             logger.debug("Orphan check failed for %s: %s", ticker, e)
@@ -279,7 +295,14 @@ def _check_position_limits(
         ]
         if same_game:
             held_team = same_game[0]["ticker"].rsplit("-", 1)[1]
-            _log_position_reject(ticker, opp_type, "same_game")
+            _log_position_reject(
+                ticker, opp_type, "same_game",
+                extra={
+                    "game_key": game_key,
+                    "held_team": held_team,
+                    "held_ticker": same_game[0].get("ticker"),
+                },
+            )
             return False, (
                 f"SAME GAME: already hold {held_team} in {game_key} — "
                 f"blocking opposite-side bet"
@@ -302,7 +325,13 @@ def _check_position_limits(
             exited_at = datetime.fromisoformat(ts)
             if (_now - exited_at) < _COOLDOWN:
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
-                _log_position_reject(ticker, opp_type, "cooldown")
+                _log_position_reject(
+                    ticker, opp_type, "cooldown",
+                    extra={
+                        "last_trade_age_min": int((_now - exited_at).total_seconds() / 60),
+                        "cooldown_min": int(_COOLDOWN.total_seconds() / 60),
+                    },
+                )
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
         except Exception as e:
             logger.warning("Cooldown date parse failed for %s: %s", ticker, e)
@@ -325,7 +354,13 @@ def _check_position_limits(
             except Exception:
                 pass
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
-        _log_position_reject(ticker, opp_type, "daily_loss")
+        _log_position_reject(
+            ticker, opp_type, "daily_loss",
+            extra={
+                "daily_ticker_loss": round(daily_ticker_loss, 2),
+                "limit": _DAILY_TICKER_LOSS_LIMIT,
+            },
+        )
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
     # Only count ACTIVE positions that actually filled for BOTH the per-strategy
@@ -372,7 +407,17 @@ def _check_position_limits(
         )
         bucket_cap = equity * budget_frac
         if (bucket_exposure + cost_dollars) > bucket_cap:
-            _log_position_reject(ticker, opp_type, "strategy_budget")
+            _log_position_reject(
+                ticker, opp_type, "strategy_budget",
+                extra={
+                    "bucket": bucket,
+                    "current_exposure": round(bucket_exposure, 2),
+                    "incoming_cost": round(cost_dollars, 2),
+                    "cap": round(bucket_cap, 2),
+                    "budget_frac": budget_frac,
+                    "exposure_pct": round((bucket_exposure + cost_dollars) / bucket_cap, 4) if bucket_cap > 0 else None,
+                },
+            )
             return False, (
                 f"STRATEGY_BUDGET: {bucket} has ${bucket_exposure:.2f} of "
                 f"${bucket_cap:.2f} budget ({budget_frac:.0%} of ${equity:.2f} equity); "
@@ -383,7 +428,16 @@ def _check_position_limits(
     # Global total exposure limit (still applies on top of strategy budgets)
     # ------------------------------------------------------------------
     if (total_exposure + cost_dollars) > equity * MAX_TOTAL_EXPOSURE:
-        _log_position_reject(ticker, opp_type, "total_exposure")
+        _log_position_reject(
+            ticker, opp_type, "total_exposure",
+            extra={
+                "total_exposure": round(total_exposure, 2),
+                "incoming_cost": round(cost_dollars, 2),
+                "cap": round(equity * MAX_TOTAL_EXPOSURE, 2),
+                "exposure_pct": round((total_exposure + cost_dollars) / (equity * MAX_TOTAL_EXPOSURE), 4) if equity > 0 else None,
+                "max_pct": MAX_TOTAL_EXPOSURE,
+            },
+        )
         return False, (
             f"Total exposure too high: ${total_exposure + cost_dollars:.2f} > "
             f"{MAX_TOTAL_EXPOSURE:.0%} of ${equity:.2f} equity"
