@@ -311,3 +311,110 @@ def test_live_branch_records_synchronous_rejection(tmp_path, monkeypatch):
     assert rows[0]["rejection_error"] == "Insufficient balance"
     assert rows[0]["kalshi_order_id"] is None
     assert om._PENDING == {}
+
+
+# ---------------------------------------------------------------------------
+# Task 4: check_fills terminal-observation hook
+# ---------------------------------------------------------------------------
+
+def test_check_fills_writes_terminal_on_full_fill(tmp_path, monkeypatch):
+    """Mock get_order to return filled_count=requested → record_terminal fires."""
+    from bot import executor
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+
+    om.record_placement(
+        order_id="OXYZ", opportunity=_opp(),
+        requested_price_cents=40, requested_qty=10, side="no",
+        ts_placed=datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
+        queue_depth_at_place=None,
+    )
+    monkeypatch.setattr(executor, "_load_json", lambda *a, **kw: [
+        {
+            "ticker": "KX1", "side": "no", "contracts": 10, "filled": 0,
+            "status": "resting", "order_id": "OXYZ", "paper": False,
+            "price_cents": 40, "type": "vig_stack_series",
+        }
+    ])
+    saved: dict = {}
+    monkeypatch.setattr(executor, "_save_json", lambda p, d: saved.update({"data": d}))
+    monkeypatch.setattr(executor, "get_order", lambda oid: {
+        "order_id": "OXYZ", "ticker": "KX1", "side": "no", "count": 10,
+        "filled_count": 10, "remaining_count": 0, "status": "filled",
+        "yes_price": None, "no_price": 40,
+    })
+    executor.check_fills()
+    rows = [json.loads(l) for l in f.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["terminal_status"] == "filled"
+    assert rows[0]["filled_qty"] == 10
+    assert "OXYZ" not in om._PENDING
+
+
+def test_check_fills_observes_partial_progress(tmp_path, monkeypatch):
+    """When get_order returns 0 < filled_count < requested and status='resting',
+    we should NOT write terminal — only observe partial progress."""
+    from bot import executor
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+
+    om.record_placement(
+        order_id="OPART", opportunity=_opp(),
+        requested_price_cents=40, requested_qty=10, side="no",
+        ts_placed=datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
+        queue_depth_at_place=None,
+    )
+    monkeypatch.setattr(executor, "_load_json", lambda *a, **kw: [
+        {
+            "ticker": "KX1", "side": "no", "contracts": 10, "filled": 0,
+            "status": "resting", "order_id": "OPART", "paper": False,
+            "price_cents": 40, "type": "vig_stack_series",
+        }
+    ])
+    monkeypatch.setattr(executor, "_save_json", lambda *a, **kw: None)
+    monkeypatch.setattr(executor, "get_order", lambda oid: {
+        "order_id": "OPART", "ticker": "KX1", "side": "no", "count": 10,
+        "filled_count": 4, "remaining_count": 6, "status": "resting",
+        "yes_price": None, "no_price": 40,
+    })
+    executor.check_fills()
+    # No row written — order is still partial-resting, not terminal.
+    assert not f.exists() or f.read_text() == ""
+    # _PENDING should reflect the partial observation.
+    assert "OPART" in om._PENDING
+    assert om._PENDING["OPART"]["partial_fill_count"] == 1
+    assert om._PENDING["OPART"]["last_filled_count"] == 4
+
+
+def test_check_fills_writes_terminal_on_kalshi_canceled(tmp_path, monkeypatch):
+    """Kalshi status 'canceled' with partial fill → terminal_status='canceled'."""
+    from bot import executor
+    f = tmp_path / "om.jsonl"
+    monkeypatch.setattr(om, "MICROSTRUCTURE_FILE", f)
+
+    om.record_placement(
+        order_id="OCANC", opportunity=_opp(),
+        requested_price_cents=40, requested_qty=10, side="no",
+        ts_placed=datetime(2026, 4, 25, 12, 0, tzinfo=timezone.utc),
+        queue_depth_at_place=None,
+    )
+    monkeypatch.setattr(executor, "_load_json", lambda *a, **kw: [
+        {
+            "ticker": "KX1", "side": "no", "contracts": 10, "filled": 0,
+            "status": "resting", "order_id": "OCANC", "paper": False,
+            "price_cents": 40, "type": "vig_stack_series",
+        }
+    ])
+    monkeypatch.setattr(executor, "_save_json", lambda *a, **kw: None)
+    monkeypatch.setattr(executor, "get_order", lambda oid: {
+        "order_id": "OCANC", "ticker": "KX1", "side": "no", "count": 10,
+        "filled_count": 3, "remaining_count": 7, "status": "canceled",
+        "yes_price": None, "no_price": 40,
+    })
+    executor.check_fills()
+    rows = [json.loads(l) for l in f.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["terminal_status"] == "canceled"
+    assert rows[0]["filled_qty"] == 3
+    assert rows[0]["ts_canceled"] is not None
+    assert "OCANC" not in om._PENDING

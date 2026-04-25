@@ -1096,7 +1096,9 @@ def check_fills() -> list[dict]:
             continue
 
         new_filled = order.get("filled_count", pos.get("filled", 0))
-        if new_filled != pos.get("filled"):
+        kalshi_status = order.get("status", "")
+        previous_filled = pos.get("filled", 0)
+        if new_filled != previous_filled:
             pos["filled"] = new_filled
             pos["status"] = (
                 "filled" if new_filled >= pos.get("contracts", 0)
@@ -1104,6 +1106,23 @@ def check_fills() -> list[dict]:
                 else "resting"
             )
             updates.append(pos)
+
+        # Session 15: live-only microstructure terminal observation.
+        from bot import order_microstructure
+        terminal_kalshi = kalshi_status in ("filled", "canceled", "expired", "rejected")
+        terminal_local = pos["status"] == "filled"
+        if terminal_kalshi or terminal_local:
+            order_microstructure.record_terminal(
+                order_id=order_id,
+                kalshi_status=kalshi_status or ("filled" if terminal_local else "canceled"),
+                filled_count=new_filled,
+                cost_dollars=None,  # get_order doesn't return cost; v1 limitation
+                ts_terminal=datetime.now(timezone.utc),
+            )
+        elif new_filled > previous_filled:
+            order_microstructure.observe_fill_progress(
+                order_id=order_id, filled_count=new_filled
+            )
 
     if updates:
         _save_json(POSITIONS_FILE, positions)
