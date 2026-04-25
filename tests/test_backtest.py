@@ -24,6 +24,7 @@ from tools.backtest import (  # noqa: E402
     match_clv_record,
     replay_strategy,
     aggregate_results,
+    run_backtest,
     main as backtest_main,
 )
 
@@ -289,3 +290,118 @@ class TestComputeClvReuse:
         import tools.backtest as bt
         from bot import clv as live_clv
         assert bt.bot_clv.compute_clv_cents is live_clv.compute_clv_cents
+
+
+class TestRunBacktest:
+    """Session 13c PART 2 — programmatic entry point + --include-history."""
+
+    def _stub_strategy(self):
+        """Strategy that emits one fixed opp per snapshot regardless of input."""
+        class _Stub:
+            name = "stub"
+            def name_for(self, market):
+                return self.name
+            def candidate_markets(self, universe):
+                return list(universe)
+            def evaluate(self, market):
+                return {
+                    "type": "stub",
+                    "ticker": market.ticker,
+                    "edge": 0.10,
+                    "relative_edge": 0.10,
+                    "recommended_side": "no",
+                    "no_ask_cents": 80,
+                }
+            def finalize(self, scan_id):
+                return None
+        return _Stub()
+
+    def test_returns_summary_dict_with_expected_keys(
+            self, tmp_path, monkeypatch):
+        # Empty fixtures — verify shape, not numbers
+        monkeypatch.setattr("tools.backtest.UNIVERSE_FILE",
+                            tmp_path / "universe.jsonl")
+        monkeypatch.setattr("tools.backtest.ARCHIVE_DIR",
+                            tmp_path / "archive")
+        monkeypatch.setattr("tools.backtest.CLV_FILE",
+                            tmp_path / "clv.json")
+
+        summary = run_backtest(
+            self._stub_strategy(),
+            start=date(2026, 4, 25),
+            end=date(2026, 4, 25),
+            include_history=False,
+        )
+        assert set(summary.keys()) == {"per_day", "totals",
+                                       "matched_actually_taken"}
+
+    def test_include_history_falls_back_on_clv_miss(
+            self, tmp_path, monkeypatch):
+        """A snapshot with one opp on a ticker NOT in clv.json should
+        match via fetch_settled_close when include_history=True."""
+        # Build a universe.jsonl with one row
+        universe = tmp_path / "universe.jsonl"
+        row = _make_universe_row(ticker="KXNBA-CFTEST",
+                                 ts="2026-04-25T12:00:00+00:00")
+        universe.write_text(json.dumps(row) + "\n")
+        monkeypatch.setattr("tools.backtest.UNIVERSE_FILE", universe)
+        monkeypatch.setattr("tools.backtest.ARCHIVE_DIR",
+                            tmp_path / "archive")
+        # Empty clv.json forces clv miss
+        clv_file = tmp_path / "clv.json"
+        clv_file.write_text("[]")
+        monkeypatch.setattr("tools.backtest.CLV_FILE", clv_file)
+
+        # Patch fetch_settled_close to return YES-wins
+        called = {"n": 0, "ticker": None}
+        def fake_fetch(ticker):
+            called["n"] += 1
+            called["ticker"] = ticker
+            return 100.0
+        monkeypatch.setattr("bot.kalshi_history.fetch_settled_close",
+                            fake_fetch)
+
+        summary = run_backtest(
+            self._stub_strategy(),
+            start=date(2026, 4, 25),
+            end=date(2026, 4, 25),
+            include_history=True,
+        )
+        assert called["n"] == 1
+        assert called["ticker"] == "KXNBA-CFTEST"
+        assert summary["totals"]["stub"]["matched_count"] == 1
+        # NOT in actually_taken (status is history_settled, not settled)
+        assert summary["matched_actually_taken"] == []
+
+    def test_default_include_history_off_skips_unmatched(
+            self, tmp_path, monkeypatch):
+        """Without --include-history, clv-miss opps are skipped."""
+        universe = tmp_path / "universe.jsonl"
+        row = _make_universe_row(ticker="KXNBA-NOHIST",
+                                 ts="2026-04-25T12:00:00+00:00")
+        universe.write_text(json.dumps(row) + "\n")
+        monkeypatch.setattr("tools.backtest.UNIVERSE_FILE", universe)
+        monkeypatch.setattr("tools.backtest.ARCHIVE_DIR",
+                            tmp_path / "archive")
+        clv_file = tmp_path / "clv.json"
+        clv_file.write_text("[]")
+        monkeypatch.setattr("tools.backtest.CLV_FILE", clv_file)
+
+        called = {"n": 0}
+        def fake_fetch(ticker):
+            called["n"] += 1
+            return 100.0
+        monkeypatch.setattr("bot.kalshi_history.fetch_settled_close",
+                            fake_fetch)
+
+        summary = run_backtest(
+            self._stub_strategy(),
+            start=date(2026, 4, 25),
+            end=date(2026, 4, 25),
+            include_history=False,
+        )
+        # fetch_settled_close should NOT have been called
+        assert called["n"] == 0
+        # Opp counted but not matched
+        assert summary["totals"]["stub"]["opp_count"] == 1
+        assert summary["totals"]["stub"]["matched_count"] == 0
