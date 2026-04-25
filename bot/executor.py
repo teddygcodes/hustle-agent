@@ -59,6 +59,62 @@ _PAPER_TYPE_MAP = {
     "series_game_edge": "series_game",
     "econ_cpi_edge": "econ",
 }
+
+
+# Session 6 — gate fingerprint for the executor's safety chain.
+# Order matters: rejection records earlier gates as True, the rejecting one
+# as False, downstream gates omitted.
+_POS_GATE_ORDER = [
+    "position_cap", "duplicate", "same_game", "cooldown",
+    "daily_loss", "strategy_budget", "total_exposure",
+]
+_EDGE_GATE_ORDER = ["market_data", "yes_ask", "price_moved", "edge_evaporated"]
+
+
+def _pos_gate_fingerprint(reason: str) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for name in _POS_GATE_ORDER:
+        if name == reason:
+            out[name] = False
+            return out
+        out[name] = True
+    return out
+
+
+def _edge_gate_fingerprint(reason: str) -> dict[str, bool]:
+    out: dict[str, bool] = {}
+    for name in _EDGE_GATE_ORDER:
+        if name == reason:
+            out[name] = False
+            return out
+        out[name] = True
+    return out
+
+
+def _log_position_reject(ticker: str, opp_type: str | None, reason: str) -> None:
+    try:
+        from bot import decisions
+        decisions.log_decision(
+            ticker=ticker, opp_type=opp_type or "unknown", edge=None,
+            gates=_pos_gate_fingerprint(reason),
+            decision="reject", reason=reason,
+        )
+    except Exception:
+        pass  # never block trades because logging failed
+
+
+def _log_edge_reject(opportunity: dict, reason: str) -> None:
+    try:
+        from bot import decisions
+        decisions.log_decision(
+            ticker=opportunity.get("ticker", ""),
+            opp_type=opportunity.get("type", "unknown"),
+            edge=opportunity.get("edge"),
+            gates=_edge_gate_fingerprint(reason),
+            decision="reject", reason=reason,
+        )
+    except Exception:
+        pass
 from bot.math_engine import verify_contract_direction, calculate_parlay_edge, calculate_weather_edge
 from bot.sizing import kelly_size
 from bot.state_io import load_json as _load_json, save_json as _save_json
@@ -134,6 +190,7 @@ def _check_position_limits(
     """
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
+        _log_position_reject(ticker, opp_type, "position_cap")
         return False, (
             f"Position too large: ${cost_dollars:.2f} > "
             f"{MAX_POSITION_PERCENT:.0%} of ${balance:.2f} (${balance * MAX_POSITION_PERCENT:.2f})"
@@ -201,6 +258,7 @@ def _check_position_limits(
                     _save_json(PAPER_TRADES_FILE, _pt)
                 # Position cleared — allow new entry
             else:
+                _log_position_reject(ticker, opp_type, "duplicate")
                 return False, f"Already hold open position in {ticker} — skipping duplicate entry"
         except Exception as e:
             logger.debug("Orphan check failed for %s: %s", ticker, e)
@@ -219,6 +277,7 @@ def _check_position_limits(
         ]
         if same_game:
             held_team = same_game[0]["ticker"].rsplit("-", 1)[1]
+            _log_position_reject(ticker, opp_type, "same_game")
             return False, (
                 f"SAME GAME: already hold {held_team} in {game_key} — "
                 f"blocking opposite-side bet"
@@ -241,6 +300,7 @@ def _check_position_limits(
             exited_at = datetime.fromisoformat(ts)
             if (_now - exited_at) < _COOLDOWN:
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
+                _log_position_reject(ticker, opp_type, "cooldown")
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
         except Exception as e:
             logger.warning("Cooldown date parse failed for %s: %s", ticker, e)
@@ -263,6 +323,7 @@ def _check_position_limits(
             except Exception:
                 pass
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
+        _log_position_reject(ticker, opp_type, "daily_loss")
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
     # Only count ACTIVE positions that actually filled for BOTH the per-strategy
@@ -309,6 +370,7 @@ def _check_position_limits(
         )
         bucket_cap = equity * budget_frac
         if (bucket_exposure + cost_dollars) > bucket_cap:
+            _log_position_reject(ticker, opp_type, "strategy_budget")
             return False, (
                 f"STRATEGY_BUDGET: {bucket} has ${bucket_exposure:.2f} of "
                 f"${bucket_cap:.2f} budget ({budget_frac:.0%} of ${equity:.2f} equity); "
@@ -319,6 +381,7 @@ def _check_position_limits(
     # Global total exposure limit (still applies on top of strategy budgets)
     # ------------------------------------------------------------------
     if (total_exposure + cost_dollars) > equity * MAX_TOTAL_EXPOSURE:
+        _log_position_reject(ticker, opp_type, "total_exposure")
         return False, (
             f"Total exposure too high: ${total_exposure + cost_dollars:.2f} > "
             f"{MAX_TOTAL_EXPOSURE:.0%} of ${equity:.2f} equity"
@@ -346,11 +409,13 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
 
     market = get_market(ticker)
     if "error" in market:
+        _log_edge_reject(opportunity, "market_data")
         return False, f"Could not re-fetch market: {market['error']}"
 
     # Always read yes_ask — it's the price basis for both YES and NO edge calculations
     current_yes_ask = market.get("yes_ask", 0)
     if not current_yes_ask or current_yes_ask <= 0:
+        _log_edge_reject(opportunity, "yes_ask")
         return False, "No valid yes_ask price on re-fetch"
 
     current_yes_price = current_yes_ask / 100.0
@@ -377,6 +442,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_yes_price) * 100
         if move_cents > kill_cents:
+            _log_edge_reject(opportunity, "price_moved")
             return False, (
                 f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
@@ -410,6 +476,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
         kill_cents = PRICE_MOVE_CENTS_BY_STRATEGY.get(trade_type, MAX_PRICE_MOVE_CENTS)
         move_cents = abs(current_yes_price - original_price) * 100
         if move_cents > kill_cents:
+            _log_edge_reject(opportunity, "price_moved")
             return False, (
                 f"Price moved {move_cents:.1f}¢ since alert (max {kill_cents}¢ for {trade_type}) — market in motion, aborting"
             )
@@ -436,6 +503,7 @@ def _verify_edge_still_exists(opportunity: dict) -> tuple[bool, str]:
             f"[EdgeCheck] EVAPORATED: {ticker} | "
             f"was {opportunity.get('relative_edge', 0):.2%}, now {new_relative:.2%}"
         )
+        _log_edge_reject(opportunity, "edge_evaporated")
         return False, (
             f"Edge evaporated: was {opportunity.get('relative_edge', 0):.2%}, "
             f"now {new_relative:.2%} (threshold: {edge_threshold:.2%})"
@@ -684,9 +752,37 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
 
     if not math_ok:
         logger.warning("MATH SELF-CHECK FAILED")
+        try:
+            from bot import decisions
+            decisions.log_decision(
+                ticker=ticker, opp_type=opp_type, edge=opportunity.get("edge"),
+                gates={"position_cap": True, "duplicate": True, "same_game": True,
+                       "cooldown": True, "daily_loss": True, "strategy_budget": True,
+                       "total_exposure": True, "edge_recheck": True, "self_check": False},
+                decision="reject", reason="self_check_failed",
+            )
+        except Exception:
+            pass
         return {"success": False, "checks": checks, "reason": "Math self-check failed"}
 
     logger.info(f"  ✅ Math self-check passed")
+
+    # Session 6 — accept-path decision log. Every gate passed; order is
+    # about to be placed (paper or live).
+    try:
+        from bot import decisions
+        decisions.log_decision(
+            ticker=ticker, opp_type=opp_type, edge=opportunity.get("edge"),
+            gates={"position_cap": True, "duplicate": True, "same_game": True,
+                   "cooldown": True, "daily_loss": True, "strategy_budget": True,
+                   "total_exposure": True, "edge_recheck": True, "self_check": True},
+            decision="accept", reason="all_gates_passed",
+            extra={"contracts": contracts, "price_cents": price_cents,
+                   "cost_dollars": round(total_cost, 2),
+                   "paper": PAPER_MODE, "side": side},
+        )
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # ALL CHECKS PASSED — PLACE ORDER (or simulate in PAPER_MODE)

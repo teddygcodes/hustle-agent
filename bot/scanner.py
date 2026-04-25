@@ -494,6 +494,37 @@ def _fetch_vig_stack_forecasts() -> dict[str, float]:
     return forecasts
 
 
+# Session 6 — vig_stack gate fingerprint for the per-decision audit log.
+# Gate order matters: each rejection records all earlier gates as True
+# (passed), the rejecting gate as False, downstream gates omitted.
+_VIG_STACK_GATES = [
+    "low_liquidity", "no_vig", "market_closed", "forecast_in_bucket",
+    "no_price_too_low", "price_floor", "edge_below_threshold", "self_check",
+]
+_VIG_STACK_REASON_TO_GATE = {
+    "low_liquidity": "low_liquidity",
+    "no_vig": "no_vig",
+    "market_closed": "market_closed",
+    "forecast_in_bucket": "forecast_in_bucket",
+    "no_price_too_low": "no_price_too_low",
+    "no_price_below_floor": "price_floor",
+    "non_stable_below_weather_floor": "price_floor",
+    "edge_below_threshold": "edge_below_threshold",
+    "self_check_failed": "self_check",
+}
+
+
+def _vig_stack_gate_fingerprint(reason: str) -> dict[str, bool]:
+    gate = _VIG_STACK_REASON_TO_GATE.get(reason, reason)
+    out: dict[str, bool] = {}
+    for name in _VIG_STACK_GATES:
+        if name == gate:
+            out[name] = False
+            return out
+        out[name] = True
+    return out
+
+
 def scan_vig_stack_series() -> list[dict]:
     """
     Scan Kalshi series ladders for structural NO edges caused by vig stacking.
@@ -508,7 +539,10 @@ def scan_vig_stack_series() -> list[dict]:
     This scanner is completely independent of external odds sources.
     Wide-spread thin markets are NOT filtered out — thin markets are the opportunity.
     """
+    from bot import decisions  # lazy import (circular safety)
+
     opportunities = []
+    rejected_opps: list[dict] = []  # Session 6 — top-N → CF emission
     # Telemetry: count drops by reason per sub-type (series vs futures).
     # Lets us see in logs WHY dark scanners are silent.
     _telem: dict[str, dict[str, int]] = {
@@ -590,6 +624,15 @@ def scan_vig_stack_series() -> list[dict]:
                     open_interest = m.get("open_interest") or 0
                     if volume < 10 and open_interest < 5:
                         _telem[_sub]["low_liquidity"] += 1
+                        decisions.log_decision(
+                            ticker=m.get("ticker", ""),
+                            opp_type=("vig_stack_futures" if is_futures else "vig_stack_series"),
+                            edge=None,
+                            gates=_vig_stack_gate_fingerprint("low_liquidity"),
+                            decision="reject",
+                            reason="low_liquidity",
+                            extra={"volume": volume, "open_interest": open_interest},
+                        )
                         continue
                     yes_asks.append(ya)
                     valid_markets.append(m)
@@ -604,6 +647,15 @@ def scan_vig_stack_series() -> list[dict]:
             # Only worth scanning if there's meaningful vig (>5% excess)
             if yes_sum_prob < 1.05:
                 _telem[_sub]["no_vig"] += len(valid_markets)
+                decisions.log_decision(
+                    ticker=valid_markets[0].get("ticker", "") if valid_markets else "",
+                    opp_type=("vig_stack_futures" if is_futures else "vig_stack_series"),
+                    edge=None,
+                    gates=_vig_stack_gate_fingerprint("no_vig"),
+                    decision="reject",
+                    reason="no_vig",
+                    extra={"yes_sum": yes_sum, "group_size": len(valid_markets)},
+                )
                 continue
 
             vig_factor = yes_sum_prob  # = sum/100 — the multiplier inflating each YES price
@@ -628,6 +680,14 @@ def scan_vig_stack_series() -> list[dict]:
                             close_dt = datetime.fromisoformat(close_str.replace("Z", "+00:00"))
                             if close_dt <= _now_utc:
                                 _telem[_sub]["market_closed"] += 1
+                                decisions.log_decision(
+                                    ticker=ticker,
+                                    opp_type=("vig_stack_futures" if is_futures else "vig_stack_series"),
+                                    edge=None,
+                                    gates=_vig_stack_gate_fingerprint("market_closed"),
+                                    decision="reject",
+                                    reason="market_closed",
+                                )
                                 continue  # Market closed — outcome known
                         except (ValueError, TypeError):
                             pass  # Can't parse — let it through, better to over-scan
@@ -646,6 +706,15 @@ def scan_vig_stack_series() -> list[dict]:
                                 ticker, forecast_temp, lo, hi,
                             )
                             _telem[_sub]["forecast_in_bucket"] += 1
+                            decisions.log_decision(
+                                ticker=ticker,
+                                opp_type=("vig_stack_futures" if is_futures else "vig_stack_series"),
+                                edge=None,
+                                gates=_vig_stack_gate_fingerprint("forecast_in_bucket"),
+                                decision="reject",
+                                reason="forecast_in_bucket",
+                                extra={"forecast_temp": forecast_temp, "bucket_lo": lo, "bucket_hi": hi},
+                            )
                             continue
 
                 # NO fair value = 100¢ - (YES_ask adjusted for vig)
@@ -657,9 +726,33 @@ def scan_vig_stack_series() -> list[dict]:
                 no_edge = no_fair_prob - no_ask_prob
                 relative_no_edge = no_edge / no_ask_prob if no_ask_prob > 0 else 0.0
 
+                _opp_type_now = "vig_stack_futures" if is_futures else "vig_stack_series"
+
+                def _build_reject_opp(reason: str) -> dict:
+                    return {
+                        "ticker": ticker,
+                        "title": title,
+                        "type": _opp_type_now,
+                        "opp_type": _opp_type_now,
+                        "side": "no",
+                        "recommended_side": "no",
+                        "price_cents": no_ask,
+                        "fair_value_cents": round(no_fair_cents, 2),
+                        "edge": round(relative_no_edge, 4),
+                        "skip_reason": reason,
+                    }
+
                 # Skip near-zero-price NO contracts (YES near-certain)
                 if no_ask_prob < 0.03:
                     _telem[_sub]["no_price_too_low"] += 1
+                    decisions.log_decision(
+                        ticker=ticker, opp_type=_opp_type_now,
+                        edge=round(relative_no_edge, 4),
+                        gates=_vig_stack_gate_fingerprint("no_price_too_low"),
+                        decision="reject", reason="no_price_too_low",
+                        extra={"no_ask_prob": round(no_ask_prob, 4)},
+                    )
+                    rejected_opps.append(_build_reject_opp("no_price_too_low"))
                     continue
 
                 # Family-aware NO entry price floor (Apr 18 evening, data-driven).
@@ -674,22 +767,58 @@ def scan_vig_stack_series() -> list[dict]:
                 if _fam in VIG_STACK_STABLE_FAMILIES:
                     if no_ask_prob < VIG_STACK_MIN_NO_ENTRY_PRICE:
                         _telem[_sub]["no_price_below_floor"] += 1
+                        decisions.log_decision(
+                            ticker=ticker, opp_type=_opp_type_now,
+                            edge=round(relative_no_edge, 4),
+                            gates=_vig_stack_gate_fingerprint("no_price_below_floor"),
+                            decision="reject", reason="no_price_below_floor",
+                            extra={"no_ask_prob": round(no_ask_prob, 4),
+                                   "floor": VIG_STACK_MIN_NO_ENTRY_PRICE,
+                                   "family": _fam},
+                        )
+                        rejected_opps.append(_build_reject_opp("no_price_below_floor"))
                         continue
                 else:
                     if no_ask_prob < VIG_STACK_WEATHER_MIN_PRICE:
                         _telem[_sub]["non_stable_below_weather_floor"] += 1
+                        decisions.log_decision(
+                            ticker=ticker, opp_type=_opp_type_now,
+                            edge=round(relative_no_edge, 4),
+                            gates=_vig_stack_gate_fingerprint("non_stable_below_weather_floor"),
+                            decision="reject", reason="non_stable_below_weather_floor",
+                            extra={"no_ask_prob": round(no_ask_prob, 4),
+                                   "floor": VIG_STACK_WEATHER_MIN_PRICE,
+                                   "family": _fam},
+                        )
+                        rejected_opps.append(_build_reject_opp("non_stable_below_weather_floor"))
                         continue
 
                 # Vig stack series edge is purely structural (no prediction risk).
                 VIG_STACK_MIN_EDGE = 0.02
                 if relative_no_edge < VIG_STACK_MIN_EDGE:
                     _telem[_sub]["edge_below_threshold"] += 1
+                    decisions.log_decision(
+                        ticker=ticker, opp_type=_opp_type_now,
+                        edge=round(relative_no_edge, 4),
+                        gates=_vig_stack_gate_fingerprint("edge_below_threshold"),
+                        decision="reject", reason="edge_below_threshold",
+                        extra={"min_edge": VIG_STACK_MIN_EDGE},
+                    )
+                    rejected_opps.append(_build_reject_opp("edge_below_threshold"))
                     continue
 
                 # Self-checks
                 check_ok, check_msg = _self_check_edge(no_fair_prob, no_ask_prob, no_edge)
                 if not check_ok:
                     _telem[_sub]["self_check_failed"] += 1
+                    decisions.log_decision(
+                        ticker=ticker, opp_type=_opp_type_now,
+                        edge=round(relative_no_edge, 4),
+                        gates=_vig_stack_gate_fingerprint("self_check_failed"),
+                        decision="reject", reason="self_check_failed",
+                        extra={"check_msg": check_msg[:100] if check_msg else ""},
+                    )
+                    rejected_opps.append(_build_reject_opp("self_check_failed"))
                     continue
 
                 math_chain = [
@@ -711,6 +840,13 @@ def scan_vig_stack_series() -> list[dict]:
                 _type = "vig_stack_futures" if is_futures else "vig_stack_series"
 
                 _telem[_sub]["surfaced"] += 1
+                decisions.log_decision(
+                    ticker=ticker, opp_type=_type,
+                    edge=round(relative_no_edge, 4),
+                    gates={g: True for g in _VIG_STACK_GATES},
+                    decision="accept", reason="all_gates_passed",
+                    extra={"no_ask": no_ask, "no_fair_cents": round(no_fair_cents, 2)},
+                )
                 opportunities.append({
                     "type": _type,
                     "ticker": ticker,
@@ -745,6 +881,25 @@ def scan_vig_stack_series() -> list[dict]:
         drops = {k: v for k, v in t.items() if k not in ("checked", "surfaced") and v > 0}
         logger.info("VIG_STACK_TELEMETRY/%s: checked=%d surfaced=%d drops=%s",
                     sub, t["checked"], t["surfaced"], drops or "none")
+
+    # Session 6 — counterfactual emission. Top-5 highest-edge rejects per
+    # scan get a CLV record so we can later answer "did this gate cost us
+    # money?" via tools/cohort_report.py.
+    if rejected_opps:
+        try:
+            from bot import clv
+            top_rejects = sorted(
+                [o for o in rejected_opps if o.get("edge") is not None],
+                key=lambda o: -o["edge"],
+            )[:5]
+            scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+            for opp in top_rejects:
+                try:
+                    clv.record_counterfactual_skip(opp, opp["skip_reason"], scan_id)
+                except Exception:
+                    logger.exception("CF emit failed for %s", opp.get("ticker"))
+        except Exception:
+            logger.exception("Top-5 CF selection failed")
 
     return opportunities
 

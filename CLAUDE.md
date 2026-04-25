@@ -294,12 +294,14 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | `trade_history.json` | **Order log.** Every `execute_trade()` and `execute_hedge()` appends a record (filled OR resting). `tracker.resolve_trades()` updates entries in-place when markets settle. Distinct from `paper_trades.json` (the paper-mode resolution log). Read by the Telegram `HISTORY` command and `patterns.analyze_patterns()`. |
 | `paper_trades.json` | **Paper resolution log.** Balance is reconstructed from this. NOT the same as `trade_history.json` (orders) — paper-mode resolutions live here, with `status ∈ {won, lost, exited_early}` driving the post-Session-1 settlement pipeline. |
 | `archive/live_ticks-YYYY-MM-DD.jsonl.gz` | Daily gzipped tick archives. Created by `scheduler._rotate_live_ticks()` at midnight ET (Apr 23, Session 5). |
+| `decisions.jsonl` | **Per-decision audit log (Apr 24, Session 6).** Every scan-time accept/reject from scanner + executor + live_watcher with a gate fingerprint. Read by `tools/cohort_report.py`. Daily rotation to `archive/`. |
+| `archive/decisions-YYYY-MM-DD.jsonl.gz` | Daily gzipped decision archives. Created by `scheduler._rotate_decisions_log()` at midnight ET (Apr 24, Session 6). |
 | `pending.json` | Queue of opportunities waiting for GO/SKIP. Max `PENDING_MAX = 20`. |
 | `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. |
 | `live_ticks.jsonl` | Append-only **enriched** tick log: price, leader, wp, momentum, lead_trend, completion, wp_edge, bid, opp_bid, volatility, espn_scores, game_state. Feeds ANALYZE. |
 | `strategy_audit.json` | **Read this to understand every strategy's real-money status.** Auto-updated by `tracker.py` on every settlement (append to `settlement_log`). |
 | `patterns.json` | Historical win rate per strategy type for dynamic confidence (`scanner.py:_get_dynamic_confidence`). |
-| `clv.json` | Closing-line value records per trade. **`clv._load()` filters to active strategies on read (Apr 23, Session 5)** — disabled-strategy records get dropped and never re-saved. |
+| `clv.json` | Closing-line value records per trade. **`clv._load()` filters to active strategies on read (Apr 23, Session 5)** — disabled-strategy records get dropped and never re-saved. **Also stores counterfactual records (`status="counterfactual_open"` → `"counterfactual_settled"`, `trade_id` prefixed `CF-`) for top-5 rejected opportunities per scan (Apr 24, Session 6)** — `get_clv_report()` filters `status=="settled"` so CFs do not pollute paper-trade stats. |
 | `outcomes.db` | SQLite: alert → outcome log for calibration. |
 | `elo_ratings.json` | Sport ELO ratings (lightly used). |
 | `mm_positions.json` | Market-maker pair state. |
@@ -538,6 +540,36 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 4. `stat -f "%Sm" bot/state/bot.lock` — sample twice 60s apart, mtime advances.
 5. After next midnight ET (or temporarily set `last_ticks_rotation` to a stale date in `bot_state.json` and trigger): `ls bot/state/archive/` shows `live_ticks-2026-04-24.jsonl.gz`; fresh `live_ticks.jsonl` is small; `gzip -dc bot/state/archive/live_ticks-2026-04-24.jsonl.gz | wc -l` matches the pre-rotation line count.
 6. Telegram `CLV` returns a report (no crash on empty disabled-strategy bins).
+
+---
+
+### ☑ Session 6 — Closed-loop data collection (Apr 24)
+**Problem (pre-fix).** `trade_history.json` shows what fired, but not *what almost fired and was killed by which gate, or what would have happened if we'd taken it anyway*. Without that, every gate threshold is folklore: `MIN_RELATIVE_EDGE = 0.15`, the 4h cooldown, `STRATEGY_BUDGETS` 60/20/20, the 3¢ kill switch, the new Filter F 0.93 floor — all guesses until rejected trades have outcome-attached counterfactuals. The bot was opaque to its own decisions.
+
+**What shipped.**
+- `bot/decisions.py` (new, 63 lines) — `log_decision(ticker, opp_type, edge, gates, decision, reason, extra=None)`. Atomic append to `bot/state/decisions.jsonl` under module-level `threading.Lock`. Wrapped in try/except — never raises, so audit-log failure can't block a trade. Single write site; no reader API (analysis tools read the file directly).
+- `bot/scanner.py` — `scan_vig_stack_series` instrumented at all 7 gate sites (`low_liquidity`, `no_vig`, `forecast_in_bucket`, `price_floor`, `edge_below_threshold`, `self_check`, plus accept-path). New module-level `_VIG_STACK_GATES` ordered list + `_vig_stack_gate_fingerprint(reason)` helper that returns `{gate: True}` for upstream-passed, `{reason: False}` for the firing gate, omits downstream-not-yet-checked. Local `rejected_opps` list collected for downstream CF emission. Existing `_telem` counters preserved.
+- `bot/scanner.py` (end of `scan_vig_stack_series`) — top-5 reject CF emission. Sort `rejected_opps` by `-edge`, take top-5, call `clv.record_counterfactual_skip(opp, opp["skip_reason"], scan_id)`. Wrapped in nested try/except so CF-emit failure never propagates.
+- `bot/clv.py` — new `record_counterfactual_skip(opp, gate, scan_id)`. Idempotent on `trade_id = f"CF-{scan_id}-{ticker}"`. Records carry `status="counterfactual_open"` + `skipped_by_gate` field + `contracts=0` + `paper=False`. Resilient to missing fields (falls back `price_cents` → `yes_ask`; skips silently if no usable price). `check_clv_settlements()` extended: settles status `"open"` and `"counterfactual_open"` alike, but writes `"counterfactual_settled"` (NOT `"settled"`) for CFs and excludes them from the return list. So `get_clv_report()` (filters `status == "settled"`) stays clean of CF noise.
+- `bot/executor.py` — instrumented all 7 `_check_position_limits` gates (position_cap, duplicate, same_game, cooldown, daily_loss, strategy_budget, total_exposure) and all 4 `_verify_edge_still_exists` gates (market_data, yes_ask, price_moved, edge_evaporated). Module-level `_pos_gate_fingerprint` / `_edge_gate_fingerprint` + `_log_position_reject` / `_log_edge_reject` helpers. Accept-path log right after self-check passes (before order placement) carries full `gates: all True` + `extras={contracts, price_cents, cost_dollars, paper, side}`.
+- `bot/live_watcher.py` — instrumented `_tick_momentum` with a **dampener** (`self._last_decision: tuple[str,str] | None`). New `_log_decision_dampened(decision, reason, gates, edge, extra)` method emits only when `(decision, reason)` differs from the last entry. Without this, a flat-market live ticker would emit ~6 reject logs/sec → 50k records/day per match. With it, one record per state-transition. Gates instrumented: `can_enter` (sport_disabled / max_entries / cooldown / position_open), `dip_too_big`, `variance_quality`, `dqs_fail`, plus accept paths (`dip_buy`, `conviction`).
+- `bot/scheduler.py` — extracted shared `_rotate_jsonl(source, prefix, today_str)` helper covering rename → gzip → unlink with collision-suffix loop and size-saved INFO log. `_rotate_live_ticks` and new `_rotate_decisions_log` are now 2-line wrappers. New gate in `check_scheduled_events` mirrors live_ticks: hour 0 + same-day flag `last_decisions_rotation` + catch-up clause for missed days.
+- `tools/cohort_report.py` (new) — reads `decisions.jsonl` + last N days of gzipped archives, joins to CF records in `clv.json` (status `counterfactual_*`). Per-strategy Markdown table: gate, invocations, rejects, reject %, mean reject edge, CF settled count, Σ CF clv_relative, mean CF clv_relative. **Mis-tuning candidates section** flags gates with reject rate ≥ 50% AND positive Σ CF clv_relative across ≥ 5 settled CFs — those are the gates surrendering alpha.
+- `tests/test_decisions.py` (new, 8 cases) — schema integrity (5: required fields, None-edge, extra round-trip, extra omitted when None, edge rounded to 4dp); atomic append (2: 200 concurrent writes from 20 threads, state-dir creation); never-raises (1: disk failure swallowed).
+- `tests/test_clv.py` (new, 9 cases) — CF recording (5: schema, idempotency, distinct scan IDs, missing-price skip, yes_ask fallback); active-strategy filter (2: CF passes, disabled-strategy CF dropped); settlement (2: CF → counterfactual_settled, real → settled); report exclusion (1: CF settled excluded from `get_clv_report`).
+- `tests/test_scheduler.py` — new `TestDecisionsRotation` class (5 cases) mirroring Session-5 `TestLiveTicksRotation`: fires-at-midnight, skip-if-too-small, no-refire, catch-up-missed-day, collision-suffix.
+
+**Test results.** `python3 -m pytest tests/test_decisions.py tests/test_clv.py tests/test_scheduler.py::TestDecisionsRotation -v` → 23 passed. Broader suite unchanged from Session 4/5 baseline (same 7+2 pre-existing failures).
+
+**Coordination with user (deploy).** Stop bot → restart. Code-path changes deploy via the restart itself; no one-shot scripts needed for this session. `decisions.jsonl` is created lazily on first write.
+
+**Verify (live, post-restart).**
+1. `tail -20 bot/state/decisions.jsonl` — within 1 hour, real records flow. Each line has `ts, ticker, opp_type, edge, gates, decision, reason`.
+2. `python3 -c "import json; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; from collections import Counter; print(Counter((r['opp_type'], r['decision']) for r in recs))"` — sanity-check spread across opp_types and accept/reject mix.
+3. `python3 -c "import json; clv=json.load(open('bot/state/clv.json')); cf=[r for r in clv if r.get('status','').startswith('counterfactual')]; print(f'{len(cf)} CF records, {sum(1 for r in cf if r[\"status\"]==\"counterfactual_open\")} pending settlement')"` — CF records exist within first 1-2 scan cycles.
+4. Dampener works: `tail -100 bot/state/decisions.jsonl | grep <live_ticker>` shows ≤1 record per state-transition (not per tick).
+5. Next midnight ET → `ls bot/state/archive/` shows `decisions-2026-04-25.jsonl.gz`; fresh `decisions.jsonl` is small.
+6. After 7 days: `python3 tools/cohort_report.py --days 7` → first real cohort report. Look for the **Mis-tuning candidates** section — those gates become Session 7 retuning targets.
 
 ---
 

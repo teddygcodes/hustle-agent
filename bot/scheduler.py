@@ -126,31 +126,45 @@ async def check_scheduled_events(bot) -> None:
         except Exception:
             logger.exception("Live ticks rotation failed")
 
+    # --- Nightly decisions.jsonl rotation (Session 6, midnight ET, catch-up) ---
+    last_dec_rotation = state.get("last_decisions_rotation", "")
+    should_rotate_dec = (
+        (current_hour == 0 and last_dec_rotation != today_str)
+        or (last_dec_rotation and last_dec_rotation < yesterday_str)
+    )
+    if should_rotate_dec:
+        logger.info("Rotating decisions.jsonl...")
+        try:
+            _rotate_decisions_log(today_str)
+            state = _load_bot_state()
+            state["last_decisions_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Decisions rotation failed")
 
-def _rotate_live_ticks(today_str: str) -> None:
-    """Move live_ticks.jsonl → state/archive/live_ticks-YYYY-MM-DD.jsonl.gz.
 
-    Race-safe: live_watcher._log_tick reopens the file each write, so renaming
-    it out from under the writer is fine — the next tick creates a fresh file
-    at the original path.
+def _rotate_jsonl(source: Path, prefix: str, today_str: str) -> None:
+    """Move source.jsonl → source.parent/archive/<prefix>-YYYY-MM-DD.jsonl.gz.
+
+    Race-safe: writers reopen the file each append, so renaming out from
+    under them is fine — the next write creates a fresh file at the
+    original path. Skip if file < 1KB.
     """
-    from bot.live_watcher import TICK_LOG_FILE
-
-    if not TICK_LOG_FILE.exists() or TICK_LOG_FILE.stat().st_size < 1024:
-        logger.info("Live ticks: nothing to rotate (missing or <1KB)")
+    if not source.exists() or source.stat().st_size < 1024:
+        logger.info("%s: nothing to rotate (missing or <1KB)", prefix)
         return
 
-    archive_dir = TICK_LOG_FILE.parent / "archive"
+    archive_dir = source.parent / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
-    dest = archive_dir / f"live_ticks-{today_str}.jsonl"
+    dest = archive_dir / f"{prefix}-{today_str}.jsonl"
     suffix = 2
     while dest.exists() or dest.with_suffix(".jsonl.gz").exists():
-        dest = archive_dir / f"live_ticks-{today_str}-{suffix}.jsonl"
+        dest = archive_dir / f"{prefix}-{today_str}-{suffix}.jsonl"
         suffix += 1
 
-    original_size = TICK_LOG_FILE.stat().st_size
-    TICK_LOG_FILE.rename(dest)
+    original_size = source.stat().st_size
+    source.rename(dest)
 
     gz_dest = dest.with_suffix(".jsonl.gz")
     with open(dest, "rb") as src, gzip.open(gz_dest, "wb") as gz:
@@ -159,12 +173,23 @@ def _rotate_live_ticks(today_str: str) -> None:
 
     gz_size = gz_dest.stat().st_size
     logger.info(
-        "Live ticks rotated: %s (%.1fMB → %.1fMB gzipped, %.0f%% saved)",
+        "%s rotated: %s (%.1fMB → %.1fMB gzipped, %.0f%% saved)",
+        prefix,
         gz_dest.name,
         original_size / 1_048_576,
         gz_size / 1_048_576,
         100 * (1 - gz_size / original_size) if original_size else 0,
     )
+
+
+def _rotate_live_ticks(today_str: str) -> None:
+    from bot.live_watcher import TICK_LOG_FILE
+    _rotate_jsonl(TICK_LOG_FILE, "live_ticks", today_str)
+
+
+def _rotate_decisions_log(today_str: str) -> None:
+    from bot.decisions import DECISIONS_FILE
+    _rotate_jsonl(DECISIONS_FILE, "decisions", today_str)
 
 
 async def _send_morning_briefing(bot):

@@ -70,6 +70,62 @@ def _save(records: list[dict]):
 # Recording
 # ---------------------------------------------------------------------------
 
+def record_counterfactual_skip(opp: dict, gate: str, scan_id: str) -> None:
+    """Record a 'what would the closing price have been if we'd taken this' entry.
+
+    Session 6 (Apr 24): top-N rejected opportunities per scan get a CF record
+    so we can later answer "did this gate cost us money?" — the same settlement
+    poller fills closing_yes_price for these and `tools/cohort_report.py`
+    joins gate ↔ CLV to surface mis-tuned thresholds.
+
+    Idempotent on (scan_id, ticker). Records carry status="counterfactual_open"
+    until settled; `get_clv_report()` filters on status=="settled" so CF rows
+    do not pollute paper-trade CLV reports.
+    """
+    side = opp.get("side") or opp.get("recommended_side") or "yes"
+    side = str(side).lower()
+
+    entry_price = opp.get("price_cents")
+    if entry_price is None:
+        entry_price = opp.get("yes_ask")
+    try:
+        entry_price = int(entry_price) if entry_price is not None else None
+    except (TypeError, ValueError):
+        entry_price = None
+    if entry_price is None or entry_price <= 0:
+        logger.debug("CF skip: %s missing usable entry price", opp.get("ticker"))
+        return
+
+    fair = opp.get("fair_value_cents") or opp.get("fair_cents") or 0
+    edge = opp.get("edge")
+
+    cf_id = f"CF-{scan_id}-{opp.get('ticker','UNK')}"
+
+    records = _load()
+    if any(r.get("trade_id") == cf_id for r in records):
+        return
+
+    records.append({
+        "ticker": opp.get("ticker", ""),
+        "opp_type": opp.get("opp_type") or opp.get("type") or "vig_stack_series",
+        "side": side,
+        "entry_price_cents": entry_price,
+        "fair_value_cents": round(float(fair), 2) if fair else 0.0,
+        "edge_at_trade": round(float(edge), 4) if edge is not None else None,
+        "contracts": 0,
+        "trade_id": cf_id,
+        "paper": False,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        "status": "counterfactual_open",
+        "skipped_by_gate": gate,
+        "closing_yes_price": None,
+        "clv_cents": None,
+        "clv_relative": None,
+        "settled_at": None,
+    })
+    _save(records)
+
+
 def record_clv_entry(
     ticker: str,
     opp_type: str,
@@ -138,8 +194,10 @@ def check_clv_settlements() -> list[dict]:
     changed = False
 
     for rec in records:
-        if rec.get("status") != "open":
+        status = rec.get("status")
+        if status not in ("open", "counterfactual_open"):
             continue
+        is_cf = status == "counterfactual_open"
 
         ticker = rec["ticker"]
         try:
@@ -195,7 +253,7 @@ def check_clv_settlements() -> list[dict]:
 
         clv_relative = clv_cents / entry_price if entry_price > 0 else 0.0
 
-        rec["status"] = "settled"
+        rec["status"] = "counterfactual_settled" if is_cf else "settled"
         rec["closing_yes_price"] = closing_yes
         rec["market_result"] = result
         rec["clv_cents"] = round(clv_cents, 2)
@@ -203,12 +261,13 @@ def check_clv_settlements() -> list[dict]:
         rec["settled_at"] = datetime.now(timezone.utc).isoformat()
         changed = True
 
-        settled_now.append(rec.copy())
-        logger.info(
-            f"CLV settled: {ticker} | {side.upper()} entry={entry_price}¢ "
-            f"close={closing_yes}¢ | CLV={clv_cents:+.1f}¢ ({clv_relative:+.1%}) | "
-            f"result={result}"
-        )
+        if not is_cf:
+            settled_now.append(rec.copy())
+            logger.info(
+                f"CLV settled: {ticker} | {side.upper()} entry={entry_price}¢ "
+                f"close={closing_yes}¢ | CLV={clv_cents:+.1f}¢ ({clv_relative:+.1%}) | "
+                f"result={result}"
+            )
 
     if changed:
         _save(records)

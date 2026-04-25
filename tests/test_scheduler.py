@@ -309,6 +309,95 @@ class TestLiveTicksRotation:
         assert (archive_dir / "live_ticks-2026-04-24-2.jsonl.gz").exists()
 
 
+class TestDecisionsRotation:
+    """Session 6: nightly decisions.jsonl → state/archive/*.jsonl.gz rotation."""
+
+    @pytest.fixture
+    def tmp_decisions(self, tmp_path, monkeypatch):
+        """Repoint DECISIONS_FILE to a tmp directory."""
+        dec = tmp_path / "decisions.jsonl"
+        from bot import decisions
+        monkeypatch.setattr(decisions, "DECISIONS_FILE", dec)
+        return dec
+
+    def _seed(self, path, count=200):
+        # Each line ≥ 50 bytes → comfortably above the 1KB rotation floor.
+        path.write_text("\n".join(
+            json.dumps({"ts": "x", "ticker": f"T{i}", "decision": "reject", "reason": "r"})
+            for i in range(count)
+        ) + "\n")
+
+    def test_fires_at_midnight_and_archives_file(self, tmp_state, tmp_decisions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_decisions)
+        original_size = tmp_decisions.stat().st_size
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert not tmp_decisions.exists()
+        archive_dir = tmp_decisions.parent / "archive"
+        gz = archive_dir / "decisions-2026-04-24.jsonl.gz"
+        assert gz.exists()
+        assert gz.stat().st_size < original_size
+
+        state = _read_state(tmp_state)
+        assert state["last_decisions_rotation"] == "2026-04-24"
+
+    def test_skips_if_file_too_small(self, tmp_state, tmp_decisions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        tmp_decisions.write_text('{"x":1}\n')
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_decisions.exists()
+        assert (tmp_decisions.parent / "archive").exists() is False
+        assert _read_state(tmp_state)["last_decisions_rotation"] == "2026-04-24"
+
+    def test_no_refire_same_day(self, tmp_state, tmp_decisions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_decisions)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 30, tzinfo=ET))
+        _set_state(tmp_state, last_decisions_rotation="2026-04-24")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_decisions.exists()
+        assert not (tmp_decisions.parent / "archive").exists()
+
+    def test_catch_up_if_missed_a_day(self, tmp_state, tmp_decisions, mock_bot, monkeypatch):
+        """If last_decisions_rotation is older than yesterday, rotate at any hour."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_decisions)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 14, 0, tzinfo=ET))
+        _set_state(tmp_state, last_decisions_rotation="2026-04-19")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        gz = tmp_decisions.parent / "archive" / "decisions-2026-04-24.jsonl.gz"
+        assert gz.exists()
+
+    def test_collision_appends_suffix(self, tmp_state, tmp_decisions, mock_bot, monkeypatch):
+        """If today's archive already exists, dest gets a -2 suffix."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_decisions)
+        archive_dir = tmp_decisions.parent / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "decisions-2026-04-24.jsonl.gz").write_bytes(b"prior")
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert (archive_dir / "decisions-2026-04-24.jsonl.gz").read_bytes() == b"prior"
+        assert (archive_dir / "decisions-2026-04-24-2.jsonl.gz").exists()
+
+
 class TestTotalPnlPersist:
     """After nightly fires, bot_state['total_pnl'] reflects compute_daily_summary."""
 

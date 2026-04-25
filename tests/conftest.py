@@ -256,6 +256,23 @@ def make_report(txn_id: int = 1, report_type: str = "investment",
 
 
 # ---------------------------------------------------------------------------
+# Auto-isolate decisions audit log so tests never touch the live bot's
+# bot/state/decisions.jsonl. Session 6 (Apr 24) added log_decision calls
+# on every executor/scanner gate — without this fixture, any test that
+# exercises those code paths would write to production state.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_decisions_log(tmp_path_factory, monkeypatch):
+    try:
+        from bot import decisions as _decisions
+    except Exception:
+        return
+    sandbox = tmp_path_factory.mktemp("decisions_isolation") / "decisions.jsonl"
+    monkeypatch.setattr(_decisions, "DECISIONS_FILE", sandbox)
+
+
+# ---------------------------------------------------------------------------
 # Filesystem isolation fixture
 # ---------------------------------------------------------------------------
 

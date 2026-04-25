@@ -357,6 +357,12 @@ class LiveGameWatcher:
         self._espn_tick_counter: int = 0
         self._last_espn_data: dict = {}
 
+        # Session 6 — dampener for the per-decision audit log. Without this,
+        # a flat-market live watcher would emit ~6 reject records per second
+        # per ticker (50k records/day per match). We log only on state
+        # transitions (decision, reason) — first new transition flushes.
+        self._last_decision: tuple[str, str] | None = None
+
         # Tick-level telemetry — counts each decision point in _tick_momentum.
         # Written to the session_end journal entry so we can answer "why did
         # this watcher never bet?" from post-hoc replay. Mirrors the pattern
@@ -374,6 +380,38 @@ class LiveGameWatcher:
             "execute_success": 0,    # execute_trade returned success
             "execute_failed": {},    # keyed by reason string from executor
         }
+
+    # ------------------------------------------------------------------
+    # Session 6 — dampened decision log
+    # ------------------------------------------------------------------
+    def _log_decision_dampened(
+        self,
+        decision: str,
+        reason: str,
+        gates: dict[str, bool],
+        edge: float | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """Emit a decisions.log_decision row only on (decision, reason) state
+        change. A flat-market live watcher would otherwise emit ~6 records/sec
+        per ticker — the dampener compresses to one record per transition."""
+        key = (decision, reason)
+        if key == self._last_decision:
+            return
+        self._last_decision = key
+        try:
+            from bot import decisions
+            decisions.log_decision(
+                ticker=self.ticker or "",
+                opp_type="live_momentum",
+                edge=edge,
+                gates=gates,
+                decision=decision,
+                reason=reason,
+                extra=extra,
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Public interface
@@ -999,6 +1037,30 @@ class LiveGameWatcher:
             and (self.sport or "").lower() not in MOMENTUM_DISABLED_SPORTS
         )
 
+        if not can_enter:
+            sport_lc = (self.sport or "").lower()
+            if sport_lc in MOMENTUM_DISABLED_SPORTS:
+                _reason = "sport_disabled"
+                _gates = {"can_enter": False, "sport_enabled": False}
+            elif self._entry_count >= MOMENTUM_MAX_ENTRIES:
+                _reason = "max_entries"
+                _gates = {"can_enter": False, "sport_enabled": True, "max_entries": False}
+            elif self._cooldown_remaining > 0:
+                _reason = "cooldown"
+                _gates = {"can_enter": False, "sport_enabled": True, "cooldown": False}
+            elif self.bets_placed:
+                _reason = "position_open"
+                _gates = {"can_enter": False, "sport_enabled": True, "position_open": False}
+            else:
+                _reason = "cannot_enter"
+                _gates = {"can_enter": False}
+            self._log_decision_dampened(
+                decision="reject", reason=_reason, gates=_gates,
+                extra={"sport": sport_lc, "entry_count": self._entry_count,
+                       "cooldown_remaining": self._cooldown_remaining,
+                       "open_bets": len(self.bets_placed)},
+            )
+
         buy_ticker = None
         buy_market = None
         buy_price = 0
@@ -1028,6 +1090,13 @@ class LiveGameWatcher:
                             logger.info(
                                 "LiveGameWatcher VARIANCE REJECT: %s dip=%dc price=%dc (%s)",
                                 self.ticker, dip_cents, yes_ask, q_reason,
+                            )
+                            self._log_decision_dampened(
+                                decision="reject", reason="variance_quality",
+                                gates={"can_enter": True, "is_leader": True,
+                                       "dip_window": True, "variance_quality": False},
+                                extra={"q_reason": q_reason, "dip_cents": dip_cents,
+                                       "yes_ask": yes_ask},
                             )
                         else:
                             # DATA-DRIVEN: Tennis/UFC — skip DQS, pure price action
@@ -1073,12 +1142,27 @@ class LiveGameWatcher:
                                 dqs_bd.get("volatility"),
                             )
                             self._tick_telem["dqs_fail"] += 1
+                            self._log_decision_dampened(
+                                decision="reject", reason="dqs_fail",
+                                gates={"can_enter": True, "is_leader": True,
+                                       "dip_window": True, "dqs": False},
+                                extra={"dqs": round(dqs, 3),
+                                       "threshold": MOMENTUM_DQS_THRESHOLD,
+                                       "dip_cents": dip_cents, "yes_ask": yes_ask},
+                            )
                 else:
                     logger.info(
                         "LiveGameWatcher SKIP: %s dip too large (%dc > %dc max)",
                         self.ticker, dip_cents, max_dip,
                     )
                     self._tick_telem["dip_too_big"] += 1
+                    self._log_decision_dampened(
+                        decision="reject", reason="dip_too_big",
+                        gates={"can_enter": True, "is_leader": True,
+                               "dip_min": True, "dip_max": False},
+                        extra={"dip_cents": dip_cents, "max_dip": max_dip,
+                               "yes_ask": yes_ask},
+                    )
 
             # Check opponent side (if primary didn't qualify)
             if (not buy_ticker and opp_market and opp_is_leader
@@ -1290,6 +1374,18 @@ class LiveGameWatcher:
             reentry_tag = f" [RE-ENTRY #{self._entry_count + 1}]" if self._entry_count > 0 else ""
             # Conviction entries use reduced sizing
             conviction_mode = buy_dip == 0 and "conviction" in buy_reason.lower()
+            # Session 6 — accept-path log (dampened). Note: executor will also
+            # log its own accept after position-limit + edge-recheck gates.
+            self._log_decision_dampened(
+                decision="accept",
+                reason="conviction" if conviction_mode else "dip_buy",
+                gates={"can_enter": True, "is_leader": True,
+                       "dip_window": True, "dqs": True},
+                edge=buy_dqs if buy_dqs and buy_dqs < 1.0 else None,
+                extra={"buy_price": buy_price, "buy_dip": buy_dip,
+                       "buy_dqs": round(buy_dqs, 3) if buy_dqs else None,
+                       "ticker": buy_ticker},
+            )
             await self._auto_bet_momentum(
                 buy_market, buy_price,
                 buy_reason + reentry_tag,
