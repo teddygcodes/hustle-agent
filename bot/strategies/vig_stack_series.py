@@ -231,7 +231,24 @@ class VigStackSeries:
 
     name = "vig_stack_series"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        min_relative_edge: float = VIG_STACK_MIN_EDGE,
+        stable_min_no: float = VIG_STACK_MIN_NO_ENTRY_PRICE,
+        volatile_min_no: float = VIG_STACK_WEATHER_MIN_PRICE,
+    ) -> None:
+        # Tunable thresholds — defaults preserve legacy behavior (Session 13a
+        # golden-file test). Override via kwargs for parameter sweeps in
+        # tools/hypothetical_report.py.
+        #
+        # Naming: `min_relative_edge` is the broader Strategy convention.
+        # The default here is the local VIG_STACK_MIN_EDGE = 0.02 because
+        # that's the value the legacy gate used; defaulting to the global
+        # MIN_RELATIVE_EDGE (0.15) would break behavior preservation.
+        self._min_relative_edge = min_relative_edge
+        self._stable_min_no = stable_min_no
+        self._volatile_min_no = volatile_min_no
+
         # Per-scan state, reset in candidate_markets:
         self._ladders: dict[str, dict] = {}  # ladder_id -> ladder context
         self._ladder_id_for: dict[str, str] = {}  # ticker -> ladder_id
@@ -575,7 +592,7 @@ class VigStackSeries:
         # Family-aware NO entry price floor (Apr 18 evening, data-driven).
         fam = ticker.split("-")[0] if ticker else ""
         if fam in VIG_STACK_STABLE_FAMILIES:
-            if no_ask_prob < VIG_STACK_MIN_NO_ENTRY_PRICE:
+            if no_ask_prob < self._stable_min_no:
                 self._telem[sub]["no_price_below_floor"] += 1
                 decisions.log_decision(
                     ticker=ticker, opp_type=opp_type,
@@ -583,7 +600,7 @@ class VigStackSeries:
                     gates=_vig_stack_gate_fingerprint("no_price_below_floor"),
                     decision="reject", reason="no_price_below_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
-                           "floor": VIG_STACK_MIN_NO_ENTRY_PRICE,
+                           "floor": self._stable_min_no,
                            "family": fam},
                 )
                 self._rejected_opps.append(self._build_reject_opp(
@@ -591,7 +608,7 @@ class VigStackSeries:
                     "no_price_below_floor"))
                 return None
         else:
-            if no_ask_prob < VIG_STACK_WEATHER_MIN_PRICE:
+            if no_ask_prob < self._volatile_min_no:
                 self._telem[sub]["non_stable_below_weather_floor"] += 1
                 decisions.log_decision(
                     ticker=ticker, opp_type=opp_type,
@@ -599,7 +616,7 @@ class VigStackSeries:
                     gates=_vig_stack_gate_fingerprint("non_stable_below_weather_floor"),
                     decision="reject", reason="non_stable_below_weather_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
-                           "floor": VIG_STACK_WEATHER_MIN_PRICE,
+                           "floor": self._volatile_min_no,
                            "family": fam},
                 )
                 self._rejected_opps.append(self._build_reject_opp(
@@ -608,7 +625,7 @@ class VigStackSeries:
                 return None
 
         # edge_below_threshold gate
-        if relative_no_edge < VIG_STACK_MIN_EDGE:
+        if relative_no_edge < self._min_relative_edge:
             self._telem[sub]["edge_below_threshold"] += 1
             close_str = (market.raw.get("close_time")
                          or market.raw.get("expiration_time")
@@ -625,7 +642,7 @@ class VigStackSeries:
                 edge=round(relative_no_edge, 4),
                 gates=_vig_stack_gate_fingerprint("edge_below_threshold"),
                 decision="reject", reason="edge_below_threshold",
-                extra={"min_edge": VIG_STACK_MIN_EDGE,
+                extra={"min_edge": self._min_relative_edge,
                        "edge": round(relative_no_edge, 4),
                        "vig": round(yes_sum - 100.0, 2),
                        "time_to_settle_hr": tts_hr},
