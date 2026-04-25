@@ -621,6 +621,24 @@ The gates we most need to retune (`edge_below_threshold`, `forecast_in_bucket`) 
 3. After 7 days: cohort report's mis-tuning candidates section flags real gates, not just `non_stable_below_weather_floor`.
 4. CF growth ≤900/day idle, ≤13k/day active. `wc -l bot/state/clv.json && du -h bot/state/clv.json` — file stays <2 MB.
 
+#### Session 8 Part 2 — launchd supervision fix (Apr 24, shipped)
+
+**Problem.** While verifying the Session-8 restart, launchd-supervised bot crash-looped every 5s with no visible stack. Root cause: `run_bot.sh:5` hardcoded `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/...Python` but `bot/daily_log.py:26` uses PEP 604 union syntax (`def _load_json(path: Path) -> list | dict:`) which requires Python 3.10+. The wrapper had been silently broken since that syntax landed, and the bot was actually running out-of-supervision via ad-hoc `nohup python3 -m bot.main` instead of under launchd. Telegram `STOP` would unload launchd (no-op, since it was already quietly disabled) but the nohup'd process was the real one.
+
+Secondary finding: launchd service was in the user-domain *disabled* database (independent from plist `RunAtLoad`), so `launchctl load` returned `Input/output error 5` until cleared via `launchctl enable gui/$UID/com.hustle-agent.bot` (no sudo required — user domain only).
+
+**What shipped.**
+- `run_bot.sh` — replaced hardcoded 3.9 binary path with `PYTHON_BIN="/Library/Frameworks/Python.framework/Versions/3.14/bin/python3"` at the top of the script. Chosen over `/usr/bin/env python3` because launchd's minimal `PATH=/usr/bin:/bin:/usr/sbin:/sbin` does not include `/Library/Frameworks/.../3.14/bin`, and over modifying the plist `EnvironmentVariables` because a single explicit variable in the wrapper is the smallest surface to maintain.
+- User-domain launchd re-enabled (`launchctl enable gui/$UID/com.hustle-agent.bot`) and plist reloaded (`launchctl load ~/Library/LaunchAgents/com.hustle-agent.bot.plist`). Stale `bot/state/bot.lock` from the nohup session deleted before load.
+
+**Maintenance note.** When upgrading past Python 3.14, edit `PYTHON_BIN` in `run_bot.sh`. That's the single point of change.
+
+**Verify.**
+1. `ps aux | grep bot.main | grep -v grep` — exactly one PID, parent is launchd (`ppid=1`), binary path contains `Versions/3.14`.
+2. `tail bot/logs/watchdog.log` — no new `Bot exited (code 0), restarting in 5s...` lines after the fix (the crash loop fingerprint was a consecutive run of those with <10s deltas).
+3. `tail bot/logs/bot.log` — shows normal startup sequence: `Telegram connected — bot is live`, `SCAN CYCLE — …`, scanner loops firing. Observed on first launchd-supervised boot post-fix.
+4. Telegram `STOP` now cleanly unloads launchd + kills the bot; `START` (or reboot / `launchctl load`) brings it back under supervision.
+
 ---
 
 ### ☐ Session 9 — MFE/MAE per position (Apr 24, planned)
