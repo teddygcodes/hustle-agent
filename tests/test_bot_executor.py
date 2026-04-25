@@ -506,3 +506,41 @@ class TestCheckFillsPaperSim:
         mock_market.assert_not_called()
         assert len(updates) == 1
         assert updates[0]["filled"] == 5
+
+
+class TestLogRejectExtra:
+    """Session 10 — _log_position_reject and _log_edge_reject must propagate
+    extra dict so cohort_report can compute distance-from-threshold."""
+
+    def test_log_position_reject_propagates_extra(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "decisions_extra_test.jsonl"
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_position_reject(
+                "KX-X", "vig_stack_series", "cooldown",
+                extra={"last_trade_age_min": 145, "cooldown_min": 240},
+            )
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert len(recs) == 1
+        assert recs[0]["reason"] == "cooldown"
+        assert recs[0]["extra"] == {"last_trade_age_min": 145, "cooldown_min": 240}
+
+    def test_log_position_reject_extra_none_omits_key(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "decisions_no_extra.jsonl"
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_position_reject("KX-X", "vig_stack_series", "duplicate")
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert "extra" not in recs[0]
+
+    def test_log_edge_reject_propagates_extra(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "decisions_edge_extra.jsonl"
+        opp = {"ticker": "KX-Y", "type": "vig_stack_series", "edge": 0.15}
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_edge_reject(
+                opp, "price_moved",
+                extra={"move_cents": 7.5, "kill_cents": 5},
+            )
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs[0]["extra"] == {"move_cents": 7.5, "kill_cents": 5}
