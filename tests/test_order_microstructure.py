@@ -418,3 +418,34 @@ def test_check_fills_writes_terminal_on_kalshi_canceled(tmp_path, monkeypatch):
     assert rows[0]["filled_qty"] == 3
     assert rows[0]["ts_canceled"] is not None
     assert "OCANC" not in om._PENDING
+
+
+# ---------------------------------------------------------------------------
+# Task 6: slippage-adjusted CLV math (lives in tools/microstructure_report.py)
+# ---------------------------------------------------------------------------
+
+def test_slippage_adjusted_clv_math():
+    """Hand-craft a microstructure record + matching clv record; assert
+    slippage_adjusted_clv = clv_cents - slippage_cents matches manual calc."""
+    from tools.microstructure_report import compute_slippage_adjusted_clv
+
+    # microstructure: bought NO at 40¢, filled at 42¢ → +2¢ adverse slippage
+    micro = {
+        "ticker": "KX1", "ts_placed": "2026-04-25T12:00:00+00:00",
+        "side": "no", "requested_price_cents": 40, "filled_price_cents": 42,
+        "slippage_cents": 2.0, "strategy_name": "vig_stack_series",
+    }
+    # clv record: same ticker, recorded_at within 60s, clv_cents=+5.0
+    clv = {
+        "ticker": "KX1", "recorded_at": "2026-04-25T12:00:30+00:00",
+        "clv_cents": 5.0, "status": "settled", "side": "no",
+    }
+    # Slippage-adjusted CLV: paper-CLV (5.0) minus what slippage cost us (2.0) = 3.0
+    assert compute_slippage_adjusted_clv(micro, clv) == 3.0
+    # Cross-check: a favorable -2¢ slippage (got fill at 38¢) should boost CLV
+    micro_fav = dict(micro, slippage_cents=-2.0)
+    assert compute_slippage_adjusted_clv(micro_fav, clv) == 7.0
+    # Cross-check: null slippage → returns None (synchronous rejection case)
+    assert compute_slippage_adjusted_clv(dict(micro, slippage_cents=None), clv) is None
+    # Null clv_cents → returns None
+    assert compute_slippage_adjusted_clv(micro, dict(clv, clv_cents=None)) is None
