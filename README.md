@@ -6,7 +6,7 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 
 ---
 
-## Current Status (Apr 23, 2026)
+## Current Status (Apr 25, 2026)
 
 - **Mode:** `PAPER_MODE = True` — $500 simulated balance, full pipeline, zero live orders.
 - **Active strategies (`ACTIVE_STRATEGIES`):** `vig_stack_series`, `vig_stack_futures`, `sports_monotonicity_arb`, `sports_consistency_arb`. Plus `live_momentum` via the live-game watcher subsystem.
@@ -18,7 +18,8 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 - **Tennis disabled (Apr 20):** `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` blocks new live-momentum entries on tennis variants — they were 72% of momentum volume for −$6.20 net. Held positions still exit normally.
 - **STRATEGY_BUDGETS (Apr 16):** `vig_stack` 60%, `live_momentum` 20%, `arbs` 20% (fractions of equity). Prevents any one strategy from starving the others.
 - **Disabled (data-driven kills):** weather single-market (17% WR), series_game_edge (26% WR), all crypto (`CRYPTO_ENABLED=False`), economic indicators, parlay edge. See `config.py:ACTIVE_STRATEGIES` for the current truth.
-- **Apr 20 redemption plan: complete.** All five sessions shipped (Apr 20–Apr 23): settlement-pipeline rebuild, active-strategy retuning, ESPN fetch restoration, scheduler hardening + drift warnings, state hygiene (live_ticks rotation + clv filter + lock heartbeat). See [Recent Improvements](#recent-improvements-apr-2023) below.
+- **Apr 20 redemption plan: complete (Sessions 1–5).** Settlement-pipeline rebuild, active-strategy retuning, ESPN fetch restoration, scheduler hardening + drift warnings, state hygiene (live_ticks rotation + clv filter + lock heartbeat).
+- **Apr 24–25 closed-loop data collection: complete (Sessions 6–11).** Per-decision audit log, counterfactual CLV records, stratified sampling across (gate, opp_type), live-momentum edge proxy + 30s heartbeat lock-touch, per-position MFE/MAE, gate-context enrichment, fair-value calibration loop. The bot now self-instruments — every accept and every reject carries a gate fingerprint and downstream outcome attribution. Calibration data needs ~7 days to mature before reports become actionable. See [Recent Improvements](#recent-improvements-apr-2025) below.
 
 ---
 
@@ -38,7 +39,7 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 12. [Running the Bot](#running-the-bot)
 13. [Testing](#testing)
 14. [Dashboard UI](#dashboard-ui)
-15. [Recent Improvements (Apr 20–23)](#recent-improvements-apr-2023)
+15. [Recent Improvements (Apr 20–25)](#recent-improvements-apr-2025)
 
 ---
 
@@ -517,11 +518,13 @@ hustle-agent/
 │   ├── scanner_sports_arb.py # Monotonicity + consistency riskless arb scanners (ACTIVE)
 │   ├── math_engine.py       # All edge math with forward/backward self-checks
 │   ├── sizing.py            # Fractional Kelly criterion with uncertainty discount
-│   ├── executor.py          # Trade execution — safety pipeline, paper + live, STRATEGY_BUDGETS
-│   ├── tracker.py           # P&L tracking, market resolution, CLV settlement (idempotent)
-│   ├── clv.py               # Closing-Line Value per strategy
+│   ├── executor.py          # Trade execution — safety pipeline, paper + live, STRATEGY_BUDGETS, gate-context-rich reject logging (Apr 24 Session 10)
+│   ├── tracker.py           # P&L tracking, market resolution, CLV settlement (idempotent), per-position MFE/MAE ratchet (Apr 24 Session 9)
+│   ├── clv.py               # Closing-Line Value per strategy + counterfactual records for stratified rejected opportunities (Apr 24 Sessions 6/8); MFE/MAE propagation at settlement (Apr 24 Session 9); paired prediction emission (Apr 25 Session 11)
+│   ├── decisions.py         # Per-decision audit log — atomic JSONL append (Apr 24 Session 6)
+│   ├── calibration.py       # Per-prediction fair-value log + ±60s settlement matching (Apr 25 Session 11)
 │   │
-│   ├── live_watcher.py      # Per-game 10s-tick watcher — live_momentum + live arb
+│   ├── live_watcher.py      # Per-game 10s-tick watcher — live_momentum + live arb; wp_edge proxy + dampened decision logging (Apr 24 Session 7)
 │   ├── game_context.py      # Live game intelligence: momentum, win_prob, DQS, instincts
 │   ├── position_monitor.py  # Edge-recheck loop for open positions
 │   │
@@ -534,11 +537,16 @@ hustle-agent/
 │   ├── outcome_tracker.py   # Trade outcome logging for calibration
 │   ├── notifier.py          # Telegram formatting and HTTP sender
 │   ├── patterns.py          # Historical win rate per strategy type (dynamic confidence)
-│   ├── scheduler.py         # Cron events (morning briefing, nightly summary, balance reconcile, live_ticks rotation)
+│   ├── scheduler.py         # Cron events (morning briefing, nightly summary, balance reconcile, live_ticks/decisions/predictions rotation)
 │   ├── daily_log.py         # Rolling daily performance log
 │   ├── state_io.py          # Atomic JSON read/write (write-to-tmp-then-rename)
 │   ├── logger.py            # RotatingFileHandler — bot/logs/bot.log, 10 MB × 5
-│   └── tools/               # Diagnostic scripts (e.g. clv_by_strategy.py)
+│   └── tools/               # In-package diagnostic scripts (e.g. clv_by_strategy.py)
+│
+├── tools/                   # Top-level analysis tools (gitignored — local-only by convention)
+│   ├── cohort_report.py     # Per-(opp_type, gate) reject-rate + distance-from-threshold histograms (Apr 24 Sessions 6/10)
+│   ├── excursion_report.py  # Per-strategy median(MFE − exit) — flags exit-logic candidates (Apr 24 Session 9)
+│   └── calibration_report.py # Per-strategy mean-bias / Brier score / per-bucket hit-rate (Apr 25 Session 11)
 │
 ├── agent/
 │   ├── kalshi_client.py     # Kalshi REST API (used by bot for all API calls)
@@ -548,18 +556,22 @@ hustle-agent/
 │   └── ...
 │
 ├── bot/state/               # Runtime state (gitignored)
-│   ├── bot.lock             # PID lockfile; mtime advances each heartbeat (liveness signal, Apr 23 Session 5)
-│   ├── bot_state.json       # Scan count, session stats, heartbeat, last_ticks_rotation, total_pnl (Apr 23)
-│   ├── positions.json       # All open + resolved positions
+│   ├── bot.lock             # PID lockfile; touched every 30s by dedicated _heartbeat_loop task (Apr 24 Session 7); per-scan touch retained as belt-and-suspenders
+│   ├── bot_state.json       # Scan count, session stats, heartbeat, last_*_rotation flags, total_pnl
+│   ├── positions.json       # All open + resolved positions; carries mfe_cents/mae_cents/mfe_at/mae_at/ticks_observed (Apr 24 Session 9)
 │   ├── paper_trades.json    # Paper RESOLUTION log — balance reconstructed from this. Ground truth
 │   ├── trade_history.json   # ORDER log — every execute_trade/execute_hedge appends here. Distinct from paper_trades
 │   ├── pending.json         # Queued opportunities with expiry
-│   ├── clv.json             # CLV records per trade. _load() filters to active strategies (Apr 23 Session 5)
+│   ├── clv.json             # CLV records per trade. _load() filters to active strategies (Apr 23 Session 5). Also stores counterfactual records (status=counterfactual_open|counterfactual_settled, trade_id=CF-{scan_id}-{ticker}) for stratified rejected opportunities (Apr 24 Sessions 6/8). Settled records carry MFE/MAE (Apr 24 Session 9)
+│   ├── decisions.jsonl      # Per-decision audit log (Apr 24 Session 6). Every scan-time accept and reject with {ts, ticker, opp_type, edge, gates, decision, reason, extra}. extra carries gate-specific distance-from-threshold context (Apr 24 Session 10). Daily rotation to archive/
+│   ├── predictions.jsonl    # Per-prediction fair-value vs. actual log (Apr 25 Session 11). One row per opp evaluated (real trade or CF). Brier-scored by tools/calibration_report.py
 │   ├── strategy_audit.json  # Per-strategy status + settlement_log (idempotent, Apr 18; rebuilt Apr 20 Session 1)
 │   ├── live_journal.json    # Live-watcher events: scan_found, bet, exit, session_end
 │   ├── live_ticks.jsonl     # Enriched per-tick log: price, wp, momentum, DQS, game_state, espn_scores
-│   ├── archive/             # Daily gzipped tick archives (Apr 23 Session 5)
-│   │   └── live_ticks-YYYY-MM-DD.jsonl.gz
+│   ├── archive/             # Daily gzipped JSONL archives — created by scheduler at midnight ET
+│   │   ├── live_ticks-YYYY-MM-DD.jsonl.gz   # (Apr 23 Session 5)
+│   │   ├── decisions-YYYY-MM-DD.jsonl.gz    # (Apr 24 Session 6)
+│   │   └── predictions-YYYY-MM-DD.jsonl.gz  # (Apr 25 Session 11)
 │   ├── patterns.json        # Historical win rate per strategy type (dynamic confidence)
 │   ├── outcomes.db          # SQLite: alert → outcome log for calibration
 │   ├── elo_ratings.json     # Sport ELO ratings
@@ -643,7 +655,7 @@ The Telegram `STOP` command is the same path plus an `unload` against launchd; `
 
 ```bash
 python3 -m pytest tests/ -q
-# 507 tests collected across 14 test files (Apr 23: +19 scheduler tests, +5 live_ticks rotation)
+# 616 tests collected across 20 test files (Apr 24–25: +109 tests across Sessions 6–11)
 # Current state: ~9 known pre-existing failures (5 stale, 2 watchdog harness, 2 misc), rest pass or are skipped behind live-call guards
 ```
 
@@ -663,8 +675,9 @@ All tests mock external APIs — no real Kalshi calls, no CoinGecko, no sportsbo
 - **Scheduler (Apr 23 — `test_scheduler.py`, 19 tests):** morning briefing fire-at-8am-or-catch-up, nightly summary midnight + missed-day catch-up, balance reconcile at 21:00, `total_pnl` persistence, `live_ticks.jsonl` midnight rotation + collision-suffix + skip-if-too-small
 - **Live watcher:** watcher start/stop, tick-level dip + DQS + variance_quality_gate (Tier 2.4), conviction-entry gating, exit paths (take-profit, trail, stop, near-settle), sport-instinct avoid_entry guards, `MOMENTUM_DISABLED_SPORTS` `can_enter` gate (Apr 20)
 - **Sizing:** Kelly formula correctness, fractional cap, uncertainty discount, dollar floor/ceiling
-- **CLV:** entry recording, settlement computation (YES and NO sides), report generation, active-strategy filter at `_load` (Apr 23)
+- **CLV:** entry recording, settlement computation (YES and NO sides), report generation, active-strategy filter at `_load` (Apr 23), counterfactual schema + idempotency + stratified selection (Apr 24 Sessions 6/8), MFE/MAE propagation at settlement (Apr 24 Session 9)
 - **Parlay:** title parsing for multi-leg contracts, edge calculation with correlation discount
+- **Closed-loop instrumentation (Apr 24–25 — Sessions 6–11):** `test_decisions.py` (atomic JSONL append under contention, schema integrity, dampener), `test_tracker.py` (10 MFE/MAE cases — side-aware ratchet, lazy-init, monotonic, settlement propagation), `test_cohort_report.py` (distance-from-threshold histogram math), `test_calibration.py` (31 cases including Brier handcraft, ±60s settlement matching window, idempotency), `test_main.py` (heartbeat lock-touch task), `test_scheduler.py` extensions (decisions + predictions rotation)
 - **Regression guards:** `test_bot_improvements.py` + `test_data_driven_fixes.py` lock in the specific fixes from the Apr 14/16/18/20 audits (edge cap, cooldown, UW-exit removal, SCORE-FLIP momentum gate, Filter F, tennis disable, etc.) so they cannot silently regress
 
 ---
@@ -711,9 +724,13 @@ A few decisions that shaped the system:
 
 ---
 
-## Recent Improvements (Apr 20–23)
+## Recent Improvements (Apr 20–25)
 
-The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions, all shipped.
+Two arcs.
+
+**Apr 20–23 — Redemption (Sessions 1–5).** The Apr 20 state audit surfaced 12 issues across real bugs, tuning opportunities, and dead weight. Bundled into 5 focused sessions, all shipped.
+
+**Apr 24–25 — Closed-loop data collection (Sessions 6–11).** With the bot stable, the missing piece for retuning was outcome attribution: the trade log told us *what fired* but not *what almost fired and was killed by which gate, and what would have happened if we'd taken it anyway*. Sessions 6–11 instrument the bot end-to-end so gate calibration becomes a regression problem instead of folklore. All shipped; calibration data needs ~7 days to mature before reports become actionable.
 
 ### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)
 58 of 93 resolved paper trades (`exited_early`) were silently missing from `strategy_audit.settlement_log` because `executor._paper_record_exit` never called `_log_settlements_to_audit` or `patterns.record_resolution`. Fixed by extracting `tracker.log_settlement(trade)` per-trade helper, adding `patterns.record_resolution`, wiring both into `_paper_record_exit`, and rebuilding the audit via `tools/rebuild_strategy_audit.py`. Post-rebuild: paper / settlement_log / rollup all reconcile to 93 trades. Backup at `bot/state/strategy_audit.json.bak-20260421`.
@@ -739,3 +756,53 @@ Two dollar leaks:
 - CLAUDE.md state-files table now distinguishes `trade_history.json` (order log) from `paper_trades.json` (paper resolution log).
 
 **Result**: `bot/state/` from 117MB → 5.4MB after one-shot + rotation. Zero trading-logic changes; all five sessions are safety/observability/cleanup.
+
+### ☑ Session 6 — Closed-loop data collection foundation (Apr 24)
+The trade log answered "what fired"; nothing answered "what almost fired and what would have happened." Three new pieces:
+- `bot/decisions.py` (new, ~120 lines) — `log_decision(ticker, opp_type, edge, gates, decision, reason, extra)` atomically appends to `bot/state/decisions.jsonl`. Single write site, threading lock, never raises.
+- `bot/clv.py:record_counterfactual_skip` — top rejected opportunities per scan get a CLV record (`status=counterfactual_open`, `trade_id=CF-{scan_id}-{ticker}`). The existing settlement poller fills `closing_yes_price` on them naturally.
+- Instrumented every scanner reject (`scanner.py` vig_stack gates) and the executor's 7 position-limit + 3 verify-edge gates with `log_decision` calls. Live-momentum gates use a dampener (only emit on `(decision, reason)` change) so a flat-market ticker doesn't spam 50k records/day.
+- Daily rotation of `decisions.jsonl` to `archive/decisions-YYYY-MM-DD.jsonl.gz` mirrors the Session-5 live_ticks pattern.
+- New `tools/cohort_report.py` (local-only) joins decisions to CLV CF records to compute "edge left on table" per gate.
+- Follow-up the same day: filter CF entry-price < 3¢ (relative-edge math `(fair-price)/price` blows up at 1-2¢ entries, crowding out legitimate higher-quality rejects in top-K selection).
+
+### ☑ Session 7 — Decision-log observability gaps (Apr 24)
+First 24h of `decisions.jsonl` surfaced two gaps:
+- **Live-momentum decisions logged `edge=null`** because `_tick_momentum` has no scalar edge concept. Wired `wp_edge` (already computed each tick for `live_ticks.jsonl`) into `_log_decision_dampened` at all 5 reject sites. Added `mom_ctx={wp, kalshi_price, dip_cents, dqs}` to `extra` so the cohort report can join on something useful.
+- **`bot.lock` mtime advanced only at scan boundaries** (2-30 min), making healthy idle bots look wedged per Gotcha #6's 15-min stale-mtime rule. Added a dedicated `_heartbeat_loop` task on `GlintBot` that touches `LOCK_FILE` every 30s. Per-scan touch in `_main_loop` retained as belt-and-suspenders. Worst-case stale gap drops 30 min → ≤60s.
+
+### ☑ Session 8 — Stratified CF sampling (Apr 24)
+First 24h of CF data showed 29/29 records attributed to `non_stable_below_weather_floor` (real 4-20¢ edges) while the gates we most need to retune had **zero** outcome attribution: `vig_stack_series forecast_in_bucket` (143 rejects, 0 CFs), `vig_stack_futures edge_below_threshold` (130 rejects, 0 CFs), `vig_stack_series edge_below_threshold` (114 rejects, 0 CFs). The Session-6 "top-5 by global edge" rule starved low-edge-by-design gates. Replaced with two-stage stratified sampling in `bot/scanner.py:_stratified_cf_rejects`:
+1. **Stratified core** — 1 highest-edge reject per `(opp_type, skip_reason)` group
+2. **Budget fill** — highest-edge leftovers up to total_budget=10
+3. **Dedup by ticker** (higher edge wins); hard cap 15/scan
+
+Bonus fix: `forecast_in_bucket` rejects were logged to `decisions.jsonl` but never appended to `rejected_opps` because fair-value computation ran *after* the short-circuit. Hoisted the fair-value block above the forecast check so forecast-rejected contracts now enter the CF sample with a real edge.
+
+Budget math: ≤480/day idle, ≤7200/day active. Well under the ≤900/day idle, ≤13k/day active envelope. **Part 2:** `run_bot.sh` hardcoded a Python 3.9 binary path but `bot/daily_log.py` uses PEP 604 union syntax requiring Python 3.10+; bumped to Python 3.14 framework path and re-enabled the user-domain launchd service.
+
+### ☑ Session 9 — Per-position MFE/MAE tracking (Apr 24)
+`clv.json` recorded entry, settlement, and final CLV but nothing about what the price did *between* entry and settlement. Two trades can have identical CLV but very different lived experiences — one drifted straight to close, the other spiked +30¢ then unwound. The first vindicates conviction sizing; the second is a missed-exit signal.
+- `bot/tracker.py:update_positions` ratchets `mfe_cents`/`mae_cents`/`mfe_at`/`mae_at`/`ticks_observed` on every price observation. Side-aware via `current_bid` (yes_bid for YES, no_bid for NO). Lazy-init on first observation so pre-Session-9 open positions upgrade cleanly.
+- `bot/clv.py:check_clv_settlements` builds `order_id → position` lookup and copies the five excursion fields into real-trade settlement records. Counterfactuals untouched.
+- New `tools/excursion_report.py` (local) groups settled CLV by `opp_type` and flags `median(MFE − exit) > 5¢` as exit-logic candidates.
+- 10 new tests covering init, side-aware ratchet, monotonicity, timestamp semantics, settlement propagation.
+
+### ☑ Session 10 — Gate-context enrichment in `extra` (Apr 24)
+`decisions.jsonl` recorded *which* gate fired but not *by how much*. A gate that rejects "just barely" 80% of the time is a tuning candidate; a gate that rejects "by a mile" 80% of the time is doing its job. Backfilled `extra` across every reject site with gate-relevant diagnostics:
+- `forecast_in_bucket` → `forecast_temp`, `bucket_lo`, `bucket_hi`, `distance` (rounded cents)
+- `edge_below_threshold` → `edge` (actual), `vig`, `time_to_settle_hr`, `min_edge` threshold
+- `low_liquidity` → `volume`, `open_interest`, `min_volume`, `min_open_interest`
+- Executor: refactored `_log_position_reject`/`_log_edge_reject` helpers to accept an `extra` kwarg, then enriched all 7 position-limit gates (position_cap, duplicate, same_game, cooldown, daily_loss, strategy_budget, total_exposure) plus edge-verify and self-check gates with their respective context.
+- Updated `tools/cohort_report.py` to render distance-from-threshold histograms (replacing the binary reject-rate).
+- Proper TDD: 8 commits, failing tests first, then implementation.
+
+### ☑ Session 11 — Fair-value calibration loop (Apr 25)
+Every edge calc is `(fair_value - market_price) / market_price` — the whole bot is one big bet on `fair_value` being right, and CLV alone can't catch a scanner that consistently overestimates fair value (CLV measures execution, not prediction).
+- New `bot/calibration.py` (171 lines) mirrors the `decisions.py` pattern: `record_prediction()` appends to `bot/state/predictions.jsonl` on every CLV entry (real trade or CF). Atomic JSONL append, threading lock, never raises. Idempotent on `(scan_id, ticker)`. Skips rows where `predicted_fair_cents` is None/0 (live_momentum has no usable fair value — Session 7 cross-reference).
+- `bot/clv.py:check_clv_settlements` calls `update_prediction_close()` to fill `closing_yes_price` on matching prediction rows via ticker + recorded_at ±60s window (handles the small lag between `record_clv_entry` and `record_prediction`).
+- Daily rotation of `predictions.jsonl` to `archive/predictions-YYYY-MM-DD.jsonl.gz` mirrors the existing patterns.
+- New `tools/calibration_report.py` (local) emits per-strategy mean-bias / Brier score / per-bucket hit-rate. After 7 days of settlements, `vig_stack_series` predicted bucket [80,90¢) resolving <70% YES is a flag for fair-value retuning.
+- 31 new tests including atomic append under contention, idempotency, settlement matching window, missing-archive rotation, and Brier handcraft (5 records → 0.082 by hand).
+
+**Result**: the bot is now self-instrumented end-to-end. Every accept and every reject carries a gate fingerprint with distance-from-threshold context. Every prediction (acted-on or counterfactual) is paired with its eventual closing price. Every position carries excursion data. Three local-only analysis tools (`cohort_report`, `excursion_report`, `calibration_report`) join the streams. Once 7 days of data accumulate, gate retuning becomes a regression problem instead of folklore.
