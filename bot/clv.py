@@ -125,6 +125,21 @@ def record_counterfactual_skip(opp: dict, gate: str, scan_id: str) -> None:
     })
     _save(records)
 
+    # Session 11: pair every CF with a prediction record so calibration_report
+    # can compute Brier + per-bucket hit-rate over the rejected distribution.
+    try:
+        from bot.calibration import record_prediction
+        record_prediction(
+            ticker=opp.get("ticker", ""),
+            opp_type=opp.get("opp_type") or opp.get("type") or "vig_stack_series",
+            predicted_fair_cents=float(fair) if fair else None,
+            market_price_cents=entry_price,
+            scan_id=scan_id,
+            recorded_at=records[-1]["recorded_at"],
+        )
+    except Exception:
+        logger.exception("calibration record_prediction failed (non-fatal CF)")
+
 
 def record_clv_entry(
     ticker: str,
@@ -136,6 +151,7 @@ def record_clv_entry(
     contracts: int,
     trade_id: str,
     paper: bool = False,
+    scan_id: str | None = None,
 ):
     """
     Record a new CLV entry at trade time.
@@ -150,6 +166,8 @@ def record_clv_entry(
         contracts: Number of contracts
         trade_id: Order ID or paper trade ID for cross-reference
         paper: True if this was a paper trade
+        scan_id: Session 11 — scanner-emitted scan ID for prediction
+            idempotency. Falls back to f"trade-{trade_id}" when missing.
     """
     records = _load()
     records.append({
@@ -174,6 +192,21 @@ def record_clv_entry(
         f"CLV recorded: {ticker} | {side.upper()} @ {entry_price_cents}¢ | "
         f"fair={fair_value_cents:.1f}¢ | edge={edge_at_trade:.1%} | {'PAPER' if paper else 'REAL'}"
     )
+
+    # Session 11: pair every real trade with a prediction record so
+    # calibration_report can join predicted fair vs. closing yes-price.
+    try:
+        from bot.calibration import record_prediction
+        record_prediction(
+            ticker=ticker,
+            opp_type=opp_type,
+            predicted_fair_cents=fair_value_cents,
+            market_price_cents=entry_price_cents,
+            scan_id=scan_id or f"trade-{trade_id}",
+            recorded_at=records[-1]["recorded_at"],
+        )
+    except Exception:
+        logger.exception("calibration record_prediction failed (non-fatal)")
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +305,19 @@ def check_clv_settlements() -> list[dict]:
         rec["clv_relative"] = round(clv_relative, 4)
         rec["settled_at"] = datetime.now(timezone.utc).isoformat()
         changed = True
+
+        # Session 11: propagate closing price to predictions.jsonl rows that
+        # match this clv record by ticker + recorded_at ±60s. Fires for both
+        # real trades and counterfactuals (both sides emit predictions).
+        try:
+            from bot.calibration import update_prediction_close
+            update_prediction_close(
+                ticker=ticker,
+                recorded_at=rec.get("recorded_at", ""),
+                closing_yes_price=closing_yes,
+            )
+        except Exception:
+            logger.exception("calibration update_prediction_close failed (non-fatal)")
 
         if not is_cf:
             pos = _positions_by_order.get(rec.get("trade_id"))

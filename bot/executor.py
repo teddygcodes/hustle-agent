@@ -1004,6 +1004,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             contracts=filled or contracts,
             trade_id=order_result.get("order_id", ""),
             paper=PAPER_MODE,
+            scan_id=opportunity.get("scan_id"),
         )
     except Exception as e:
         logger.warning(f"CLV recording failed (non-fatal): {e}")

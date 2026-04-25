@@ -296,6 +296,8 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | `archive/live_ticks-YYYY-MM-DD.jsonl.gz` | Daily gzipped tick archives. Created by `scheduler._rotate_live_ticks()` at midnight ET (Apr 23, Session 5). |
 | `decisions.jsonl` | **Per-decision audit log (Apr 24, Session 6).** Every scan-time accept/reject from scanner + executor + live_watcher with a gate fingerprint. Read by `tools/cohort_report.py`. Daily rotation to `archive/`. |
 | `archive/decisions-YYYY-MM-DD.jsonl.gz` | Daily gzipped decision archives. Created by `scheduler._rotate_decisions_log()` at midnight ET (Apr 24, Session 6). |
+| `predictions.jsonl` | **Per-prediction fair-value vs. actual log (Apr 25, Session 11).** One row per opp evaluated (acted-on or counterfactual). Settlement poller fills `closing_yes_price`. Read by `tools/calibration_report.py`. Daily rotation to `archive/`. |
+| `archive/predictions-YYYY-MM-DD.jsonl.gz` | Daily gzipped prediction archives. Created by `scheduler._rotate_predictions_log()` at midnight ET (Apr 25, Session 11). |
 | `pending.json` | Queue of opportunities waiting for GO/SKIP. Max `PENDING_MAX = 20`. |
 | `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. |
 | `live_ticks.jsonl` | Append-only **enriched** tick log: price, leader, wp, momentum, lead_trend, completion, wp_edge, bid, opp_bid, volatility, espn_scores, game_state. Feeds ANALYZE. |
@@ -682,24 +684,26 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 
 ---
 
-### ☐ Session 11 — Fair-value calibration loop (Apr 24, planned)
+### ☑ Session 11 — Fair-value calibration loop (Apr 25, done)
 
-**Problem.** Every edge calc is `(fair_value - market_price) / market_price`. The whole bot is one big bet on `fair_value` being right. We have no record of whether our `fair_value_cents` predictions actually correlate with closing prices. A scanner that consistently overestimates fair value by 5¢ on `vig_stack_series` is hemorrhaging money on every trade — and we'd never see it from CLV alone (CLV measures execution, not prediction).
+**Problem.** Every edge calc is `(fair_value - market_price) / market_price`. The whole bot is one big bet on `fair_value` being right, but pre-Session-11 we had no record of whether predictions correlated with closing prices. A scanner that consistently overestimates fair value by 5¢ on `vig_stack_series` is hemorrhaging money on every trade — and CLV alone won't catch it (CLV measures execution, not prediction).
 
-**Plan.**
-- New module `bot/calibration.py`: `record_prediction(ticker, opp_type, predicted_fair_cents, recorded_at)` writes to `bot/state/predictions.jsonl`. Hook into `record_clv_entry` AND `record_counterfactual_skip` so every prediction (acted-on or not) is captured.
-- Settlement poller (extend `clv.check_clv_settlements`) also writes the actual close → `predictions.jsonl` record gets `closing_yes_price` filled.
-- New `tools/calibration_report.py`:
-  - Per-strategy: mean(predicted - actual), variance, calibration plot (predicted bucket vs actual hit-rate).
-  - Brier score per strategy: lower is better-calibrated.
-  - Flag any strategy where predictions consistently land on the wrong side of 50% (sign error).
+**Done.**
+- `bot/calibration.py` (new) — `record_prediction(ticker, opp_type, predicted_fair_cents, market_price_cents, scan_id, recorded_at=None)` and `update_prediction_close(ticker, recorded_at, closing_yes_price)`. Module-level `threading.Lock`, atomic JSONL append, never-raises wrapper. Idempotent on `(scan_id, ticker)` via cheap substring scan. Skips silently when `predicted_fair_cents` is None/0 (live_momentum has no usable fair value — Session 7 limitation).
+- `bot/clv.py` — `record_clv_entry()` gained optional `scan_id`; both it and `record_counterfactual_skip` now call `record_prediction` after `_save`. `check_clv_settlements` calls `update_prediction_close(ticker, recorded_at, closing_yes)` for every newly-settled record (real + CF).
+- `bot/executor.py` — `record_clv_entry()` call now passes `scan_id=opportunity.get("scan_id")`. (Currently None since scanner does not stamp scan_id on opps; the `scan_id or f"trade-{trade_id}"` fallback inside `record_clv_entry` produces a unique idempotency key per real trade.)
+- `bot/scheduler.py` — added `_rotate_predictions_log()` (2-line wrapper around `_rotate_jsonl`) + parallel midnight-ET rotation gate using `last_predictions_rotation` flag in `bot_state.json`. Reuses Session-6 `_rotate_jsonl` helper as-is.
+- `tools/calibration_report.py` (new, gitignored) — reads `predictions.jsonl` + last 7 daily archives, groups by `opp_type`, emits per-strategy mean-bias / stdev / per-bucket hit-rate / Brier score Markdown. Flags bucket [80,90) <70% YES and buckets [0,10)/[10,20) >30% YES (sign-error / systematic miscalibration).
+- `tests/test_calibration.py` (new) — 25 tests: schema, atomic append (20 threads × 10 writes), never-raises, idempotency on (scan_id, ticker), settlement matching ±60s window, missing-file/bad-date graceful handling, Brier handcraft (5 records → 0.082), bucket boundary semantics.
+- `tests/test_scheduler.py::TestPredictionsRotation` — 6 tests mirroring `TestDecisionsRotation`: midnight-fire, <1KB skip, no-refire-same-day, catch-up after missed day, missing-archive-dir auto-create, collision-suffix.
+- `tests/conftest.py` — added `_isolate_predictions_log` autouse fixture mirroring `_isolate_decisions_log` to keep test runs from polluting the live `predictions.jsonl`.
 
-**Out of scope.** Auto-retuning of fair-value formulas (Session 12+); pre-Session-11 historical predictions (settlement records have entry but not the prediction-at-time-of-decision in a structured way).
+**Out of scope.** Auto-retuning of fair-value formulas (Session 12+); pre-Session-11 historical predictions (settlement records have entry but not the prediction-at-time-of-decision in a structured way); live_momentum prediction coverage (needs Session 7 follow-up to expose a `wp_edge`-derived fair value).
 
 **Verify.**
-1. After first scan: `bot/state/predictions.jsonl` has one row per opp the scanner evaluated (accepted + CF). Schema: `{ts, ticker, opp_type, predicted_fair_cents, market_price_cents, closing_yes_price: null}`.
+1. After first scan: `bot/state/predictions.jsonl` has one row per opp the scanner evaluated (accepted + CF). Schema: `{ts, scan_id, ticker, opp_type, predicted_fair_cents, market_price_cents, closing_yes_price: null}`.
 2. After 7 days of settlements: `python3 tools/calibration_report.py` produces per-strategy calibration table. Brier score reported.
-3. Sanity check: `vig_stack_series` predicted bucket [80,90] should resolve YES ~85% of the time. If it resolves <70% or >95%, fair-value formula needs a tuning pass.
+3. Sanity check: `vig_stack_series` predicted bucket [80,90) should resolve YES ~85% of the time. If it resolves <70% or >95%, fair-value formula needs a tuning pass.
 
 ---
 
@@ -732,7 +736,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Expect:** `counterfactual_open` records accumulating between settlements; `counterfactual_settled` records growing as markets resolve; `paper`/`settled` records for actual trades. opp_type spread matches `ACTIVE_STRATEGIES`.
 - **Pollution check:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); bad=[x for x in r if (x.get('entry_price_cents') or 100) < 3 or x.get('ticker','').startswith('KXTEST')]; print(f'{len(bad)} polluted records — should be 0')"` — Apr 24 follow-up gated CF entry < 3¢; KXTEST records are debug residue. Both should be 0.
 - **CF-gate coverage:** `python3 -c "import json; from collections import Counter; r=json.load(open('bot/state/clv.json')); cf=[x for x in r if x.get('status','').startswith('counterfactual')]; print(Counter(x.get('skipped_by_gate') for x in cf))"` — pre-Session-8 this is dominated by 1-2 gates (top-K-by-edge selection bias). Post-Session-8, every gate from `decisions.jsonl` rejects also appears here.
-- **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling), Session 11 (no fair-value-vs-actual calibration).
+- **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling).
 
 ### 3. `bot/state/bot_state.json` — main loop heartbeat
 - **Inspect:** `python3 -c "import json, datetime as dt; s=json.load(open('bot/state/bot_state.json')); hb=dt.datetime.fromisoformat(s['last_heartbeat']); age=(dt.datetime.now(dt.timezone.utc)-hb).total_seconds(); print(f'heartbeat age: {age:.0f}s (scans_today={s[\"scans_today\"]}, last_scan_at={s.get(\"last_scan_at\")})')"`
@@ -767,15 +771,24 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Error scan:** `grep -E 'ERROR|CRITICAL|Traceback' bot/logs/bot.log | tail -20` — any repeated exception is investigable. One-offs from API timeouts are normal.
 - **Scan cadence check:** `grep 'SCAN CYCLE' bot/logs/bot.log | tail -10 | awk '{print $1, $2}'` — gaps should be ≤ scan_interval + 60s. Larger gaps = wedge or DarkWake event (Apr 24 fix should prevent these).
 
+### 9. `bot/state/predictions.jsonl` — per-prediction fair-value log (Session 11)
+- **Inspect:** `wc -l bot/state/predictions.jsonl && tail -3 bot/state/predictions.jsonl | jq .`
+- **Expect:** ≥1 row per opp the scanner evaluates (real trades + stratified CFs). Schema: `{ts, scan_id, ticker, opp_type, predicted_fair_cents, market_price_cents, closing_yes_price}`. `closing_yes_price=null` until settlement.
+- **Settlement coverage:** `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/predictions.jsonl')]; n=len(r); s=sum(1 for x in r if x.get('closing_yes_price') is not None); print(f'{s}/{n} settled ({100*s/n if n else 0:.0f}%)')"` — 0% same-day, climbs to ~100% within 7 days for resolved markets.
+- **Run report:** `python3 tools/calibration_report.py` — needs ≥7 days of settled data for stable Brier scores.
+- **Known gaps:** live_momentum predictions skipped (`predicted_fair_cents=None` is silently dropped). Pre-Session-11 trades have no prediction record. Predictions count ≈ count of `clv.json` records where `status in (open, counterfactual_open)` minus live_momentum CLV rows.
+
 ### Cross-cutting checks
 - **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.
 - **Active strategies ↔ records.** Every strategy in `ACTIVE_STRATEGIES` ([bot/config.py:578](hustle-agent/bot/config.py:578)) should appear in `decisions.jsonl` within 1 hour. Missing = scanner not loading that strategy.
 - **No silent loss.** `clv.json` records with `closing_yes_price=null` AND `recorded_at > 7 days ago` mean the settlement poller is stuck on those tickers. Investigate per-ticker.
 
 ### Known caveats and active gaps
-- Sessions 7-11 are not yet shipped — instrument data has known holes per their respective Problem statements above.
+- Sessions 7–11 all shipped (Apr 24–25). The data-quality stack is now closed-loop: decisions → CFs → predictions → settlements → reports.
+- Calibration data needs ~7 days of settlements before `tools/calibration_report.py` Brier scores stabilize. Pre-Session-11 trades have no prediction record.
+- `live_momentum` predictions are skipped (`predicted_fair_cents=None`) because Session 7 left a known coverage gap there — live momentum has no model-predicted fair value to log against. Surfaces as a hole in `predictions.jsonl` for that opp_type only.
 - Anything before 2026-04-24 in `clv.json` may have polluted records (KXTEST, entry<3¢ CFs) that were cleaned but pre-cleanup counts in archives differ.
-- `decisions.jsonl` started fresh on Session-6 deploy date — historical scans before that are not reconstructible.
+- `decisions.jsonl` started fresh on Session-6 deploy date and `predictions.jsonl` on Session-11 deploy date — historical scans before each is not reconstructible.
 
 ---
 

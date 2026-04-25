@@ -398,6 +398,113 @@ class TestDecisionsRotation:
         assert (archive_dir / "decisions-2026-04-24-2.jsonl.gz").exists()
 
 
+class TestPredictionsRotation:
+    """Session 11: nightly predictions.jsonl → state/archive/*.jsonl.gz rotation."""
+
+    @pytest.fixture
+    def tmp_predictions(self, tmp_path, monkeypatch):
+        """Repoint PREDICTIONS_FILE to a tmp directory."""
+        pred = tmp_path / "predictions.jsonl"
+        from bot import calibration
+        monkeypatch.setattr(calibration, "PREDICTIONS_FILE", pred)
+        return pred
+
+    def _seed(self, path, count=200):
+        # Each line ≥ 50 bytes → comfortably above the 1KB rotation floor.
+        path.write_text("\n".join(
+            json.dumps({"ts": "x", "scan_id": f"S{i}", "ticker": f"T{i}",
+                        "predicted_fair_cents": 80.0, "market_price_cents": 70,
+                        "closing_yes_price": None})
+            for i in range(count)
+        ) + "\n")
+
+    def test_fires_at_midnight_and_archives_file(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_predictions)
+        original_size = tmp_predictions.stat().st_size
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert not tmp_predictions.exists()
+        archive_dir = tmp_predictions.parent / "archive"
+        gz = archive_dir / "predictions-2026-04-25.jsonl.gz"
+        assert gz.exists()
+        assert gz.stat().st_size < original_size
+
+        state = _read_state(tmp_state)
+        assert state["last_predictions_rotation"] == "2026-04-25"
+
+    def test_skips_if_file_too_small(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        tmp_predictions.write_text('{"x":1}\n')
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_predictions.exists()
+        assert (tmp_predictions.parent / "archive").exists() is False
+        assert _read_state(tmp_state)["last_predictions_rotation"] == "2026-04-25"
+
+    def test_no_refire_same_day(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_predictions)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 30, tzinfo=ET))
+        _set_state(tmp_state, last_predictions_rotation="2026-04-25")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_predictions.exists()
+        assert not (tmp_predictions.parent / "archive").exists()
+
+    def test_catch_up_if_missed_a_day(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        """If last_predictions_rotation is older than yesterday, rotate at any hour."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_predictions)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 14, 0, tzinfo=ET))
+        _set_state(tmp_state, last_predictions_rotation="2026-04-19")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        gz = tmp_predictions.parent / "archive" / "predictions-2026-04-25.jsonl.gz"
+        assert gz.exists()
+
+    def test_handles_missing_archive_dir(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        """archive/ doesn't exist before rotation — _rotate_jsonl creates it."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_predictions)
+        # Sanity: archive dir should not exist yet
+        assert not (tmp_predictions.parent / "archive").exists()
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        archive_dir = tmp_predictions.parent / "archive"
+        assert archive_dir.exists()
+        assert (archive_dir / "predictions-2026-04-25.jsonl.gz").exists()
+
+    def test_collision_appends_suffix(self, tmp_state, tmp_predictions, mock_bot, monkeypatch):
+        """If today's archive already exists, dest gets a -2 suffix."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_predictions)
+        archive_dir = tmp_predictions.parent / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "predictions-2026-04-25.jsonl.gz").write_bytes(b"prior")
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert (archive_dir / "predictions-2026-04-25.jsonl.gz").read_bytes() == b"prior"
+        assert (archive_dir / "predictions-2026-04-25-2.jsonl.gz").exists()
+
+
 class TestTotalPnlPersist:
     """After nightly fires, bot_state['total_pnl'] reflects compute_daily_summary."""
 

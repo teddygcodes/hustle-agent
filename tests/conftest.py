@@ -273,6 +273,23 @@ def _isolate_decisions_log(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Auto-isolate calibration prediction log. Session 11 (Apr 25) added
+# record_prediction / update_prediction_close calls inside clv.record_clv_entry,
+# record_counterfactual_skip, and check_clv_settlements — without isolation,
+# any test exercising clv would write to the live predictions.jsonl.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_predictions_log(tmp_path_factory, monkeypatch):
+    try:
+        from bot import calibration as _calibration
+    except Exception:
+        return
+    sandbox = tmp_path_factory.mktemp("calibration_isolation") / "predictions.jsonl"
+    monkeypatch.setattr(_calibration, "PREDICTIONS_FILE", sandbox)
+
+
+# ---------------------------------------------------------------------------
 # Filesystem isolation fixture
 # ---------------------------------------------------------------------------
 

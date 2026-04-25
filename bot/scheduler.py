@@ -142,6 +142,22 @@ async def check_scheduled_events(bot) -> None:
         except Exception:
             logger.exception("Decisions rotation failed")
 
+    # --- Nightly predictions.jsonl rotation (Session 11, midnight ET, catch-up) ---
+    last_pred_rotation = state.get("last_predictions_rotation", "")
+    should_rotate_pred = (
+        (current_hour == 0 and last_pred_rotation != today_str)
+        or (last_pred_rotation and last_pred_rotation < yesterday_str)
+    )
+    if should_rotate_pred:
+        logger.info("Rotating predictions.jsonl...")
+        try:
+            _rotate_predictions_log(today_str)
+            state = _load_bot_state()
+            state["last_predictions_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Predictions rotation failed")
+
 
 def _rotate_jsonl(source: Path, prefix: str, today_str: str) -> None:
     """Move source.jsonl → source.parent/archive/<prefix>-YYYY-MM-DD.jsonl.gz.
@@ -190,6 +206,11 @@ def _rotate_live_ticks(today_str: str) -> None:
 def _rotate_decisions_log(today_str: str) -> None:
     from bot.decisions import DECISIONS_FILE
     _rotate_jsonl(DECISIONS_FILE, "decisions", today_str)
+
+
+def _rotate_predictions_log(today_str: str) -> None:
+    from bot.calibration import PREDICTIONS_FILE
+    _rotate_jsonl(PREDICTIONS_FILE, "predictions", today_str)
 
 
 async def _send_morning_briefing(bot):
