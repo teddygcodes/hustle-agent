@@ -44,6 +44,41 @@ def _active_strategies() -> set[str]:
     return set(ACTIVE_STRATEGIES) | {"live_momentum"}
 
 
+def compute_clv_cents(
+    side: str,
+    entry_price_cents: int,
+    closing_yes_price: float,
+) -> tuple[float, float]:
+    """Compute closing-line value in cents + relative for one trade.
+
+    Pure function, no I/O. Single source of truth for CLV math — used by
+    bot.clv.check_clv_settlements (live settler) and tools/backtest.py
+    (Session 13b offline back-tester). Back-tester divergence here means
+    the back-tester is wrong, not live.
+
+    Args:
+        side: "yes" or "no" — direction of the trade.
+        entry_price_cents: Integer cents (1-99) paid at entry.
+        closing_yes_price: Final YES price in cents (0.0-100.0). 100 if YES
+            won, 0 if NO won at settlement; mid-price for partial updates.
+
+    Returns:
+        (clv_cents, clv_relative): rounded to 2dp and 4dp respectively to
+        match legacy storage format. clv_relative is 0.0 when entry <= 0
+        (defensive — pre-Session-6 records may have slipped through).
+    """
+    if side == "yes":
+        clv_cents = closing_yes_price - entry_price_cents
+    else:
+        # NO trade: implicit YES price = 100 - entry. Positive CLV when YES
+        # moved AWAY from us (down) — good for NO holder.
+        our_implied_yes = 100 - entry_price_cents
+        clv_cents = our_implied_yes - closing_yes_price
+
+    clv_relative = clv_cents / entry_price_cents if entry_price_cents > 0 else 0.0
+    return round(clv_cents, 2), round(clv_relative, 4)
+
+
 def _load() -> list[dict]:
     f = _get_file()
     if not f.exists():
@@ -281,28 +316,16 @@ def check_clv_settlements() -> list[dict]:
         else:
             continue
 
-        # Compute CLV in YES-price space
-        side = rec["side"]
-        entry_price = rec["entry_price_cents"]
-
-        if side == "yes":
-            # We paid entry_price for YES. Did the line move in our favor?
-            # Positive = closing YES > what we paid = market agreed with us
-            clv_cents = closing_yes - entry_price
-        else:
-            # We paid entry_price for NO (implying YES at 100 - entry_price).
-            # Our implicit YES price = 100 - entry_price.
-            # Positive CLV = closing YES < our implicit YES (market moved against YES = good for NO)
-            our_implied_yes = 100 - entry_price
-            clv_cents = our_implied_yes - closing_yes
-
-        clv_relative = clv_cents / entry_price if entry_price > 0 else 0.0
+        # Session 13b: single source of truth — back-tester calls the same fn.
+        clv_cents_rounded, clv_relative_rounded = compute_clv_cents(
+            rec["side"], rec["entry_price_cents"], closing_yes,
+        )
 
         rec["status"] = "counterfactual_settled" if is_cf else "settled"
         rec["closing_yes_price"] = closing_yes
         rec["market_result"] = result
-        rec["clv_cents"] = round(clv_cents, 2)
-        rec["clv_relative"] = round(clv_relative, 4)
+        rec["clv_cents"] = clv_cents_rounded
+        rec["clv_relative"] = clv_relative_rounded
         rec["settled_at"] = datetime.now(timezone.utc).isoformat()
         changed = True
 
@@ -327,8 +350,8 @@ def check_clv_settlements() -> list[dict]:
                         rec[key] = pos[key]
             settled_now.append(rec.copy())
             logger.info(
-                f"CLV settled: {ticker} | {side.upper()} entry={entry_price}¢ "
-                f"close={closing_yes}¢ | CLV={clv_cents:+.1f}¢ ({clv_relative:+.1%}) | "
+                f"CLV settled: {ticker} | {rec['side'].upper()} entry={rec['entry_price_cents']}¢ "
+                f"close={closing_yes}¢ | CLV={clv_cents_rounded:+.1f}¢ ({clv_relative_rounded:+.1%}) | "
                 f"result={result}"
             )
 

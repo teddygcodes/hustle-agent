@@ -332,3 +332,46 @@ class TestStratifiedCFSampling:
         assert len(selected) == 5
         # Highest-edge rejects dominate: T7 (edge 0.017) must be in
         assert any(r["ticker"] == "T7" for r in selected)
+
+
+class TestComputeClvCents:
+    """Session 13b: behavior-preservation test for the extracted compute_clv_cents().
+
+    The live settler at bot.clv.check_clv_settlements() and the back-tester at
+    tools/backtest.py both call this function. Divergence here = back-tester is
+    wrong, not live (user spec, Session 13b)."""
+
+    def test_yes_side_positive_clv(self):
+        # Bought YES at 80, market closes YES at 100 -> +20 CLV
+        cents, rel = clv.compute_clv_cents("yes", 80, 100.0)
+        assert cents == 20.0
+        assert rel == pytest.approx(0.25, abs=1e-6)
+
+    def test_yes_side_negative_clv(self):
+        # Bought YES at 80, market closes YES at 0 -> -80 CLV
+        cents, rel = clv.compute_clv_cents("yes", 80, 0.0)
+        assert cents == -80.0
+        assert rel == pytest.approx(-1.0, abs=1e-6)
+
+    def test_no_side_positive_clv(self):
+        # Bought NO at 90 (implying YES at 10), YES closes at 0 -> +10 CLV (NO wins)
+        cents, rel = clv.compute_clv_cents("no", 90, 0.0)
+        assert cents == 10.0
+        # Function rounds clv_relative to 4dp; 10/90 = 0.1111 after rounding.
+        assert rel == round(10 / 90, 4)
+
+    def test_no_side_negative_clv(self):
+        # Bought NO at 90, YES closes at 100 -> -90 CLV (NO loses)
+        cents, rel = clv.compute_clv_cents("no", 90, 100.0)
+        assert cents == -90.0
+        assert rel == pytest.approx(-1.0, abs=1e-6)
+
+    def test_zero_entry_price_zero_relative(self):
+        cents, rel = clv.compute_clv_cents("yes", 0, 50.0)
+        assert cents == 50.0
+        assert rel == 0.0
+
+    def test_rounding_two_and_four_dp(self):
+        cents, rel = clv.compute_clv_cents("yes", 33, 100.0)
+        assert cents == 67.0
+        assert rel == round(67 / 33, 4)
