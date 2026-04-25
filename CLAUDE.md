@@ -707,6 +707,131 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 
 ---
 
+## Apr 25+ Pivot-Enabling Instrumentation Arc (Sessions 12–15)
+
+Sessions 6–11 instrumented the bot to *tune itself* — every accept/reject, every prediction-vs-actual, every position's MFE/MAE. That answers "is the bot we have well-calibrated?" but **not** "are the strategies we're running the right ones to be running?" The current data only records what happens inside markets we already chose to look at, framed as opportunities for strategies we already wrote.
+
+This arc instruments the *escape route from our current strategy frame*. Sessions sequenced so the chat reading the reports gets to "I can tell you what we should be doing differently" fastest:
+
+```
+Session 12: Universe log              (1 session — pure data accumulation)
+            ↓
+Session 13: Hypothetical strategy     (2-3 sub-sessions — biggest lift)
+            framework
+            ↓
+Session 14: Regime tags               (1 session — taxonomy informed by 13's back-tests)
+            ↓
+Session 15: Live order microstructure (1 session — defer until PAPER_MODE=False)
+```
+
+**Why this order, not regime-first:** regime tags are cheap and immediately useful, but they make us better *inside* the existing frame. Universe + framework is what lets us evaluate alternatives. Defining regime taxonomy a priori is also error-prone — better to ship 12 and 13 first, run back-tests, then define regime axes based on which slices actually moved strategy outcomes (Session 13's evidence informs Session 14's taxonomy).
+
+---
+
+### ☐ Session 12 — Universe log (Apr 25+, planned)
+
+**Problem.** Every existing collection point (`decisions.jsonl`, CFs in `clv.json`, `predictions.jsonl`) only fires on opportunities a strategy scanner already considered. Kalshi has thousands of active markets at any time; we scan a curated handful. We have **zero signal** on what's happening in the rest — political markets, single-event futures, contract types our scanners don't template. Without a record of the full universe, we can't ask "what alpha is hiding in markets we don't even look at?" The current reports answer "are our strategies well-tuned?"; the universe log answers "are our strategies the right ones to be running?"
+
+**Plan.**
+- **New module `bot/universe.py`** — `snapshot_universe(scan_id) -> int` pulls every active Kalshi market via the existing `agent.kalshi_client.list_markets()` paginated cursor, writes one JSONL row per market to `bot/state/universe.jsonl`. Schema:
+  ```
+  {ts, scan_id, ticker, series_ticker, event_ticker, status, close_ts,
+   yes_ask, yes_bid, no_ask, no_bid, volume_24h, open_interest,
+   scanned_by: [list of strategy names that DID look at this market this scan]}
+  ```
+  `scanned_by` is the join key. Empty list = ignored by every active strategy. Non-empty = part of an existing strategy's flow.
+- **`bot/main.py:_main_loop`** — one new line: `snapshot_universe(scan_id)` immediately before each `scan_cycle`. Each scanner appends its name to `scanned_by` for every ticker it reads (~3 lines per scanner, threaded through `scan_cycle`).
+- **Daily rotation** in `bot/scheduler.py` — mirrors `_rotate_decisions_log`, archive to `state/archive/universe-YYYY-MM-DD.jsonl.gz`. Universe is the largest of any log so rotation matters most here.
+- **New `tools/universe_report.py`** (local-only, .gitignored). Reads current + last 7 archives. Per (series_ticker prefix, event_type): total markets, % we scanned, $volume distribution of ignored markets, price-action of ignored markets (mean spread, settlement-flip rate). Markdown to stdout. **Sanity flag:** ignored markets with high volume + wide spreads are candidate strategy territory.
+
+**Out of scope.** Strategy evaluation against universe (Session 13). Regime tagging on universe rows (Session 14). Live order microstructure (Session 15). `scanned_by` enrichment for the live-watcher subsystem (live_momentum operates per-game, not per-scan; revisit when 13 ships).
+
+**Verify.**
+1. After first scan post-deploy: `wc -l bot/state/universe.jsonl` shows ~1000-3000 rows (Kalshi's typical active-market count at any moment).
+2. After 24h: `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/universe.jsonl')]; print(f'total: {len(r)}, unscanned: {sum(1 for x in r if not x[\"scanned_by\"])}, scanned: {sum(1 for x in r if x[\"scanned_by\"])}')"` — unscanned dominant (~80%+ expected, since active strategies cover only weather + sports + a handful of indices).
+3. After 7 days: `python3 tools/universe_report.py` produces a markdown report. Investigate any ignored market family with >$100/day volume.
+4. File growth: ≤30 MB/day before rotation. If higher, check for cursor-pagination bug pulling expired markets.
+
+---
+
+### ☐ Session 13 — Hypothetical strategy framework (Apr 25+, planned, 2–3 sub-sessions)
+
+**Problem.** Even with universe log shipped (Session 12), we have no way to answer "would strategy X have made money on these ignored markets?" or "would `vig_stack_series` with `MIN_RELATIVE_EDGE=0.10` instead of 0.15 have made more money?" Each existing scanner is bespoke 200–500-line code mixing data fetch, edge math, and gating. To back-test a hypothetical variant requires cloning that code — friction high enough that nobody does it. **This is the session where frame-escape actually becomes possible.** Plan as a 2–3 sub-session arc.
+
+**Sub-session 13a — Strategy contract.** Define a pure-function strategy interface in `bot/strategies/__init__.py`:
+```python
+class Strategy(Protocol):
+    name: str
+    def candidate_markets(self, universe: list[Market]) -> list[Market]: ...
+    def evaluate(self, market: Market) -> Opportunity | None: ...
+```
+Refactor `vig_stack_series` first (smallest, most mechanical) into `bot/strategies/vig_stack_series.py` matching this contract. Keep the existing scanner's behavior byte-identical. The point is the contract, not a rewrite.
+
+**Sub-session 13b — Offline back-tester.** New `tools/backtest.py` (local). Inputs: a Strategy class + a date range. Reads `universe.jsonl` archives for that range, runs `evaluate()` against every market, joins results to actual closing prices (settled CLV records or direct Kalshi history API). Outputs: per-day P&L if we'd taken every signal, win rate, mean edge, mean CLV. **Critical discipline:** back-test math uses the *same* `bot/clv.py:compute_clv` function as live trading — no parallel codepath. Avoids "back-test green, live red" divergence.
+
+**Sub-session 13c — Hypothetical strategy report.** New `tools/hypothetical_report.py` runs N variants of a strategy (e.g., `vig_stack_series` with `MIN_RELATIVE_EDGE` swept across [0.05, 0.10, 0.15, 0.20, 0.25]) against the captured universe and prints a comparison table. Lets us A/B parameter changes without going live. Same tool eventually evaluates entirely-new strategies against ignored markets.
+
+**Out of scope.** Auto-promotion of best-performing variant to `ACTIVE_STRATEGIES` — always a human gate. Refactoring all existing scanners to the contract is incremental: only refactor when you want to back-test that scanner. Microstructure (Session 15).
+
+**Verify.**
+1. After 13a: paper trades produced post-refactor are byte-identical (or within float-epsilon) to what the old `vig_stack_series` would produce on the same market input. Add a regression test to lock this.
+2. After 13b: `python3 tools/backtest.py --strategy vig_stack_series --days 7` produces a P&L number that matches the same window's `clv_report` within a small tolerance. If they diverge, the back-tester has a bug.
+3. After 13c: hypothetical sweep across `MIN_RELATIVE_EDGE` produces a U-shape or monotonic curve. If flat, either the parameter doesn't matter (interesting!) or the back-tester is broken.
+4. After 13c plus 7 days of universe data: pick one ignored market family from `universe_report` and write a 50-line strawman strategy class. Back-test it. If it shows positive CLV at >50 trade volume, that's a real Session-16+ candidate.
+
+---
+
+### ☐ Session 14 — Regime tags (Apr 25+, planned, after 13)
+
+**Problem.** A strategy net-negative on average might be +EV in a specific regime — NBA playoffs, weekday mornings, low-vol weeks, off-election-cycle. Without regime context on every record, we can't slice outcomes by regime. **Sequencing rationale:** by the time Session 14 runs, Session 13's hypothetical back-tests will have surfaced which slicing axes ACTUALLY move strategy outcomes. So the regime taxonomy is evidence-driven, not a-priori speculation.
+
+**Plan.**
+- **New module `bot/regime.py`** — pure function `tag(ts: datetime, ticker: str, market_state: dict) -> dict`. Returns a fixed-key dict of regime axes determined by what Session 13 surfaced. Initial taxonomy candidates (final list TBD by Session 13 evidence):
+  - `time_of_day` (UTC hour bucket: morning/afternoon/evening/overnight)
+  - `day_of_week`
+  - `sport_phase` (preseason / regular / playoffs / off — per sport, derived from ESPN schedule data already cached for live_watcher)
+  - `market_vol_tier` (low/mid/high — bucketed by yes_ask volatility over last N days)
+  - `event_horizon_hr` (time-to-settle bucket — already partially captured in Session 10's edge_below_threshold extras)
+- **Add `regime` field** to every record schema: `decisions.jsonl`, `predictions.jsonl`, `clv.json` (real + CF), `positions.json` (MFE/MAE rows), `universe.jsonl`. One call to `regime.tag()` at write time per writer.
+- **Backfill script `tools/backfill_regime.py`** — iterates existing records and adds `regime` field via the same pure tagger. Cheap because tagger is pure (no side effects, deterministic from inputs).
+- **Update reports** — `tools/cohort_report.py`, `excursion_report.py`, `calibration_report.py`, `universe_report.py` get an optional `--regime-by <axis>` flag. Without flag: same output as today. With flag: per-regime breakdown.
+
+**Out of scope.** Regime-adaptive trading (let humans interpret reports first; auto-adaptation is Session 16+). Auto-detection of new regimes via clustering — a manually-curated taxonomy is fine for the first cut.
+
+**Verify.**
+1. After deploy: `tail bot/state/decisions.jsonl | jq .regime` — every new row has populated regime dict with all expected keys.
+2. After backfill: `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(sum(1 for x in r if 'regime' in x), '/', len(r))"` — coverage > 99%.
+3. After 7 days: `cohort_report --regime-by sport_phase` produces a per-regime breakdown. **Sanity:** any strategy that's flat overall but has wide regime dispersion (e.g., +20% in NBA playoffs, −15% in regular season) is a regime-adaptive candidate for Session 16+.
+4. Tagger is pure — same inputs always produce same outputs. Property test in `tests/test_regime.py`.
+
+---
+
+### ☐ Session 15 — Live order microstructure (Apr 25+, planned, defer until PAPER_MODE=False)
+
+**Problem.** Once we flip to live trading, real orders introduce variables we currently can't measure: fill latency, partial fills, slippage on market orders, queue position on limit orders, order rejection patterns. Without microstructure capture, a strategy that paper-traded green could be quietly unprofitable after live execution costs eat the edge. **Building this now is YAGNI** — only matters when going live.
+
+**Plan.**
+- **New module `bot/order_microstructure.py`** — wraps `agent.kalshi_client.place_order` to capture per-order lifecycle:
+  ```
+  {ts_placed, ts_filled, ts_canceled, requested_price, filled_price,
+   requested_qty, filled_qty, order_type, slippage_cents, latency_ms,
+   queue_depth_at_place (if available from ticker snapshot), partial_fill_count,
+   strategy_name, opp_type}
+  ```
+  Append to `bot/state/order_microstructure.jsonl`.
+- **Hook in `bot/executor.py:_place_order_live` only** — paper mode untouched.
+- **Daily rotation** via scheduler.
+- **New `tools/microstructure_report.py`** — per-strategy distribution of slippage, fill latency, partial-fill rate. Flags "slippage > 2¢ median" or "fill latency > 5s p95" as execution-quality issues. Joins to CLV records to compute "slippage-adjusted CLV" — true edge net of execution friction.
+
+**Out of scope.** Order routing optimization (use this data to inform changes manually, then iterate). Smart-order-router. Anything paper-mode.
+
+**Verify.** (Defer until live.)
+1. First live order: row appears in `order_microstructure.jsonl` with all fields populated.
+2. After 50 live orders: `microstructure_report` produces median slippage / latency. Any strategy with median slippage > 2¢ or latency > 5s p95 is a Session-16+ execution-tuning candidate.
+3. Slippage-adjusted CLV per strategy matches paper CLV within ~1–2¢. If it diverges by >3¢, paper-mode is over-optimistic and we need to bake a slippage assumption into paper-trade simulation.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
