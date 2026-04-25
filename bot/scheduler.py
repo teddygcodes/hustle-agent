@@ -174,6 +174,22 @@ async def check_scheduled_events(bot) -> None:
         except Exception:
             logger.exception("Universe rotation failed")
 
+    # --- Nightly order_microstructure.jsonl rotation (Session 15, midnight ET, catch-up) ---
+    last_om_rotation = state.get("last_order_microstructure_rotation", "")
+    should_rotate_om = (
+        (current_hour == 0 and last_om_rotation != today_str)
+        or (last_om_rotation and last_om_rotation < yesterday_str)
+    )
+    if should_rotate_om:
+        logger.info("Rotating order_microstructure.jsonl...")
+        try:
+            _rotate_order_microstructure_log(today_str)
+            state = _load_bot_state()
+            state["last_order_microstructure_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Order microstructure rotation failed")
+
 
 def _rotate_jsonl(source: Path, prefix: str, today_str: str) -> None:
     """Move source.jsonl → source.parent/archive/<prefix>-YYYY-MM-DD.jsonl.gz.
@@ -232,6 +248,11 @@ def _rotate_predictions_log(today_str: str) -> None:
 def _rotate_universe_log(today_str: str) -> None:
     from bot.universe import UNIVERSE_FILE
     _rotate_jsonl(UNIVERSE_FILE, "universe", today_str)
+
+
+def _rotate_order_microstructure_log(today_str: str) -> None:
+    from bot.order_microstructure import MICROSTRUCTURE_FILE
+    _rotate_jsonl(MICROSTRUCTURE_FILE, "order_microstructure", today_str)
 
 
 async def _send_morning_briefing(bot):

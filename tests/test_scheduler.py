@@ -56,11 +56,18 @@ def _isolate_all_rotation_paths(tmp_path, monkeypatch):
     via its own fixture (which then takes precedence)."""
     safe_dir = tmp_path / "_isolate"
     safe_dir.mkdir(exist_ok=True)
-    from bot import live_watcher, decisions as _decisions, calibration as _calibration, universe as _universe
+    from bot import (
+        live_watcher,
+        decisions as _decisions,
+        calibration as _calibration,
+        universe as _universe,
+        order_microstructure as _om,
+    )
     monkeypatch.setattr(live_watcher, "TICK_LOG_FILE", safe_dir / "live_ticks.jsonl")
     monkeypatch.setattr(_decisions, "DECISIONS_FILE", safe_dir / "decisions.jsonl")
     monkeypatch.setattr(_calibration, "PREDICTIONS_FILE", safe_dir / "predictions.jsonl")
     monkeypatch.setattr(_universe, "UNIVERSE_FILE", safe_dir / "universe.jsonl")
+    monkeypatch.setattr(_om, "MICROSTRUCTURE_FILE", safe_dir / "order_microstructure.jsonl")
 
 
 @pytest.fixture
@@ -614,6 +621,98 @@ class TestUniverseRotation:
 
         assert (archive_dir / "universe-2026-04-25.jsonl.gz").read_bytes() == b"prior"
         assert (archive_dir / "universe-2026-04-25-2.jsonl.gz").exists()
+
+
+class TestOrderMicrostructureRotation:
+    """Session 15: nightly order_microstructure.jsonl → state/archive/*.jsonl.gz rotation."""
+
+    @pytest.fixture
+    def tmp_microstructure(self, tmp_path, monkeypatch):
+        """Repoint MICROSTRUCTURE_FILE to a tmp directory."""
+        f = tmp_path / "order_microstructure.jsonl"
+        from bot import order_microstructure
+        monkeypatch.setattr(order_microstructure, "MICROSTRUCTURE_FILE", f)
+        return f
+
+    def _seed(self, path, count=200):
+        # Each line ≥ 50 bytes → comfortably above the 1KB rotation floor.
+        path.write_text("\n".join(
+            json.dumps({"ts_placed": "x", "ticker": f"T{i}", "filled_qty": 1,
+                        "slippage_cents": 0.0, "latency_ms": 100,
+                        "terminal_status": "filled"})
+            for i in range(count)
+        ) + "\n")
+
+    def test_fires_at_midnight_and_archives_file(self, tmp_state, tmp_microstructure, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_microstructure)
+        original_size = tmp_microstructure.stat().st_size
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert not tmp_microstructure.exists()
+        archive_dir = tmp_microstructure.parent / "archive"
+        gz = archive_dir / "order_microstructure-2026-04-25.jsonl.gz"
+        assert gz.exists()
+        assert gz.stat().st_size < original_size
+
+        state = _read_state(tmp_state)
+        assert state["last_order_microstructure_rotation"] == "2026-04-25"
+
+    def test_skips_if_file_too_small(self, tmp_state, tmp_microstructure, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        tmp_microstructure.write_text('{"x":1}\n')
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_microstructure.exists()
+        assert (tmp_microstructure.parent / "archive").exists() is False
+        assert _read_state(tmp_state)["last_order_microstructure_rotation"] == "2026-04-25"
+
+    def test_no_refire_same_day(self, tmp_state, tmp_microstructure, mock_bot, monkeypatch):
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_microstructure)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 30, tzinfo=ET))
+        _set_state(tmp_state, last_order_microstructure_rotation="2026-04-25")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        assert tmp_microstructure.exists()
+        assert not (tmp_microstructure.parent / "archive").exists()
+
+    def test_catch_up_if_missed_a_day(self, tmp_state, tmp_microstructure, mock_bot, monkeypatch):
+        """If last_order_microstructure_rotation is older than yesterday, rotate at any hour."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_microstructure)
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 14, 0, tzinfo=ET))
+        _set_state(tmp_state, last_order_microstructure_rotation="2026-04-19")
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        gz = tmp_microstructure.parent / "archive" / "order_microstructure-2026-04-25.jsonl.gz"
+        assert gz.exists()
+
+    def test_collision_appends_suffix(self, tmp_state, tmp_microstructure, mock_bot, monkeypatch):
+        """If today's archive already exists, dest gets a -2 suffix."""
+        _install_body_mocks(monkeypatch)
+        self._seed(tmp_microstructure)
+        archive_dir = tmp_microstructure.parent / "archive"
+        archive_dir.mkdir()
+        (archive_dir / "order_microstructure-2026-04-25.jsonl.gz").write_bytes(b"prior")
+
+        _freeze_datetime(monkeypatch, datetime(2026, 4, 25, 0, 5, tzinfo=ET))
+        _set_state(tmp_state)
+
+        asyncio.run(scheduler.check_scheduled_events(mock_bot))
+
+        # The original prior archive is preserved; the new one gets -2 suffix.
+        assert (archive_dir / "order_microstructure-2026-04-25.jsonl.gz").read_bytes() == b"prior"
+        assert (archive_dir / "order_microstructure-2026-04-25-2.jsonl.gz").exists()
 
 
 class TestTotalPnlPersist:
