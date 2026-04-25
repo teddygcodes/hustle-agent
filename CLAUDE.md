@@ -807,28 +807,21 @@ Refactor `vig_stack_series` first (smallest, most mechanical) into `bot/strategi
 
 ---
 
-### ☐ Session 14 — Regime tags (Apr 25+, planned, after 13)
+### ☑ Session 14 — Regime tags (Apr 25, shipped)
 
-**Problem.** A strategy net-negative on average might be +EV in a specific regime — NBA playoffs, weekday mornings, low-vol weeks, off-election-cycle. Without regime context on every record, we can't slice outcomes by regime. **Sequencing rationale:** by the time Session 14 runs, Session 13's hypothetical back-tests will have surfaced which slicing axes ACTUALLY move strategy outcomes. So the regime taxonomy is evidence-driven, not a-priori speculation.
+**Problem.** A strategy net-negative on average might be +EV in a specific regime — NBA playoffs, weekday mornings, close-to-settlement markets. Without regime context on every record, we can't slice outcomes by regime.
 
-**Plan.**
-- **New module `bot/regime.py`** — pure function `tag(ts: datetime, ticker: str, market_state: dict) -> dict`. Returns a fixed-key dict of regime axes determined by what Session 13 surfaced. Initial taxonomy candidates (final list TBD by Session 13 evidence):
-  - `time_of_day` (UTC hour bucket: morning/afternoon/evening/overnight)
-  - `day_of_week`
-  - `sport_phase` (preseason / regular / playoffs / off — per sport, derived from ESPN schedule data already cached for live_watcher)
-  - `market_vol_tier` (low/mid/high — bucketed by yes_ask volatility over last N days)
-  - `event_horizon_hr` (time-to-settle bucket — already partially captured in Session 10's edge_below_threshold extras)
-- **Add `regime` field** to every record schema: `decisions.jsonl`, `predictions.jsonl`, `clv.json` (real + CF), `positions.json` (MFE/MAE rows), `universe.jsonl`. One call to `regime.tag()` at write time per writer.
-- **Backfill script `tools/backfill_regime.py`** — iterates existing records and adds `regime` field via the same pure tagger. Cheap because tagger is pure (no side effects, deterministic from inputs).
-- **Update reports** — `tools/cohort_report.py`, `excursion_report.py`, `calibration_report.py`, `universe_report.py` get an optional `--regime-by <axis>` flag. Without flag: same output as today. With flag: per-regime breakdown.
+*Shipped 2026-04-25.* New pure module `bot/regime.py:tag(ts, ticker, market_state)` returns a fixed-key dict with 4 axes: `time_of_day` (morning/afternoon/evening/overnight in America/New_York), `day_of_week`, `sport_phase` (preseason/regular/playoffs/off/null), `event_horizon_hr` (<2h/2-12h/12-48h/48-168h/>168h). Pure: same inputs → same output, no I/O, no clock reads. Five writers tag records at write time: `bot/decisions.py:log_decision`, `bot/calibration.py:record_prediction`, `bot/clv.py:record_clv_entry` + `record_counterfactual_skip`, `bot/tracker.py:update_positions` (set-once at first MFE/MAE observation, anchored to `opened_at`), and `bot/universe.py` per-row in `_add_row`. `tools/backfill_regime.py` (local-only, gitignored) idempotently tagged 18,515 historical records (decisions, predictions, universe live + 1 archive, clv, positions) — coverage went 0/N → N/N (100%) on every state file. Four reports gained `--regime-by <axis>`: `tools/cohort_report.py`, `excursion_report.py`, `calibration_report.py`, `universe_report.py`. Bin keys are 3-tuple `(opp_type, regime_value, gate)`; without the flag every bin uses sentinel `_all_` so output is identical to pre-Session-14. Pre-Session-14 records (or any future records the writers can't tag) bucket as `unknown_regime`. 165 tests covering the tagger (DST boundaries, all 7 days, sport phase transitions, event_horizon buckets, 100x determinism property), the 5 writers, the backfill (idempotency, dry-run, gzipped archives, JSON arrays), and the cohort report flag.
 
-**Out of scope.** Regime-adaptive trading (let humans interpret reports first; auto-adaptation is Session 16+). Auto-detection of new regimes via clustering — a manually-curated taxonomy is fine for the first cut.
+**v1 sport_phase limitation.** ESPN's scoreboard API doesn't expose preseason/regular/playoffs and `live_watcher` only caches per-game live state (score/period/clock), not season schedule. So `sport_phase` derives from a hardcoded date table in `bot/regime.py:SPORT_PHASES` covering NBA/NHL/MLB/NCAAB only. ATP/WTA/UFC/IPL/F1 return null. Update `SPORT_PHASES` yearly when each new league season's calendar is published. Future session can add proper ESPN schedule integration to retire the hardcoded table.
+
+**Out of scope (deferred).** `market_vol_tier` axis (needs per-ticker price history infra — `live_ticks.jsonl` exists for live markets but not vig_stack tickers; generalizing is its own session). Regime-adaptive trading — Session 16+, let humans interpret reports first. Auto-clustering of new regimes — manual taxonomy is fine for v1.
 
 **Verify.**
-1. After deploy: `tail bot/state/decisions.jsonl | jq .regime` — every new row has populated regime dict with all expected keys.
-2. After backfill: `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(sum(1 for x in r if 'regime' in x), '/', len(r))"` — coverage > 99%.
-3. After 7 days: `cohort_report --regime-by sport_phase` produces a per-regime breakdown. **Sanity:** any strategy that's flat overall but has wide regime dispersion (e.g., +20% in NBA playoffs, −15% in regular season) is a regime-adaptive candidate for Session 16+.
-4. Tagger is pure — same inputs always produce same outputs. Property test in `tests/test_regime.py`.
+1. After deploy: `tail bot/state/decisions.jsonl | jq .regime` — every new row has populated regime dict with all 4 axes. ✓
+2. After backfill: `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(sum(1 for x in r if 'regime' in x), '/', len(r))"` — coverage > 99%. ✓ 100% on all 5 state files.
+3. After 7 days: `python3 tools/cohort_report.py --regime-by sport_phase` produces a per-regime breakdown. Any strategy that's flat overall but has wide regime dispersion (e.g., +20% in NBA playoffs, −15% in regular season) is a regime-adaptive candidate for Session 16+. — Manual check, deferred until enough post-deploy data.
+4. Tagger property test: 100x random inputs produce identical outputs. ✓ `test_tag_is_deterministic_property` in `tests/test_regime.py`.
 
 ---
 
@@ -881,6 +874,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Distribution check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(Counter((r['opp_type'], r['decision']) for r in recs).most_common(20))"` — should show spread across opp_types and a healthy reject:accept ratio (rejects vastly outnumber accepts).
 - **Gate spread check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl') if json.loads(l).get('decision')=='reject']; print(Counter(r['reason'] for r in recs).most_common(20))"` — every gate from `bot/scanner.py`, `bot/executor.py`, and `bot/live_watcher.py` should show ≥1 reject. Gates with ZERO rejects are either dead code or mis-instrumented.
 - **Known gaps:** Session 7 (live-momentum gates emit `edge=null`). Session 10 (Apr 24) added distance-from-threshold context to scanner.py + executor.py reject `extra` dicts; pre-Session-10 records remain `extra`-less and are silently skipped by `cohort_report`'s distance histogram.
+- **Session 14:** every record carries `regime` (time_of_day, day_of_week, sport_phase, event_horizon_hr).
 
 ### 2. `bot/state/clv.json` — counterfactual + real-trade record book (Sessions 5, 6, 8)
 - **Inspect:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); from collections import Counter; print('total:', len(r)); print('status:', Counter(x.get('status') for x in r)); print('opp_type:', Counter(x.get('opp_type') for x in r))"`
@@ -888,6 +882,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Pollution check:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); bad=[x for x in r if (x.get('entry_price_cents') or 100) < 3 or x.get('ticker','').startswith('KXTEST')]; print(f'{len(bad)} polluted records — should be 0')"` — Apr 24 follow-up gated CF entry < 3¢; KXTEST records are debug residue. Both should be 0.
 - **CF-gate coverage:** `python3 -c "import json; from collections import Counter; r=json.load(open('bot/state/clv.json')); cf=[x for x in r if x.get('status','').startswith('counterfactual')]; print(Counter(x.get('skipped_by_gate') for x in cf))"` — pre-Session-8 this is dominated by 1-2 gates (top-K-by-edge selection bias). Post-Session-8, every gate from `decisions.jsonl` rejects also appears here.
 - **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling).
+- **Session 14:** real + CF records carry `regime` (CF rows resolve `event_horizon_hr` from opp's close_ts; real entries leave it null).
 
 ### 3. `bot/state/bot_state.json` — main loop heartbeat
 - **Inspect:** `python3 -c "import json, datetime as dt; s=json.load(open('bot/state/bot_state.json')); hb=dt.datetime.fromisoformat(s['last_heartbeat']); age=(dt.datetime.now(dt.timezone.utc)-hb).total_seconds(); print(f'heartbeat age: {age:.0f}s (scans_today={s[\"scans_today\"]}, last_scan_at={s.get(\"last_scan_at\")})')"`
@@ -916,6 +911,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Inspect:** `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'{len(active)} active, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"`
 - **Expect:** count ≤ `MAX_POSITIONS`, exposure ≤ `MAX_TOTAL_EXPOSURE` (see [bot/config.py](hustle-agent/bot/config.py)). Same-game count ≤ `MAX_PER_GAME`.
 - **Stale-position check:** `python3 -c "import json, datetime as dt; p=json.load(open('bot/state/positions.json')); now=dt.datetime.now(dt.timezone.utc); old=[x for x in p if isinstance(x,dict) and x.get('status')=='filled' and (now-dt.datetime.fromisoformat(x.get('entry_at',now.isoformat()))).total_seconds() > 86400]; print(f'{len(old)} positions older than 24h — investigate if any')"` — orphaned positions usually mean a settlement check is failing.
+- **Session 14:** open positions carry `regime` set once at first MFE/MAE observation, anchored to `opened_at`.
 
 ### 8. `bot/logs/bot.log` — operational log
 - **Inspect:** `tail -50 bot/logs/bot.log` — look for `SCAN CYCLE`, `Edge accepted`, `Edge rejected`, gate-name patterns.
@@ -928,6 +924,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Settlement coverage:** `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/predictions.jsonl')]; n=len(r); s=sum(1 for x in r if x.get('closing_yes_price') is not None); print(f'{s}/{n} settled ({100*s/n if n else 0:.0f}%)')"` — 0% same-day, climbs to ~100% within 7 days for resolved markets.
 - **Run report:** `python3 tools/calibration_report.py` — needs ≥7 days of settled data for stable Brier scores.
 - **Known gaps:** live_momentum predictions skipped (`predicted_fair_cents=None` is silently dropped). Pre-Session-11 trades have no prediction record. Predictions count ≈ count of `clv.json` records where `status in (open, counterfactual_open)` minus live_momentum CLV rows.
+- **Session 14:** every record carries `regime` (event_horizon_hr is null at this writer — close_ts isn't threaded through the calibration call).
 
 ### 10. `bot/state/universe.jsonl` — active-market snapshot per scan (Session 12)
 - **Inspect:** `wc -l bot/state/universe.jsonl && tail -3 bot/state/universe.jsonl | jq .`
@@ -940,6 +937,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Caveat — `partial: true`:** Cursor pass under load (live_watcher polling Kalshi during games) often hits the 90s deadline before exhausting the cursor — those rows carry `partial: true`. Shadow pass still runs and populates active-series coverage. Reports include partial rows in per-prefix breakdown but flag the partial percentage at the top so absolute long-tail counts can be discounted.
 - **Caveat — file size:** ≤30 MB/day before rotation. If you see growth that exceeds this, the MVE filter regressed or `status="open"` isn't sticking.
 - **Known gaps:** `live_watcher` per-tick scanning is not attributed (per-game, not per-scan; revisit when Session 13 ships). The `_active_series_tickers()` list in `bot/universe.py` is hand-maintained — if a new active scanner ships, add its series prefixes there or attribution will go missing.
+- **Session 14:** every row carries `regime` (event_horizon_hr resolves from each row's close_ts).
 
 ### Cross-cutting checks
 - **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.
@@ -952,6 +950,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - `live_momentum` predictions are skipped (`predicted_fair_cents=None`) because Session 7 left a known coverage gap there — live momentum has no model-predicted fair value to log against. Surfaces as a hole in `predictions.jsonl` for that opp_type only.
 - Anything before 2026-04-24 in `clv.json` may have polluted records (KXTEST, entry<3¢ CFs) that were cleaned but pre-cleanup counts in archives differ.
 - `decisions.jsonl` started fresh on Session-6 deploy date and `predictions.jsonl` on Session-11 deploy date — historical scans before each is not reconstructible.
+- Session 14 (Apr 25): `sport_phase` derived from a hardcoded date table in `bot/regime.py` (no ESPN integration); needs yearly bump. ATP/WTA/UFC/IPL/F1 return `null`.
 
 ---
 
