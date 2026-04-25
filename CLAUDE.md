@@ -762,10 +762,14 @@ Session 15: Live order microstructure (1 session — defer until PAPER_MODE=Fals
 ```python
 class Strategy(Protocol):
     name: str
+    def name_for(self, market: Market) -> str: ...
     def candidate_markets(self, universe: list[Market]) -> list[Market]: ...
     def evaluate(self, market: Market) -> Opportunity | None: ...
+    def finalize(self, scan_id: str) -> None: ...
 ```
 Refactor `vig_stack_series` first (smallest, most mechanical) into `bot/strategies/vig_stack_series.py` matching this contract. Keep the existing scanner's behavior byte-identical. The point is the contract, not a rewrite.
+
+*Shipped 2026-04-25.* `VigStackSeries` handles all three families (weather, index_range, sports_futures) and emits both `vig_stack_series` and `vig_stack_futures` opp_types — the legacy `scan_vig_stack_series` function did the same thing under one name. `name_for(market)` preserves per-family universe attribution. Behavior preservation locked by `tests/test_vig_stack_series_strategy.py` against frozen golden-file outputs (5 hand-crafted ladder scenarios — stable+edge, volatile-below-floor, no-vig, mixed-edge, near-threshold). Live verification: post-deploy `decisions.jsonl` matched pre-deploy gates on shared tickers within natural drift (1/203 reason-mismatches; same `checked` counts). `universe.jsonl scanned_by` attribution preserved (vig_stack_series 116→116, vig_stack_futures 138→136 via natural ladder churn). Universe writer also captures `volume` (lifetime) and `title` now; the `low_liquidity` gate reads lifetime, not 24h. `bot.scanner` re-exports `_forecast_distance_from_bucket` and `_stratified_cf_rejects` from the new module so existing tests still work. ~602 lines deleted from `scanner.py`. **Other scanners (sports arbs, sports parlay, weather direct, econ, series_markets, live_momentum) keep their bespoke entry points — refactor each only when 13b/13c needs to back-test it.**
 
 **Sub-session 13b — Offline back-tester.** New `tools/backtest.py` (local). Inputs: a Strategy class + a date range. Reads `universe.jsonl` archives for that range, runs `evaluate()` against every market, joins results to actual closing prices (settled CLV records or direct Kalshi history API). Outputs: per-day P&L if we'd taken every signal, win rate, mean edge, mean CLV. **Critical discipline:** back-test math uses the *same* `bot/clv.py:compute_clv` function as live trading — no parallel codepath. Avoids "back-test green, live red" divergence.
 
