@@ -188,10 +188,22 @@ def check_clv_settlements() -> list[dict]:
     Returns list of newly settled CLV entries (for Telegram notification).
     """
     from agent.kalshi_client import get_market
+    from bot.config import POSITIONS_FILE
+    from bot.state_io import load_json as _load_positions
 
     records = _load()
     settled_now = []
     changed = False
+
+    # Session 9: build order_id -> position lookup so we can propagate
+    # mfe/mae/ticks onto each clv record at settlement time. Counterfactuals
+    # have no position record and are left untouched.
+    _positions_raw = _load_positions(POSITIONS_FILE)
+    _positions_by_order = {
+        p.get("order_id"): p
+        for p in (_positions_raw or [])
+        if isinstance(p, dict) and p.get("order_id")
+    }
 
     for rec in records:
         status = rec.get("status")
@@ -262,6 +274,11 @@ def check_clv_settlements() -> list[dict]:
         changed = True
 
         if not is_cf:
+            pos = _positions_by_order.get(rec.get("trade_id"))
+            if pos is not None:
+                for key in ("mfe_cents", "mae_cents", "mfe_at", "mae_at", "ticks_observed"):
+                    if pos.get(key) is not None:
+                        rec[key] = pos[key]
             settled_now.append(rec.copy())
             logger.info(
                 f"CLV settled: {ticker} | {side.upper()} entry={entry_price}¢ "

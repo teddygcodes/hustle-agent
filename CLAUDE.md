@@ -641,15 +641,15 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 
 ---
 
-### ☐ Session 9 — MFE/MAE per position (Apr 24, planned)
+### ☑ Session 9 — MFE/MAE per position (Apr 24, shipped)
 
 **Problem.** `clv.json` records entry, settlement, and final CLV. It does NOT record what the price did *between* entry and settlement. Two trades can have identical CLV but very different lived experiences: one drifted straight to close, the other spiked +30¢ then unwound. The first vindicates conviction sizing; the second is a missed-exit signal. Without max-favorable / max-adverse excursion, we can't tell whether `MAX_HOLD_HOURS`, the 3¢ kill switch, or the dynamic exit ladder are leaving alpha on the table.
 
-**Plan.**
-- New fields on every position record: `mfe_cents` (max yes-price gain from entry), `mae_cents` (max yes-price loss), `mfe_at`, `mae_at` timestamps, `ticks_observed` (count for confidence).
-- `bot/tracker.py:update_positions` already polls every open position every loop — extend to update MFE/MAE on each price observation.
-- Propagate MFE/MAE into `clv.json` settlement records via `record_clv_settlement`.
-- New `tools/excursion_report.py`: per-strategy distribution of MFE − exit_price. If median MFE substantially exceeds median exit, the exit logic is leaving money on the table.
+**Shipped.**
+- `bot/tracker.py:update_positions` now ratchets `mfe_cents` / `mae_cents` / `mfe_at` / `mae_at` / `ticks_observed` on every price observation. Side-aware: YES tracks `yes_bid − entry`, NO tracks `no_bid − entry`. Lazy-init so pre-Session-9 open positions upgrade without crashing.
+- `bot/clv.py:check_clv_settlements` builds an `order_id → position` map once per call and copies the five excursion fields into each real-trade settlement record. Counterfactuals untouched.
+- `tools/excursion_report.py` groups settled clv records by `opp_type`, computes median(MFE − exit) per strategy, flags medians > 5¢ with ⚠️. Skips records missing `mfe_cents`.
+- Tests: `tests/test_tracker.py` (10 tests) covers init, side-aware ratchet, monotonic behavior, timestamp semantics, and settlement propagation.
 
 **Out of scope.** Tick-level price path storage (too large); intra-trade re-entry; live-momentum tick logging (already in `live_ticks.jsonl`, just not joined to position outcomes).
 
@@ -732,7 +732,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Expect:** `counterfactual_open` records accumulating between settlements; `counterfactual_settled` records growing as markets resolve; `paper`/`settled` records for actual trades. opp_type spread matches `ACTIVE_STRATEGIES`.
 - **Pollution check:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); bad=[x for x in r if (x.get('entry_price_cents') or 100) < 3 or x.get('ticker','').startswith('KXTEST')]; print(f'{len(bad)} polluted records — should be 0')"` — Apr 24 follow-up gated CF entry < 3¢; KXTEST records are debug residue. Both should be 0.
 - **CF-gate coverage:** `python3 -c "import json; from collections import Counter; r=json.load(open('bot/state/clv.json')); cf=[x for x in r if x.get('status','').startswith('counterfactual')]; print(Counter(x.get('skipped_by_gate') for x in cf))"` — pre-Session-8 this is dominated by 1-2 gates (top-K-by-edge selection bias). Post-Session-8, every gate from `decisions.jsonl` rejects also appears here.
-- **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling), Session 9 (no MFE/MAE on settled records), Session 11 (no fair-value-vs-actual calibration).
+- **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling), Session 11 (no fair-value-vs-actual calibration).
 
 ### 3. `bot/state/bot_state.json` — main loop heartbeat
 - **Inspect:** `python3 -c "import json, datetime as dt; s=json.load(open('bot/state/bot_state.json')); hb=dt.datetime.fromisoformat(s['last_heartbeat']); age=(dt.datetime.now(dt.timezone.utc)-hb).total_seconds(); print(f'heartbeat age: {age:.0f}s (scans_today={s[\"scans_today\"]}, last_scan_at={s.get(\"last_scan_at\")})')"`

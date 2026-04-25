@@ -79,6 +79,29 @@ def update_positions() -> list[dict]:
         pos["pnl_percent"] = round(pnl_percent, 4)
         pos["last_checked"] = datetime.now(timezone.utc).isoformat()
 
+        # MFE/MAE excursion tracking (Session 9). Side-aware: mfe_cents is the
+        # max favorable excursion in the side's own bid space, mae_cents the
+        # max adverse. Both are non-negative magnitudes. Lazy-init on first
+        # observation so pre-Session-9 open positions upgrade cleanly.
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry_cents = int(pos.get("price_cents", 0))
+        current_bid_cents = int(round(current_bid * 100))
+        if pos.get("ticks_observed") is None:
+            pos["mfe_cents"] = 0
+            pos["mae_cents"] = 0
+            pos["mfe_at"] = now_iso
+            pos["mae_at"] = now_iso
+            pos["ticks_observed"] = 0
+        favorable_cents = current_bid_cents - entry_cents
+        adverse_cents = -favorable_cents
+        if favorable_cents > pos.get("mfe_cents", 0):
+            pos["mfe_cents"] = favorable_cents
+            pos["mfe_at"] = now_iso
+        if adverse_cents > pos.get("mae_cents", 0):
+            pos["mae_cents"] = adverse_cents
+            pos["mae_at"] = now_iso
+        pos["ticks_observed"] = int(pos.get("ticks_observed", 0)) + 1
+
         # Categorized alerts
         if pnl_percent >= TAKE_PROFIT_THRESHOLD:
             alerts.append({
