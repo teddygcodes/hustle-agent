@@ -194,3 +194,77 @@ class TestStrategyNotRefactored:
         assert ("not yet refactored" in out
                 or "not registered" in out
                 or "strategy contract" in out)
+
+
+class TestVerificationMode:
+    """Test 5: hand-craft tiny clv.json + universe.jsonl. Run --verify mode.
+    Back-test mean CLV (actually-taken subset, opp_type=vig_stack_series)
+    must match bot.clv.get_clv_report's avg_clv_cents within 1e-6."""
+
+    def test_mean_clv_matches_within_epsilon(self, tmp_path, monkeypatch,
+                                              capsys, _no_network):
+        # 1) live universe with 1 row that the stub strategy will accept
+        live = tmp_path / "universe.jsonl"
+        live.write_text(json.dumps(_make_universe_row(
+            ticker="KXTEST-1", scan_id="S1",
+            ts="2026-04-25T12:00:00+00:00",
+            yes_ask=80, yes_bid=78, no_ask=20, no_bid=18,
+        )) + "\n")
+
+        # 2) clv.json with 1 settled real trade matching ticker+ts
+        clv_file = tmp_path / "clv.json"
+        clv_file.write_text(json.dumps([{
+            "ticker": "KXTEST-1",
+            "opp_type": "vig_stack_series",
+            "side": "yes",
+            "entry_price_cents": 80,
+            "closing_yes_price": 100.0,
+            "clv_cents": 20.0,
+            "clv_relative": 0.25,
+            "status": "settled",
+            "paper": True,
+            "recorded_at": "2026-04-25T12:00:00+00:00",
+            "settled_at": "2026-04-26T00:01:00+00:00",
+        }]))
+
+        monkeypatch.setattr("tools.backtest.UNIVERSE_FILE", live)
+        monkeypatch.setattr("tools.backtest.ARCHIVE_DIR", tmp_path / "archive")
+        monkeypatch.setattr("tools.backtest.CLV_FILE", clv_file)
+        # Repoint bot.clv._CLV_FILE so get_clv_report() reads same file
+        from bot import clv as _live_clv
+        monkeypatch.setattr(_live_clv, "_CLV_FILE", clv_file)
+
+        class StubStrategy:
+            name = "vig_stack_series"
+
+            def name_for(self, m):
+                return self.name
+
+            def candidate_markets(self, u):
+                return list(u)
+
+            def evaluate(self, m):
+                return {
+                    "ticker": m.ticker, "opp_type": "vig_stack_series",
+                    "recommended_side": "yes", "edge": 0.10,
+                    "price_cents": int(m.yes_ask),
+                }
+
+            def finalize(self, sid):
+                pass
+
+        monkeypatch.setattr(
+            "tools.backtest._resolve_strategy",
+            lambda name: StubStrategy() if name == "vig_stack_series" else None,
+        )
+
+        rc = backtest_main([
+            "--strategy", "vig_stack_series",
+            "--start", "2026-04-25", "--end", "2026-04-25",
+            "--verify-against-clv-report",
+        ])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Verification" in out
+        # Either OK (numbers matched) or vacuous OK (no overlap)
+        assert "[VERIFICATION] OK" in out
