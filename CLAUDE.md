@@ -660,7 +660,7 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 
 ---
 
-### ☐ Session 10 — Gate-context enrichment in `extra` (Apr 24, planned)
+### ☑ Session 10 — Gate-context enrichment in `extra` (Apr 24, done)
 
 **Problem.** `decisions.jsonl` records *which* gate fired but not *by how much*. `forecast_in_bucket` reject — was the forecast 1¢ outside the bucket or 30¢? `edge_below_threshold` reject — was edge 0.149 (a hair under MIN_RELATIVE_EDGE=0.15) or 0.02? This distinction is everything for retuning. A gate that rejects "just barely" 80% of the time is a tuning candidate; a gate that rejects "by a mile" 80% of the time is doing its job.
 
@@ -725,7 +725,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **Expect:** non-zero line count growing at ~5-30 records/min during active scans. Each record has `ts, ticker, opp_type, edge, gates, decision, reason`.
 - **Distribution check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(Counter((r['opp_type'], r['decision']) for r in recs).most_common(20))"` — should show spread across opp_types and a healthy reject:accept ratio (rejects vastly outnumber accepts).
 - **Gate spread check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl') if json.loads(l).get('decision')=='reject']; print(Counter(r['reason'] for r in recs).most_common(20))"` — every gate from `bot/scanner.py`, `bot/executor.py`, and `bot/live_watcher.py` should show ≥1 reject. Gates with ZERO rejects are either dead code or mis-instrumented.
-- **Known gaps:** Session 7 (live-momentum gates emit `edge=null`), Session 10 (rejects don't include distance-from-threshold in `extra`).
+- **Known gaps:** Session 7 (live-momentum gates emit `edge=null`). Session 10 (Apr 24) added distance-from-threshold context to scanner.py + executor.py reject `extra` dicts; pre-Session-10 records remain `extra`-less and are silently skipped by `cohort_report`'s distance histogram.
 
 ### 2. `bot/state/clv.json` — counterfactual + real-trade record book (Sessions 5, 6, 8)
 - **Inspect:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); from collections import Counter; print('total:', len(r)); print('status:', Counter(x.get('status') for x in r)); print('opp_type:', Counter(x.get('opp_type') for x in r))"`
