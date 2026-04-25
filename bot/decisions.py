@@ -12,6 +12,7 @@ import threading
 from datetime import datetime, timezone
 
 from bot.config import BOT_STATE_DIR
+from bot.regime import tag as regime_tag
 
 DECISIONS_FILE = BOT_STATE_DIR / "decisions.jsonl"
 
@@ -52,6 +53,14 @@ def log_decision(
     }
     if extra:
         record["extra"] = extra
+    try:
+        record["regime"] = regime_tag(
+            ts=datetime.fromisoformat(record["ts"]),
+            ticker=ticker,
+            market_state=extra,
+        )
+    except Exception:
+        _logger.exception("decisions.log_decision: regime_tag failed for %s", ticker)
     line = json.dumps(record, separators=(",", ":")) + "\n"
     try:
         with _LOCK:

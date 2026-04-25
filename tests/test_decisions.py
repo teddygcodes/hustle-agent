@@ -89,6 +89,41 @@ class TestSchemaIntegrity:
         recs = _read_records(tmp_decisions_file)
         assert recs[0]["edge"] == 0.1235
 
+    def test_record_carries_regime_dict(self, tmp_decisions_file):
+        """Session 14: every decision row gets `regime` with all 4 axes."""
+        decisions.log_decision(
+            ticker="KXNBAGAME-26APR25-LAL",
+            opp_type="vig_stack_series",
+            edge=0.12,
+            gates={"min_edge": True},
+            decision="accept",
+            reason="ok",
+            extra={"close_ts": "2026-04-26T03:00:00+00:00"},
+        )
+        r = _read_records(tmp_decisions_file)[-1]
+        assert "regime" in r
+        regime = r["regime"]
+        assert set(regime.keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        # close_ts was passed through extra → event_horizon_hr should populate
+        assert regime["event_horizon_hr"] is not None
+        # NBA ticker → sport_phase resolves
+        assert regime["sport_phase"] in {"preseason", "regular", "playoffs", "off"}
+
+    def test_regime_present_when_extra_omitted(self, tmp_decisions_file):
+        """Tagger handles None market_state — regime still populates other axes."""
+        decisions.log_decision(
+            ticker="KXWX-NYC", opp_type="weather_arb", edge=0.05,
+            gates={"x": True}, decision="reject", reason="y",
+        )
+        r = _read_records(tmp_decisions_file)[-1]
+        assert set(r["regime"].keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        assert r["regime"]["event_horizon_hr"] is None  # no close_ts available
+        assert r["regime"]["sport_phase"] is None       # non-sport ticker
+
 
 class TestAtomicAppend:
 
