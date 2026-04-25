@@ -22,6 +22,7 @@ from bot.config import (
     POSITION_MOVE_ALERT, TAKE_PROFIT_THRESHOLD, CUT_LOSS_THRESHOLD,
     PAPER_TRADES_FILE, BOT_STATE_DIR,
 )
+from bot.regime import tag as regime_tag
 from bot.state_io import load_json as _load_json, save_json as _save_json
 
 logger = logging.getLogger("nexus.tracker")
@@ -92,6 +93,23 @@ def update_positions() -> list[dict]:
             pos["mfe_at"] = now_iso
             pos["mae_at"] = now_iso
             pos["ticks_observed"] = 0
+            # Session 14: tag regime once at first observation, anchored to the
+            # position's opened_at (regime is a property of the entry, not the
+            # current tick). Idempotent — never overwrite an existing regime.
+            if "regime" not in pos:
+                opened_at = pos.get("opened_at") or now_iso
+                try:
+                    entry_dt = datetime.fromisoformat(str(opened_at).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    entry_dt = datetime.now(timezone.utc)
+                try:
+                    pos["regime"] = regime_tag(
+                        ts=entry_dt,
+                        ticker=ticker,
+                        market_state=None,
+                    )
+                except Exception:
+                    logger.exception("tracker.update_positions: regime_tag failed for %s", ticker)
         favorable_cents = current_bid_cents - entry_cents
         adverse_cents = -favorable_cents
         if favorable_cents > pos.get("mfe_cents", 0):

@@ -110,6 +110,49 @@ class TestMFEMAEInitialization:
         assert pos["mae_cents"] == 0
         assert pos["ticks_observed"] == 1
 
+    def test_regime_tagged_once_at_first_observation(self, tracker_env):
+        """Session 14: regime is set ONCE on first MFE/MAE observation.
+        Subsequent updates must not overwrite — regime is a property of
+        the position derived from its opened_at + ticker."""
+        pos_in = _base_position(
+            side="yes", price_cents=45, ticker="KXNBAGAME-26APR25-LAL"
+        )
+        pos_in["opened_at"] = "2026-04-25T18:00:00+00:00"
+        tracker_env["seed"]([pos_in])
+        tracker_env["set_market"](yes_bid=45, no_bid=55)
+        tracker.update_positions()
+
+        pos = tracker_env["read"]()[0]
+        assert "regime" in pos
+        regime = pos["regime"]
+        assert set(regime.keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        # NBA on Apr 25 → playoffs; opened_at 18:00 UTC → 14:00 ET → afternoon
+        assert regime["sport_phase"] == "playoffs"
+        assert regime["time_of_day"] == "afternoon"
+        initial = dict(regime)
+
+        # Second update must not re-tag
+        tracker_env["set_market"](yes_bid=50, no_bid=50)
+        tracker.update_positions()
+        pos2 = tracker_env["read"]()[0]
+        assert pos2["regime"] == initial
+
+    def test_regime_falls_back_to_now_when_opened_at_malformed(self, tracker_env):
+        """If opened_at is missing or unparseable, tagger still runs using
+        the current update timestamp — never blocks the position update."""
+        bad = _base_position(side="yes", price_cents=45)
+        bad["opened_at"] = "not-a-date"
+        tracker_env["seed"]([bad])
+        tracker_env["set_market"](yes_bid=45, no_bid=55)
+        tracker.update_positions()  # must not raise
+        pos = tracker_env["read"]()[0]
+        assert "regime" in pos
+        assert set(pos["regime"].keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Ratcheting
