@@ -592,7 +592,7 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
-### ☐ Session 8 — Stratified CF sampling (Apr 24, planned)
+### ☑ Session 8 — Stratified CF sampling (Apr 24, shipped)
 **Problem (Session-6 design flaw, surfaced in first 24h of data).** CF emission selects "top-5 highest-edge rejects per scan" globally ([scanner.py:891-894](hustle-agent/bot/scanner.py:891)). This systematically excludes the gates that absorb the most rejects, because they reject *low-edge* opps by definition:
 
 | Gate | Rejects | CFs | Why |

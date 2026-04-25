@@ -525,6 +525,76 @@ def _vig_stack_gate_fingerprint(reason: str) -> dict[str, bool]:
     return out
 
 
+def _stratified_cf_rejects(
+    rejected_opps: list[dict],
+    *,
+    per_gate_top_k: int = 1,
+    total_budget: int = 10,
+    hard_cap: int = 15,
+) -> list[dict]:
+    """Select which rejected opps get a counterfactual CLV record.
+
+    Session 8 (Apr 24): replaces Session-6 global top-5 selection. That
+    rule starved the gates we most need to retune — gates like
+    edge_below_threshold and forecast_in_bucket reject low-edge opps by
+    construction and so never won the top-5 race against
+    non_stable_below_weather_floor (real 4-20¢ edges).
+
+    Two-stage sampling:
+      1. Stratified core — per (opp_type, skip_reason), take the
+         per_gate_top_k highest-edge rejects. Guarantees every gate that
+         fired gets ≥1 CF record.
+      2. Budget fill — add highest-edge ungrouped rejects until total
+         hits total_budget.
+
+    Dedup by ticker (higher edge wins). Hard cap on final size keeps a
+    pathological scan from ballooning clv.json.
+
+    Eligibility filters (applied before grouping):
+      - edge is not None (needed for ordering)
+      - entry (price_cents or yes_ask) ≥ 3¢ (fc269f6 — keeps 1-2¢
+        relative-edge blowups out of the sample)
+    """
+    eligible = [
+        o for o in rejected_opps
+        if o.get("edge") is not None
+        and (o.get("price_cents") or o.get("yes_ask") or 0) >= 3
+    ]
+    if not eligible:
+        return []
+
+    groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for o in eligible:
+        key = (
+            o.get("opp_type") or o.get("type") or "",
+            o.get("skip_reason") or "",
+        )
+        groups[key].append(o)
+
+    core: list[dict] = []
+    for grp in groups.values():
+        grp.sort(key=lambda o: -o["edge"])
+        core.extend(grp[:per_gate_top_k])
+
+    seen: set[str] = set()
+    selected: list[dict] = []
+    for o in sorted(core, key=lambda o: -o["edge"]):
+        t = o.get("ticker") or ""
+        if t and t not in seen:
+            seen.add(t)
+            selected.append(o)
+
+    for o in sorted(eligible, key=lambda o: -o["edge"]):
+        if len(selected) >= total_budget:
+            break
+        t = o.get("ticker") or ""
+        if t and t not in seen:
+            seen.add(t)
+            selected.append(o)
+
+    return selected[:hard_cap]
+
+
 def scan_vig_stack_series() -> list[dict]:
     """
     Scan Kalshi series ladders for structural NO edges caused by vig stacking.
@@ -692,32 +762,12 @@ def scan_vig_stack_series() -> list[dict]:
                         except (ValueError, TypeError):
                             pass  # Can't parse — let it through, better to over-scan
 
-                # NWS FORECAST FILTER: skip NO bets where the forecast
-                # says the temperature will land IN this bucket.
-                if is_weather and series_ticker in _nws_forecasts:
-                    forecast_temp = _nws_forecasts[series_ticker]
-                    bucket = _parse_weather_bucket(ticker)
-                    if bucket:
-                        lo, hi = bucket
-                        if lo - 2 <= forecast_temp <= hi + 2:
-                            logger.info(
-                                "VigStack FORECAST SKIP: %s — NWS=%s°F lands near "
-                                "bucket %.0f–%.0f°F (±2° margin)",
-                                ticker, forecast_temp, lo, hi,
-                            )
-                            _telem[_sub]["forecast_in_bucket"] += 1
-                            decisions.log_decision(
-                                ticker=ticker,
-                                opp_type=("vig_stack_futures" if is_futures else "vig_stack_series"),
-                                edge=None,
-                                gates=_vig_stack_gate_fingerprint("forecast_in_bucket"),
-                                decision="reject",
-                                reason="forecast_in_bucket",
-                                extra={"forecast_temp": forecast_temp, "bucket_lo": lo, "bucket_hi": hi},
-                            )
-                            continue
-
-                # NO fair value = 100¢ - (YES_ask adjusted for vig)
+                # NO fair value = 100¢ - (YES_ask adjusted for vig).
+                # Session 8 (Apr 24): hoisted above the forecast_in_bucket
+                # short-circuit so that forecast-rejected contracts can also
+                # emit a counterfactual CLV record (previously their edge
+                # was unknown at skip time and they were dropped from the
+                # CF sample entirely).
                 yes_fair_cents = yes_ask / vig_factor
                 no_fair_cents = 100.0 - yes_fair_cents
 
@@ -741,6 +791,32 @@ def scan_vig_stack_series() -> list[dict]:
                         "edge": round(relative_no_edge, 4),
                         "skip_reason": reason,
                     }
+
+                # NWS FORECAST FILTER: skip NO bets where the forecast
+                # says the temperature will land IN this bucket.
+                if is_weather and series_ticker in _nws_forecasts:
+                    forecast_temp = _nws_forecasts[series_ticker]
+                    bucket = _parse_weather_bucket(ticker)
+                    if bucket:
+                        lo, hi = bucket
+                        if lo - 2 <= forecast_temp <= hi + 2:
+                            logger.info(
+                                "VigStack FORECAST SKIP: %s — NWS=%s°F lands near "
+                                "bucket %.0f–%.0f°F (±2° margin)",
+                                ticker, forecast_temp, lo, hi,
+                            )
+                            _telem[_sub]["forecast_in_bucket"] += 1
+                            decisions.log_decision(
+                                ticker=ticker,
+                                opp_type=_opp_type_now,
+                                edge=round(relative_no_edge, 4),
+                                gates=_vig_stack_gate_fingerprint("forecast_in_bucket"),
+                                decision="reject",
+                                reason="forecast_in_bucket",
+                                extra={"forecast_temp": forecast_temp, "bucket_lo": lo, "bucket_hi": hi},
+                            )
+                            rejected_opps.append(_build_reject_opp("forecast_in_bucket"))
+                            continue
 
                 # Skip near-zero-price NO contracts (YES near-certain)
                 if no_ask_prob < 0.03:
@@ -882,29 +958,24 @@ def scan_vig_stack_series() -> list[dict]:
         logger.info("VIG_STACK_TELEMETRY/%s: checked=%d surfaced=%d drops=%s",
                     sub, t["checked"], t["surfaced"], drops or "none")
 
-    # Session 6 — counterfactual emission. Top-5 highest-edge rejects per
-    # scan get a CLV record so we can later answer "did this gate cost us
-    # money?" via tools/cohort_report.py.
-    # Apr 24 follow-up: skip entry < 3¢. Relative edge = (fair-price)/price
-    # explodes at 1-2¢ entries (KXHIGHDEN/INX rejects landed edge=15-53),
-    # crowding out legitimate higher-quality rejects in top-5 selection.
+    # Session 8 — stratified counterfactual emission. Every (opp_type,
+    # skip_reason) pair that fired gets ≥1 CF record; remaining budget
+    # fills with highest-edge leftovers. Replaces Session-6 global top-5,
+    # which starved low-edge-by-design gates like edge_below_threshold
+    # and forecast_in_bucket (first 24h: 0 CFs for 387 rejects across
+    # those two gates vs. 29 CFs for 19 rejects on the high-edge
+    # non_stable_below_weather_floor gate).
     if rejected_opps:
         try:
             from bot import clv
-            top_rejects = sorted(
-                [o for o in rejected_opps
-                 if o.get("edge") is not None
-                 and (o.get("price_cents") or o.get("yes_ask") or 0) >= 3],
-                key=lambda o: -o["edge"],
-            )[:5]
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-            for opp in top_rejects:
+            for opp in _stratified_cf_rejects(rejected_opps):
                 try:
                     clv.record_counterfactual_skip(opp, opp["skip_reason"], scan_id)
                 except Exception:
                     logger.exception("CF emit failed for %s", opp.get("ticker"))
         except Exception:
-            logger.exception("Top-5 CF selection failed")
+            logger.exception("Stratified CF selection failed")
 
     return opportunities
 
