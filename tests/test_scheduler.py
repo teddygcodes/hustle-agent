@@ -42,6 +42,27 @@ def tmp_state(tmp_path, monkeypatch):
     return state_file
 
 
+@pytest.fixture(autouse=True)
+def _isolate_all_rotation_paths(tmp_path, monkeypatch):
+    """Belt-and-suspenders: every rotation test freezes time to a midnight
+    boundary, which makes ALL four rotation gates (live_ticks, decisions,
+    predictions, universe) fire when state is empty. Each test class only
+    monkeypatches the one rotation path it cares about — without this
+    autouse fixture, the OTHER three rotation paths fall through to
+    production state and silently move real files into archive/.
+    Verified Apr 25 2026: a single TestLiveTicksRotation run rotated the
+    live universe.jsonl out from under the bot. Patching all four here
+    means no test can touch production unless it explicitly opts back in
+    via its own fixture (which then takes precedence)."""
+    safe_dir = tmp_path / "_isolate"
+    safe_dir.mkdir(exist_ok=True)
+    from bot import live_watcher, decisions as _decisions, calibration as _calibration, universe as _universe
+    monkeypatch.setattr(live_watcher, "TICK_LOG_FILE", safe_dir / "live_ticks.jsonl")
+    monkeypatch.setattr(_decisions, "DECISIONS_FILE", safe_dir / "decisions.jsonl")
+    monkeypatch.setattr(_calibration, "PREDICTIONS_FILE", safe_dir / "predictions.jsonl")
+    monkeypatch.setattr(_universe, "UNIVERSE_FILE", safe_dir / "universe.jsonl")
+
+
 @pytest.fixture
 def mock_bot():
     bot = MagicMock()
