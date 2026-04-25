@@ -121,6 +121,37 @@ class TestSnapshotAndFlush:
             # series_ticker derived from ticker prefix when API returns null
             assert r["series_ticker"] == "KXTEMP"
 
+    def test_snapshot_populates_regime_per_row(self, tmp_universe_file, monkeypatch):
+        """Session 14: every flushed row carries `regime` with all 4 axes.
+        event_horizon_hr should populate from close_ts on each row."""
+        stub = _fake_kalshi_pages([
+            [_market("KXNBAGAME-26APR25-LAL"),
+             _market("KXTEMP-26APR25-T70.5")],
+        ])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        universe.snapshot_universe("S1")
+        universe.flush_universe("S1")
+        recs = _read_records(tmp_universe_file)
+        assert len(recs) == 2
+        for r in recs:
+            assert "regime" in r
+            regime = r["regime"]
+            assert set(regime.keys()) == {
+                "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            }
+            assert regime["time_of_day"] in {"morning", "afternoon", "evening", "overnight"}
+            assert regime["day_of_week"] in {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+            # close_time on the fake market (2026-04-25T20:00:00Z) is in the future
+            # relative to record creation, so event_horizon_hr should populate.
+            assert regime["event_horizon_hr"] is not None
+        # Sport ticker → playoffs (Apr 25 falls in NBA playoffs window)
+        nba_row = next(r for r in recs if r["ticker"].startswith("KXNBAGAME"))
+        assert nba_row["regime"]["sport_phase"] == "playoffs"
+        # Non-sport ticker → null
+        temp_row = next(r for r in recs if r["ticker"].startswith("KXTEMP"))
+        assert temp_row["regime"]["sport_phase"] is None
+
     def test_skips_mve_parlay_markets(self, tmp_universe_file, monkeypatch):
         """KXMVE* tickers are parlay-expansion products Kalshi creates in
         bulk; they overwhelm the log without informing strategy gaps."""

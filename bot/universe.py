@@ -35,6 +35,7 @@ import time as _time
 from datetime import datetime, timezone
 
 from bot.config import BOT_STATE_DIR
+from bot.regime import tag as regime_tag
 
 UNIVERSE_FILE = BOT_STATE_DIR / "universe.jsonl"
 
@@ -150,7 +151,7 @@ def snapshot_universe(scan_id: str) -> int:
         # row (only accepts it as a request filter), so derive from the
         # ticker prefix: "KXTEMP-26APR25-T70.5" -> "KXTEMP".
         series = m.get("series_ticker") or ticker.split("-", 1)[0]
-        rows[ticker] = {
+        row = {
             "ts": ts,
             "scan_id": scan_id,
             "ticker": ticker,
@@ -172,6 +173,15 @@ def snapshot_universe(scan_id: str) -> int:
             "title": m.get("title"),
             "scanned_by": [],
         }
+        try:
+            row["regime"] = regime_tag(
+                ts=datetime.fromisoformat(ts),
+                ticker=ticker,
+                market_state=row,
+            )
+        except Exception:
+            _logger.exception("universe._add_row: regime_tag failed for %s", ticker)
+        rows[ticker] = row
 
     try:
         while True:
