@@ -1080,11 +1080,17 @@ class GlintBot:
             # scanner exception doesn't strand the buffered rows.
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
             _universe.snapshot_universe(scan_id)
+            # Session 13a: pull the snapshotted universe out as a list of
+            # Market dataclasses so scan_cycle can pass it to the
+            # Strategy contract without strategies re-fetching from
+            # Kalshi.
+            buffered_universe = _universe.get_buffered_markets(scan_id)
             scan_failed = False
             try:
                 scan_result = scan_cycle(
                     scan_id=scan_id,
                     on_market_seen=_universe.on_market_seen,
+                    universe=buffered_universe,
                 )
             except Exception as e:
                 logger.error(f"Scan cycle error: {e}", exc_info=True)

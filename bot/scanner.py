@@ -1036,7 +1036,8 @@ def scan_vig_stack_series(scan_id: str | None = None,
 
 def scan_cycle(sports: Optional[list[str]] = None,
                scan_id: str | None = None,
-               on_market_seen=None) -> dict:
+               on_market_seen=None,
+               universe=None) -> dict:
     """
     Run a full scan cycle across all active sports and weather markets.
 
@@ -1050,6 +1051,13 @@ def scan_cycle(sports: Optional[list[str]] = None,
             wired through so each scanner can attribute every ticker it
             evaluates. `None` makes the callback a no-op for non-loop
             callers that don't snapshot the universe.
+        universe: Session 13a — the buffered Kalshi universe (list of
+            Market dataclasses) collected by main.py before scan_cycle
+            runs. Strategy classes operate on this data without
+            re-fetching from Kalshi. When `None` and `scan_id` is
+            provided, scan_cycle pulls from `bot.universe.get_buffered_markets`;
+            when both are `None` (Telegram /scan, tests), the strategy
+            slice is skipped (no vig_stack opps for those callers).
 
     Returns:
         {
@@ -1151,9 +1159,33 @@ def scan_cycle(sports: Optional[list[str]] = None,
         and abs(opp.get("edge", 0)) >= _VIG_SUPPRESS_EDGE
     }
 
-    # Scan vig stack series (structural NO edge — no external odds, no liquidity filter)
+    # Scan vig stack series via the Strategy contract (Session 13a).
+    # main.py snapshots the universe before scan_cycle and passes it in;
+    # Telegram /scan and direct tests don't, so the strategy slice no-ops
+    # for those paths.
     logger.info("VIG_STACK: scanning series ladders for structural NO edges")
-    vig_stack_opps = scan_vig_stack_series(scan_id=scan_id, on_market_seen=on_market_seen)
+    if universe is None and scan_id is not None:
+        try:
+            from bot import universe as _universe_mod
+            universe = _universe_mod.get_buffered_markets(scan_id)
+        except Exception:
+            logger.exception("VIG_STACK: get_buffered_markets failed; skipping")
+            universe = []
+    universe = universe or []
+    vig_stack_opps: list[dict] = []
+    if universe:
+        from bot.strategies import REGISTERED_STRATEGIES
+        for _strategy in REGISTERED_STRATEGIES:
+            candidates = _strategy.candidate_markets(universe)
+            for _m in candidates:
+                if on_market_seen and scan_id:
+                    on_market_seen(scan_id, _m.ticker, _strategy.name_for(_m))
+                _opp = _strategy.evaluate(_m)
+                if _opp is not None:
+                    vig_stack_opps.append(_opp)
+            _strategy.finalize(scan_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S"))
+    else:
+        logger.info("VIG_STACK: skipped — no buffered universe (Telegram /scan or test path)")
     if _weather_yes_tickers:
         _before = len(vig_stack_opps)
         vig_stack_opps = [o for o in vig_stack_opps if o["ticker"] not in _weather_yes_tickers]

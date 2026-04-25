@@ -70,7 +70,12 @@ class Strategy(Protocol):
 
 
 # Strategies registered for scan_cycle iteration. Add new classes here
-# only after their behavior-preservation test passes. Populated lazily
-# in scan_cycle to avoid circular imports between this module and the
-# concrete strategy implementations.
-REGISTERED_STRATEGIES: list[Strategy] = []
+# only after their behavior-preservation test passes. The list is
+# materialised on first access to avoid an import cycle (the concrete
+# strategy modules import Market and Strategy from this package).
+def _build_registered_strategies() -> list[Strategy]:
+    from bot.strategies.vig_stack_series import VigStackSeries
+    return [VigStackSeries()]
+
+
+REGISTERED_STRATEGIES: list[Strategy] = _build_registered_strategies()
