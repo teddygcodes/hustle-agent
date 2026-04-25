@@ -178,3 +178,19 @@ class TestReplayStrategy:
         assert len(results) == 2
         assert all("scan_id" in r and "snapshot_ts" in r for r in results)
         assert {r["opp"]["ticker"] for r in results} == {"KXTEST-1", "KXTEST-2"}
+
+
+class TestStrategyNotRefactored:
+    """Test 4: --strategy=sports_monotonicity_arb prints clean error, exits 2."""
+
+    def test_unrefactored_strategy_clean_error(self, capsys):
+        with pytest.raises(SystemExit) as exc:
+            backtest_main(["--strategy", "sports_monotonicity_arb",
+                           "--days", "7"])
+        assert exc.value.code == 2
+        captured = capsys.readouterr()
+        out = (captured.out + captured.err).lower()
+        assert "sports_monotonicity_arb" in out
+        assert ("not yet refactored" in out
+                or "not registered" in out
+                or "strategy contract" in out)
