@@ -93,6 +93,49 @@ class TestCounterfactualRecording:
         assert len(recs) == 1
         assert recs[0]["entry_price_cents"] == 87
 
+    def test_cf_record_carries_regime_dict(self, tmp_clv_file):
+        """Session 14: counterfactual records get `regime` with all 4 axes.
+        opp dict has close_ts, so event_horizon_hr should populate."""
+        opp = {
+            "ticker": "KXNBAGAME-26APR25-LAL",
+            "opp_type": "vig_stack_series",
+            "side": "yes",
+            "price_cents": 38,
+            "fair_value_cents": 45.0,
+            "edge": 0.18,
+            "close_ts": "2026-04-26T03:00:00+00:00",
+        }
+        clv.record_counterfactual_skip(opp, "min_edge", "scan-x")
+        rec = _read(tmp_clv_file)[-1]
+        assert "regime" in rec
+        assert set(rec["regime"].keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        # opp had close_ts → event_horizon_hr resolves
+        assert rec["regime"]["event_horizon_hr"] is not None
+
+    def test_real_entry_carries_regime_dict(self, tmp_clv_file):
+        """Session 14: record_clv_entry tags regime. Caller doesn't pass
+        close_ts, so event_horizon_hr is expected None — other axes still
+        populate."""
+        clv.record_clv_entry(
+            ticker="KXNHLGAME-26APR25-NYR",
+            opp_type="vig_stack_series",
+            side="yes",
+            entry_price_cents=45,
+            fair_value_cents=52.0,
+            edge_at_trade=0.07,
+            contracts=10,
+            trade_id="t-1",
+            paper=False,
+        )
+        rec = _read(tmp_clv_file)[-1]
+        assert "regime" in rec
+        assert set(rec["regime"].keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+        assert rec["regime"]["event_horizon_hr"] is None
+
 
 class TestActiveStrategyFilter:
     """The Session-5 _load() filter must not drop CF records."""

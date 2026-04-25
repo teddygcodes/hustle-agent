@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from bot.regime import tag as regime_tag
+
 logger = logging.getLogger("glint.clv")
 
 # Imported at call-site to avoid circular imports
@@ -158,6 +160,14 @@ def record_counterfactual_skip(opp: dict, gate: str, scan_id: str) -> None:
         "clv_relative": None,
         "settled_at": None,
     })
+    try:
+        records[-1]["regime"] = regime_tag(
+            ts=datetime.fromisoformat(records[-1]["recorded_at"]),
+            ticker=opp.get("ticker", ""),
+            market_state=opp,
+        )
+    except Exception:
+        logger.exception("clv.record_counterfactual_skip: regime_tag failed for %s", opp.get("ticker"))
     _save(records)
 
     # Session 11: pair every CF with a prediction record so calibration_report
@@ -222,6 +232,14 @@ def record_clv_entry(
         "clv_relative": None,
         "settled_at": None,
     })
+    try:
+        records[-1]["regime"] = regime_tag(
+            ts=datetime.fromisoformat(records[-1]["recorded_at"]),
+            ticker=ticker,
+            market_state=None,
+        )
+    except Exception:
+        logger.exception("clv.record_clv_entry: regime_tag failed for %s", ticker)
     _save(records)
     logger.info(
         f"CLV recorded: {ticker} | {side.upper()} @ {entry_price_cents}¢ | "
