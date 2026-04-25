@@ -573,6 +573,118 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 
 ---
 
+### ☐ Session 7 — Decision-log observability gaps (Apr 24, planned)
+**Problem (post-Session-6 audit, first 24h of decisions data).** Two gaps surfaced once the Session-6 audit log went live:
+
+1. **Live-momentum decisions are info-poor.** 12/15 records carry `edge=null` because `_tick_momentum` has no scalar edge concept — momentum trades are pure price-action with no model fair value. Reject *rate* per gate (sport_disabled, dqs_fail, dip_too_big, variance_quality) is queryable today; "edge surrendered by gate" is not. Live-side gate retuning (DQS threshold, dip floor, conviction zone, leader_min) is blind without it.
+2. **Lock-touch cadence is per-scan, not per-second.** `bot/main.py:1061` touches `bot.lock` only at scan boundaries (`scan_interval` 2-30 min). Session-5 Gotcha #6 treats `bot.lock` mtime > 15 min stale + alive PID as "scan loop wedged" — a healthy bot in idle 30-min cycle can falsely trip this. Lock observed at 19 min stale during the Session-6 wedge-fix verification, with a healthy event loop and live ticks flowing every 10s.
+
+**Plan.**
+- **Edge proxy for live momentum.** Wire `wp_edge` (already computed each tick — see `live_watcher._tick_momentum`) into `_log_decision_dampened()` as the `edge` arg. Also persist a small `extra` dict (`{wp, kalshi_price, dip_cents, dqs}`) so the cohort report can join on something analytically useful. Same dampener — only emits on `(decision, reason)` change, so volume stays bounded.
+- **Heartbeat lock-touch.** Either (a) extend the existing 60s `_live_scan_loop` to call `LOCK_FILE.touch()` at the top, or (b) add a dedicated 30s heartbeat task in `GlintBot.start()`. Brings worst-case stale gap from 30 min → ≤60s. Update Gotcha #6 + state-files table accordingly.
+
+**Out of scope.** Cohort-report changes (works on rate-only analysis until live-side edge data accumulates); decision-history schema migration; back-filling missing-edge records (forward-only).
+
+**Verify.**
+1. `tail bot/state/decisions.jsonl | grep live_momentum` — `edge` non-null for new entries; `extra` carries wp/dqs/dip context.
+2. `stat -f "%Sm" bot/state/bot.lock` — sample twice 60s apart, mtime advances regardless of scan_interval.
+3. `python3 -c "import json; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; lm=[r for r in recs if r['opp_type']=='live_momentum']; print(f'edge coverage: {sum(1 for r in lm if r[\"edge\"] is not None)}/{len(lm)}')"` — coverage > 80% within 24h.
+
+---
+
+### ☐ Session 8 — Stratified CF sampling (Apr 24, planned)
+**Problem (Session-6 design flaw, surfaced in first 24h of data).** CF emission selects "top-5 highest-edge rejects per scan" globally ([scanner.py:891-894](hustle-agent/bot/scanner.py:891)). This systematically excludes the gates that absorb the most rejects, because they reject *low-edge* opps by definition:
+
+| Gate | Rejects | CFs | Why |
+|---|---|---|---|
+| vig_stack_series `forecast_in_bucket` | 143 (48%) | **0** | Mixed-edge rejects, lose top-5 race |
+| vig_stack_futures `edge_below_threshold` | 130 (79%) | **0** | By construction, edges < 0.02 |
+| vig_stack_series `edge_below_threshold` | 114 (38%) | **0** | Same — sub-threshold edges |
+| vig_stack_series `non_stable_below_weather_floor` | 19 (6%) | 19 | Real economic edges 0.04-0.20 → wins top-5 every scan |
+
+The gates we most need to retune (`edge_below_threshold`, `forecast_in_bucket`) have zero outcome attribution. The cohort report Session 6 was built for will have a black hole at exactly the gates that matter. The Session-6 verification step ("look for the **Mis-tuning candidates** section") cannot fire on a gate that has no CF settled records.
+
+**Plan.**
+- **Stratify CF emission by gate.** In `scanner.scan_vig_stack_series` (and any future scan-time CF site), replace the single `top_rejects = sorted(...)[:5]` with two-stage sampling:
+  1. Per-gate top-K: for each gate that fired ≥1 reject, take its top-3 highest-edge rejects (still ≥3¢ entry).
+  2. Global top-K floor: union with the global top-5 by edge so the very-best opportunities are never starved by the per-gate cap.
+  3. Dedup by ticker. Cap total at 15/scan as a runaway guard.
+- **Volume math.** ~6 vig_stack gates × 3/gate = 18 max per scan; with 30-min idle scan_interval that's ≤900/day, well under the original Session-6 budget of 1500/day. Active-scan windows (2-min interval) push to ~13k/day worst case — add the 15/scan cap to bound this.
+- **No schema change.** CF records already carry `skipped_by_gate`. Cohort report joins on it natively.
+- **Live momentum stays out of CF emission for now** (see Session 7 — needs `wp_edge` proxy first, separate work stream).
+
+**Out of scope.** CF settlement maturity (need calendar time, not code); cohort-report changes (works as-is once CF coverage is real); Session 7 work (live-momentum edge proxy + heartbeat lock-touch).
+
+**Verify.**
+1. After first scan post-deploy: `python3 -c "import json; clv=json.load(open('bot/state/clv.json')); from collections import Counter; cf=[r for r in clv if r.get('status','').startswith('counterfactual')]; print(Counter(r['skipped_by_gate'] for r in cf))"` — every gate that rejected ≥1 opp this scan has ≥1 CF.
+2. After 24h: `forecast_in_bucket`, `edge_below_threshold` both have non-zero CF counts (the previous black holes).
+3. After 7 days: cohort report's mis-tuning candidates section flags real gates, not just `non_stable_below_weather_floor`.
+4. CF growth ≤900/day idle, ≤13k/day active. `wc -l bot/state/clv.json && du -h bot/state/clv.json` — file stays <2 MB.
+
+---
+
+### ☐ Session 9 — MFE/MAE per position (Apr 24, planned)
+
+**Problem.** `clv.json` records entry, settlement, and final CLV. It does NOT record what the price did *between* entry and settlement. Two trades can have identical CLV but very different lived experiences: one drifted straight to close, the other spiked +30¢ then unwound. The first vindicates conviction sizing; the second is a missed-exit signal. Without max-favorable / max-adverse excursion, we can't tell whether `MAX_HOLD_HOURS`, the 3¢ kill switch, or the dynamic exit ladder are leaving alpha on the table.
+
+**Plan.**
+- New fields on every position record: `mfe_cents` (max yes-price gain from entry), `mae_cents` (max yes-price loss), `mfe_at`, `mae_at` timestamps, `ticks_observed` (count for confidence).
+- `bot/tracker.py:update_positions` already polls every open position every loop — extend to update MFE/MAE on each price observation.
+- Propagate MFE/MAE into `clv.json` settlement records via `record_clv_settlement`.
+- New `tools/excursion_report.py`: per-strategy distribution of MFE − exit_price. If median MFE substantially exceeds median exit, the exit logic is leaving money on the table.
+
+**Out of scope.** Tick-level price path storage (too large); intra-trade re-entry; live-momentum tick logging (already in `live_ticks.jsonl`, just not joined to position outcomes).
+
+**Verify.**
+1. After first paper trade settles: corresponding `clv.json` record has non-null `mfe_cents`, `mae_cents`, both within [0, 100].
+2. After 7 days: `python3 tools/excursion_report.py` produces per-strategy MFE-vs-exit gap. Gaps >5¢ on median are exit-logic candidates.
+3. Position records during open: tail `bot/state/positions.json` and watch `mfe_cents` ratchet up monotonically across loops.
+
+---
+
+### ☐ Session 10 — Gate-context enrichment in `extra` (Apr 24, planned)
+
+**Problem.** `decisions.jsonl` records *which* gate fired but not *by how much*. `forecast_in_bucket` reject — was the forecast 1¢ outside the bucket or 30¢? `edge_below_threshold` reject — was edge 0.149 (a hair under MIN_RELATIVE_EDGE=0.15) or 0.02? This distinction is everything for retuning. A gate that rejects "just barely" 80% of the time is a tuning candidate; a gate that rejects "by a mile" 80% of the time is doing its job.
+
+**Plan.**
+- Each `decisions.log_decision` call site populates `extra={...}` with gate-relevant diagnostics:
+  - `forecast_in_bucket` → `{"forecast": 0.42, "bucket_lo": 0.50, "bucket_hi": 0.65, "distance": 0.08}`
+  - `edge_below_threshold` → `{"edge": 0.12, "threshold": 0.15, "vig": 0.04, "time_to_settle_hr": 6.5}`
+  - `low_liquidity` → `{"yes_volume": 23, "no_volume": 31, "min_required": 50}`
+  - `cooldown` → `{"last_trade_age_min": 145, "cooldown_min": 240}`
+  - `position_cap` → `{"current_positions": 12, "cap": 12, "exposure_pct": 0.94}`
+- Update `tools/cohort_report.py` to render distance-from-threshold histograms per gate (replacing the current binary reject-rate).
+
+**Out of scope.** Schema migration of historical records (pre-Session-10 records simply won't have `extra` for these gates — that's fine, cohort_report falls back gracefully).
+
+**Verify.**
+1. After deploy + 1 scan: `tail -50 bot/state/decisions.jsonl | jq 'select(.decision=="reject") | .extra'` — every reject has populated `extra` for its gate type.
+2. After 7 days: cohort report shows distance-from-threshold distribution per gate. Gates with median distance < 5% of threshold value are tuning candidates.
+3. No record-size blowup. `wc -c bot/state/decisions.jsonl` grows ≤30% vs pre-Session-10 baseline (each `extra` is ~80-150 bytes).
+
+---
+
+### ☐ Session 11 — Fair-value calibration loop (Apr 24, planned)
+
+**Problem.** Every edge calc is `(fair_value - market_price) / market_price`. The whole bot is one big bet on `fair_value` being right. We have no record of whether our `fair_value_cents` predictions actually correlate with closing prices. A scanner that consistently overestimates fair value by 5¢ on `vig_stack_series` is hemorrhaging money on every trade — and we'd never see it from CLV alone (CLV measures execution, not prediction).
+
+**Plan.**
+- New module `bot/calibration.py`: `record_prediction(ticker, opp_type, predicted_fair_cents, recorded_at)` writes to `bot/state/predictions.jsonl`. Hook into `record_clv_entry` AND `record_counterfactual_skip` so every prediction (acted-on or not) is captured.
+- Settlement poller (extend `clv.check_clv_settlements`) also writes the actual close → `predictions.jsonl` record gets `closing_yes_price` filled.
+- New `tools/calibration_report.py`:
+  - Per-strategy: mean(predicted - actual), variance, calibration plot (predicted bucket vs actual hit-rate).
+  - Brier score per strategy: lower is better-calibrated.
+  - Flag any strategy where predictions consistently land on the wrong side of 50% (sign error).
+
+**Out of scope.** Auto-retuning of fair-value formulas (Session 12+); pre-Session-11 historical predictions (settlement records have entry but not the prediction-at-time-of-decision in a structured way).
+
+**Verify.**
+1. After first scan: `bot/state/predictions.jsonl` has one row per opp the scanner evaluated (accepted + CF). Schema: `{ts, ticker, opp_type, predicted_fair_cents, market_price_cents, closing_yes_price: null}`.
+2. After 7 days of settlements: `python3 tools/calibration_report.py` produces per-strategy calibration table. Brier score reported.
+3. Sanity check: `vig_stack_series` predicted bucket [80,90] should resolve YES ~85% of the time. If it resolves <70% or >95%, fair-value formula needs a tuning pass.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
@@ -583,6 +695,69 @@ Run this checklist:
 5. If exposure is maxed out (blocking new trades), note which bets are about to settle and when — that's when capital frees up
 
 Answer in terms of: single process ✓/✗, exposure vs balance, what's settling soon, any repeated blocked-trade warnings. Don't invent performance numbers — pull them from `trade_history.json` and `strategy_audit.json`.
+
+---
+
+## When Tyler Asks to Check the Data
+
+This is the *data-quality* checklist (vs. the *bot-health* checklist above). Walk through every collection point. For each: run the inspect command, compare actual vs. expected, note known gaps. Don't skim — the whole point of Session 6's instrumentation is that bad data masquerades as good data unless you actually look.
+
+### 1. `bot/state/decisions.jsonl` — per-decision audit log (Session 6)
+- **Inspect:** `wc -l bot/state/decisions.jsonl && tail -5 bot/state/decisions.jsonl | jq .`
+- **Expect:** non-zero line count growing at ~5-30 records/min during active scans. Each record has `ts, ticker, opp_type, edge, gates, decision, reason`.
+- **Distribution check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; print(Counter((r['opp_type'], r['decision']) for r in recs).most_common(20))"` — should show spread across opp_types and a healthy reject:accept ratio (rejects vastly outnumber accepts).
+- **Gate spread check:** `python3 -c "import json; from collections import Counter; recs=[json.loads(l) for l in open('bot/state/decisions.jsonl') if json.loads(l).get('decision')=='reject']; print(Counter(r['reason'] for r in recs).most_common(20))"` — every gate from `bot/scanner.py`, `bot/executor.py`, and `bot/live_watcher.py` should show ≥1 reject. Gates with ZERO rejects are either dead code or mis-instrumented.
+- **Known gaps:** Session 7 (live-momentum gates emit `edge=null`), Session 10 (rejects don't include distance-from-threshold in `extra`).
+
+### 2. `bot/state/clv.json` — counterfactual + real-trade record book (Sessions 5, 6, 8)
+- **Inspect:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); from collections import Counter; print('total:', len(r)); print('status:', Counter(x.get('status') for x in r)); print('opp_type:', Counter(x.get('opp_type') for x in r))"`
+- **Expect:** `counterfactual_open` records accumulating between settlements; `counterfactual_settled` records growing as markets resolve; `paper`/`settled` records for actual trades. opp_type spread matches `ACTIVE_STRATEGIES`.
+- **Pollution check:** `python3 -c "import json; r=json.load(open('bot/state/clv.json')); bad=[x for x in r if (x.get('entry_price_cents') or 100) < 3 or x.get('ticker','').startswith('KXTEST')]; print(f'{len(bad)} polluted records — should be 0')"` — Apr 24 follow-up gated CF entry < 3¢; KXTEST records are debug residue. Both should be 0.
+- **CF-gate coverage:** `python3 -c "import json; from collections import Counter; r=json.load(open('bot/state/clv.json')); cf=[x for x in r if x.get('status','').startswith('counterfactual')]; print(Counter(x.get('skipped_by_gate') for x in cf))"` — pre-Session-8 this is dominated by 1-2 gates (top-K-by-edge selection bias). Post-Session-8, every gate from `decisions.jsonl` rejects also appears here.
+- **Known gaps:** Session 8 (top-5-by-edge globally → stratified per-gate sampling), Session 9 (no MFE/MAE on settled records), Session 11 (no fair-value-vs-actual calibration).
+
+### 3. `bot/state/bot_state.json` — main loop heartbeat
+- **Inspect:** `python3 -c "import json, datetime as dt; s=json.load(open('bot/state/bot_state.json')); hb=dt.datetime.fromisoformat(s['last_heartbeat']); age=(dt.datetime.now(dt.timezone.utc)-hb).total_seconds(); print(f'heartbeat age: {age:.0f}s (scans_today={s[\"scans_today\"]}, last_scan_at={s.get(\"last_scan_at\")})')"`
+- **Expect:** heartbeat age < scan_interval + 60s slack (default 1860s). `scans_today` ratchets up across the day. `last_decisions_rotation` and `last_live_ticks_rotation` set to today after 00:00 ET.
+- **Caveat:** heartbeat updates per scan, so age can legitimately be ~30 min during normal idle. Use it for "is the loop alive" not "is the loop responsive."
+- **Known gaps:** Session 7 (lock-touch is also per-scan only; no per-second heartbeat for liveness).
+
+### 4. `bot/state/bot.lock` — process liveness signal
+- **Inspect:** `stat -f 'lock mtime=%Sm pid=%z' bot/state/bot.lock 2>/dev/null && cat bot/state/bot.lock`
+- **Expect:** mtime within last scan interval. PID matches `ps aux | grep bot.main`.
+- **Caveat:** lock-touch fires at scan boundaries only ([bot/main.py:1061](hustle-agent/bot/main.py:1061)) — between scans, mtime can be stale up to 30 min and that's fine. Session 7 will add per-second heartbeat for true liveness.
+
+### 5. `bot/state/strategy_audit.json` — settlement + PnL log
+- **Inspect:** `python3 -c "import json; s=json.load(open('bot/state/strategy_audit.json')); sl=s.get('settlement_log',[]); print(f'{len(sl)} settlements'); [print(f'  {x.get(\"ticker\")}: {x.get(\"pnl\",0):+.2f}') for x in sl[-10:]]"`
+- **Expect:** settlement records grow as markets resolve. PnL has both wins and losses (a strategy with 100% wins is suspicious — usually means tiny sample).
+- **Cross-check:** count of settled positions in `clv.json` (status=`settled`) should match settlement_log entries within ±1.
+- **Caveat:** no per-strategy PnL aggregation here — use `tools/cohort_report.py` once Session 6 has 7 days of data.
+
+### 6. `bot/state/live_ticks.jsonl` — momentum scanner observations
+- **Inspect:** `wc -l bot/state/live_ticks.jsonl && tail -3 bot/state/live_ticks.jsonl | jq .`
+- **Expect:** non-zero only during active games (NFL/MLB/NBA windows). Quiet evenings = legitimately empty.
+- **Rotation:** `ls bot/state/archive/live_ticks-*.jsonl.gz | tail -3` — yesterday's archive present after midnight ET.
+- **Caveat:** can grow fast during multi-game windows (>100k records/day). If `du -h` exceeds 50 MB before rotation, investigate.
+
+### 7. `bot/state/positions.json` — open positions
+- **Inspect:** `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'{len(active)} active, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"`
+- **Expect:** count ≤ `MAX_POSITIONS`, exposure ≤ `MAX_TOTAL_EXPOSURE` (see [bot/config.py](hustle-agent/bot/config.py)). Same-game count ≤ `MAX_PER_GAME`.
+- **Stale-position check:** `python3 -c "import json, datetime as dt; p=json.load(open('bot/state/positions.json')); now=dt.datetime.now(dt.timezone.utc); old=[x for x in p if isinstance(x,dict) and x.get('status')=='filled' and (now-dt.datetime.fromisoformat(x.get('entry_at',now.isoformat()))).total_seconds() > 86400]; print(f'{len(old)} positions older than 24h — investigate if any')"` — orphaned positions usually mean a settlement check is failing.
+
+### 8. `bot/logs/bot.log` — operational log
+- **Inspect:** `tail -50 bot/logs/bot.log` — look for `SCAN CYCLE`, `Edge accepted`, `Edge rejected`, gate-name patterns.
+- **Error scan:** `grep -E 'ERROR|CRITICAL|Traceback' bot/logs/bot.log | tail -20` — any repeated exception is investigable. One-offs from API timeouts are normal.
+- **Scan cadence check:** `grep 'SCAN CYCLE' bot/logs/bot.log | tail -10 | awk '{print $1, $2}'` — gaps should be ≤ scan_interval + 60s. Larger gaps = wedge or DarkWake event (Apr 24 fix should prevent these).
+
+### Cross-cutting checks
+- **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.
+- **Active strategies ↔ records.** Every strategy in `ACTIVE_STRATEGIES` ([bot/config.py:578](hustle-agent/bot/config.py:578)) should appear in `decisions.jsonl` within 1 hour. Missing = scanner not loading that strategy.
+- **No silent loss.** `clv.json` records with `closing_yes_price=null` AND `recorded_at > 7 days ago` mean the settlement poller is stuck on those tickers. Investigate per-ticker.
+
+### Known caveats and active gaps
+- Sessions 7-11 are not yet shipped — instrument data has known holes per their respective Problem statements above.
+- Anything before 2026-04-24 in `clv.json` may have polluted records (KXTEST, entry<3¢ CFs) that were cleaned but pre-cleanup counts in archives differ.
+- `decisions.jsonl` started fresh on Session-6 deploy date — historical scans before that are not reconstructible.
 
 ---
 

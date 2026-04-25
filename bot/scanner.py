@@ -885,11 +885,16 @@ def scan_vig_stack_series() -> list[dict]:
     # Session 6 — counterfactual emission. Top-5 highest-edge rejects per
     # scan get a CLV record so we can later answer "did this gate cost us
     # money?" via tools/cohort_report.py.
+    # Apr 24 follow-up: skip entry < 3¢. Relative edge = (fair-price)/price
+    # explodes at 1-2¢ entries (KXHIGHDEN/INX rejects landed edge=15-53),
+    # crowding out legitimate higher-quality rejects in top-5 selection.
     if rejected_opps:
         try:
             from bot import clv
             top_rejects = sorted(
-                [o for o in rejected_opps if o.get("edge") is not None],
+                [o for o in rejected_opps
+                 if o.get("edge") is not None
+                 and (o.get("price_cents") or o.get("yes_ask") or 0) >= 3],
                 key=lambda o: -o["edge"],
             )[:5]
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
