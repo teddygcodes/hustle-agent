@@ -361,8 +361,13 @@ class GlintBot:
         else:
             logger.warning("No Telegram token — running in console-only mode")
 
-        # Run main loop + crypto loop + live match scanner + heartbeat concurrently
-        tasks = [self._main_loop(), self._live_scan_loop(), self._heartbeat_loop()]
+        # Run main loop + crypto loop + live match scanner + heartbeat + position check concurrently
+        tasks = [
+            self._main_loop(),
+            self._live_scan_loop(),
+            self._heartbeat_loop(),
+            self._position_check_loop(),
+        ]
         if CRYPTO_ENABLED:
             tasks.append(self._crypto_scan_loop())
         else:
@@ -988,6 +993,37 @@ class GlintBot:
                 logger.warning("heartbeat bot_state update failed", exc_info=True)
             await asyncio.sleep(30)
 
+    async def _position_check_loop(self):
+        """Ratchet MFE/MAE/ticks_observed on open positions every 30s,
+        independent of scan_interval. Session 17 (Apr 26).
+
+        scan_interval can sit at IDLE (1800s) for hours when scanner.py's
+        odds-API games list doesn't include the Kalshi-native sports
+        live_watcher actually bets on (UFC, IPL, individual matches). That
+        meant 90% of live_momentum positions exited (status="exited") before
+        update_positions ever fired once on them — leaving ticks_observed=None
+        and Session 9's MFE/MAE instrumentation useless for the only
+        profitable strategy.
+
+        This loop fires every 30s on open positions only (cheap; iterates
+        positions.json once per call). Alerts are intentionally discarded —
+        take_profit / cut_loss flow stays driven by the existing _main_loop
+        call site (line ~1175) so we don't double-fire exits. update_positions
+        is idempotent (mfe/mae use `>` comparisons; ticks++ is per-call), so
+        running it twice is just two ratchets.
+        """
+        loop = asyncio.get_event_loop()
+        await asyncio.sleep(20)  # let the bot fully initialize first
+        while self._running:
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda: update_positions(called_from="_position_check_loop"),
+                )
+            except Exception:
+                logger.warning("position check loop error", exc_info=True)
+            await asyncio.sleep(30)
+
     async def _live_scan_loop(self):
         """
         Periodically scan Kalshi for live 1v1 matches (tennis, UFC, etc.)
@@ -1172,7 +1208,7 @@ class GlintBot:
             # Step 6: Update positions — smart alerts
             # ----------------------------------------------------------
             try:
-                alerts = update_positions()
+                alerts = update_positions(called_from="_main_loop")
                 for a in alerts:
                     alert_type = a.get("type", "position_move")
                     if alert_type == "take_profit":

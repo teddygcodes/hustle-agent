@@ -190,6 +190,22 @@ async def check_scheduled_events(bot) -> None:
         except Exception:
             logger.exception("Order microstructure rotation failed")
 
+    # --- Nightly tracker_cadence.jsonl rotation (Session 17, midnight ET, catch-up) ---
+    last_tc_rotation = state.get("last_tracker_cadence_rotation", "")
+    should_rotate_tc = (
+        (current_hour == 0 and last_tc_rotation != today_str)
+        or (last_tc_rotation and last_tc_rotation < yesterday_str)
+    )
+    if should_rotate_tc:
+        logger.info("Rotating tracker_cadence.jsonl...")
+        try:
+            _rotate_tracker_cadence_log(today_str)
+            state = _load_bot_state()
+            state["last_tracker_cadence_rotation"] = today_str
+            _save_bot_state(state)
+        except Exception:
+            logger.exception("Tracker cadence rotation failed")
+
 
 def _rotate_jsonl(source: Path, prefix: str, today_str: str) -> None:
     """Move source.jsonl → source.parent/archive/<prefix>-YYYY-MM-DD.jsonl.gz.
@@ -253,6 +269,11 @@ def _rotate_universe_log(today_str: str) -> None:
 def _rotate_order_microstructure_log(today_str: str) -> None:
     from bot.order_microstructure import MICROSTRUCTURE_FILE
     _rotate_jsonl(MICROSTRUCTURE_FILE, "order_microstructure", today_str)
+
+
+def _rotate_tracker_cadence_log(today_str: str) -> None:
+    from bot.tracker_cadence import CADENCE_FILE
+    _rotate_jsonl(CADENCE_FILE, "tracker_cadence", today_str)
 
 
 async def _send_morning_briefing(bot):

@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot import tracker, clv  # noqa: E402
+from bot import tracker, tracker_cadence, clv  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +57,14 @@ def tracker_env(tmp_path, monkeypatch):
     positions_file.write_text("[]")
     monkeypatch.setattr(tracker, "POSITIONS_FILE", positions_file)
 
+    # Session 17: isolate tracker_cadence's append-only log to tmp_path so
+    # tests don't pollute the production bot/state/tracker_cadence.jsonl.
+    cadence_file = tmp_path / "tracker_cadence.jsonl"
+    monkeypatch.setattr(tracker_cadence, "CADENCE_FILE", cadence_file)
+    monkeypatch.setattr(tracker_cadence, "BOT_STATE_DIR", tmp_path)
+    # Reset the per-call-site last_ts cache so tests get clean ms_since_last_call.
+    tracker_cadence._last_call_ts.clear()
+
     # Silence the resting-orders sweep: it also calls get_market for any
     # status=="resting" position. Our tests only use "filled".
     market_response = {"yes_bid": 50, "no_bid": 50, "yes_ask": 52, "no_ask": 52, "status": "active"}
@@ -75,7 +83,13 @@ def tracker_env(tmp_path, monkeypatch):
     def read() -> list[dict]:
         return json.loads(positions_file.read_text())
 
-    return {"set_market": set_market, "seed": seed, "read": read, "file": positions_file}
+    return {
+        "set_market": set_market,
+        "seed": seed,
+        "read": read,
+        "file": positions_file,
+        "cadence_file": cadence_file,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +337,108 @@ class TestSettlementPropagation:
         # mae/ticks have no observed-life data and the extension only touches mfe.
         assert "mae_cents" not in rec
         assert "ticks_observed" not in rec
+
+
+# ---------------------------------------------------------------------------
+# Cadence logging (Session 17)
+# ---------------------------------------------------------------------------
+
+class TestCadenceLogging:
+    """Verify update_positions writes to tracker_cadence.jsonl on every call,
+    with called_from threaded through and ms_since_last_call computed
+    per-call-site (so _main_loop and _position_check_loop don't pollute each
+    other's deltas)."""
+
+    def test_cadence_log_records_called_from_and_open_count(self, tracker_env):
+        tracker_env["seed"]([_base_position(side="no", price_cents=79)])
+        tracker.update_positions(called_from="_position_check_loop")
+
+        rows = [
+            json.loads(l)
+            for l in tracker_env["cadence_file"].read_text().splitlines()
+            if l.strip()
+        ]
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["called_from"] == "_position_check_loop"
+        assert r["num_open_positions"] == 1
+        assert r["ms_since_last_call"] is None  # first call has no prior delta
+        assert "ts" in r
+
+    def test_cadence_log_default_called_from_is_unspecified(self, tracker_env):
+        # Backward-compat: existing callers / tests not yet passing called_from
+        # land in the "unspecified" bucket rather than crashing.
+        tracker_env["seed"]([_base_position(side="no", price_cents=79)])
+        tracker.update_positions()
+
+        rows = [
+            json.loads(l)
+            for l in tracker_env["cadence_file"].read_text().splitlines()
+            if l.strip()
+        ]
+        assert rows[0]["called_from"] == "unspecified"
+
+    def test_cadence_log_ms_delta_is_per_callsite(self, tracker_env):
+        # Two calls from _main_loop, then one from _position_check_loop:
+        # the position_check_loop's first row should have ms_since_last_call=None
+        # because its bucket is independent of _main_loop's history.
+        tracker_env["seed"]([_base_position(side="no", price_cents=79)])
+        tracker.update_positions(called_from="_main_loop")
+        tracker.update_positions(called_from="_main_loop")
+        tracker.update_positions(called_from="_position_check_loop")
+
+        rows = [
+            json.loads(l)
+            for l in tracker_env["cadence_file"].read_text().splitlines()
+            if l.strip()
+        ]
+        assert len(rows) == 3
+        assert rows[0]["called_from"] == "_main_loop"
+        assert rows[0]["ms_since_last_call"] is None
+        assert rows[1]["called_from"] == "_main_loop"
+        assert rows[1]["ms_since_last_call"] is not None and rows[1]["ms_since_last_call"] >= 0
+        assert rows[2]["called_from"] == "_position_check_loop"
+        assert rows[2]["ms_since_last_call"] is None
+
+    def test_cadence_log_counts_only_filled_or_partial(self, tracker_env):
+        # exited / resolved / cancelled_stale positions don't count toward
+        # num_open_positions — that field measures the per-call work.
+        tracker_env["seed"]([
+            _base_position(ticker="KXOPEN-1", order_id="PAPER-1", side="no", price_cents=79),
+            {**_base_position(ticker="KXEXITED-1", order_id="PAPER-2", side="no",
+                              price_cents=79), "status": "exited"},
+            {**_base_position(ticker="KXRESOLVED-1", order_id="PAPER-3", side="no",
+                              price_cents=79), "status": "resolved"},
+        ])
+        tracker.update_positions(called_from="_main_loop")
+
+        rows = [
+            json.loads(l)
+            for l in tracker_env["cadence_file"].read_text().splitlines()
+            if l.strip()
+        ]
+        assert rows[0]["num_open_positions"] == 1  # only the filled one
+
+    def test_cadence_log_never_raises_even_when_positions_empty(self, tracker_env):
+        # Empty positions.json (load returns []) must still produce a cadence row,
+        # so the operator can see the loop is firing during quiet windows.
+        tracker_env["seed"]([])
+        tracker.update_positions(called_from="_main_loop")
+
+        rows = [
+            json.loads(l)
+            for l in tracker_env["cadence_file"].read_text().splitlines()
+            if l.strip()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["num_open_positions"] == 0
+
+    def test_ticks_observed_still_increments_per_call_with_called_from(self, tracker_env):
+        # Session 9 contract preserved: ticks_observed increments exactly once
+        # per call per open position, regardless of called_from value.
+        tracker_env["seed"]([_base_position(side="no", price_cents=79)])
+        tracker_env["set_market"](yes_bid=21, no_bid=79)  # at entry
+        for _ in range(4):
+            tracker.update_positions(called_from="_position_check_loop")
+        pos = tracker_env["read"]()[0]
+        assert pos["ticks_observed"] == 4

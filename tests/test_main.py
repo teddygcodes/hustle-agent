@@ -128,3 +128,70 @@ def test_heartbeat_loop_swallows_state_io_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
     asyncio.run(bot._heartbeat_loop())  # must not raise
     assert cycles["n"] == 2
+
+
+def test_position_check_loop_calls_update_positions_each_cycle(monkeypatch):
+    """Session 17: _position_check_loop calls update_positions(called_from=
+    '_position_check_loop') once per 30s cycle, independent of scan_interval.
+    Patch sleep → instant to exercise N cycles in <100ms."""
+    from bot import main as botmain
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+
+    calls: list[str] = []
+
+    def fake_update_positions(called_from: str = "unspecified"):
+        calls.append(called_from)
+        return []
+
+    monkeypatch.setattr(botmain, "update_positions", fake_update_positions)
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs):
+        sleeps.append(secs)
+        # First call (line `await asyncio.sleep(20)` startup gate) doesn't
+        # increment work counter. Stop after the loop has done 3 work cycles.
+        if len([s for s in sleeps if s == 30]) >= 3:
+            bot._running = False
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+    asyncio.run(bot._position_check_loop())
+
+    # 3 work cycles → 3 update_positions calls, each with called_from set.
+    assert len(calls) == 3, f"expected 3 update_positions calls, got {len(calls)}"
+    assert all(c == "_position_check_loop" for c in calls), \
+        f"all calls must thread called_from; got {calls}"
+
+    # Cadence: 1 startup sleep at 20s, then 30s between cycles.
+    assert sleeps[0] == 20, "first sleep must be the 20s init delay"
+    work_sleeps = [s for s in sleeps[1:] if s == 30]
+    assert len(work_sleeps) == 3, f"expected 3 cycle sleeps at 30s, got {sleeps}"
+
+
+def test_position_check_loop_swallows_update_errors(monkeypatch):
+    """A failing update_positions must not crash the position-check task —
+    the loop ratchets MFE/MAE on a best-effort basis. One transient market-
+    fetch hiccup should not kill the observation loop for the rest of the
+    session."""
+    from bot import main as botmain
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+
+    def boom(called_from: str = "unspecified"):
+        raise RuntimeError("simulated tracker error")
+
+    monkeypatch.setattr(botmain, "update_positions", boom)
+
+    cycles = {"n": 0}
+
+    async def fake_sleep(_secs):
+        cycles["n"] += 1
+        if cycles["n"] >= 3:
+            bot._running = False
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+    asyncio.run(bot._position_check_loop())  # must not raise
+    assert cycles["n"] == 3

@@ -24,6 +24,7 @@ from bot.config import (
 )
 from bot.regime import tag as regime_tag
 from bot.state_io import load_json as _load_json, save_json as _save_json
+from bot.tracker_cadence import log_cadence as _log_cadence
 
 logger = logging.getLogger("nexus.tracker")
 
@@ -32,17 +33,35 @@ logger = logging.getLogger("nexus.tracker")
 # Position updates
 # ---------------------------------------------------------------------------
 
-def update_positions() -> list[dict]:
+def update_positions(called_from: str = "unspecified") -> list[dict]:
     """
     Check all open positions against current Kalshi prices.
     Calculate unrealized P&L and flag significant moves.
+
+    Args:
+        called_from: Identifier for the call site, written to
+            tracker_cadence.jsonl (Session 17). Pass "_main_loop",
+            "_position_check_loop", or leave as "unspecified" for tests.
 
     Returns:
         List of positions that moved significantly (for alerting).
     """
     positions = _load_json(POSITIONS_FILE)
     if not isinstance(positions, list):
+        try:
+            _log_cadence(num_open_positions=0, called_from=called_from)
+        except Exception:
+            logger.exception("tracker_cadence logging failed")
         return []
+
+    num_open = sum(
+        1 for p in positions
+        if isinstance(p, dict) and p.get("status") in ("filled", "partial")
+    )
+    try:
+        _log_cadence(num_open_positions=num_open, called_from=called_from)
+    except Exception:
+        logger.exception("tracker_cadence logging failed")
 
     alerts = []
 

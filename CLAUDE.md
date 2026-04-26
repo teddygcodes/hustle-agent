@@ -945,31 +945,48 @@ Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=Fa
 
 ---
 
-### ☐ Session 17 — Tracker cadence audit for short-hold strategies (Apr 26+, planned)
+### ☑ Session 17 — Tracker cadence audit for live_momentum (Apr 26, shipped, Outcome B)
 
-**Problem.** Apr 25 excursion_report showed `median ticks = 1` for `live_momentum` positions. Half the settled live_momentum positions had exactly ONE tracker observation between entry and settlement. That means MFE/MAE is meaningless for live_momentum — Session 9's instrumentation goal is undermined for the strategy that matters most (our only profitable one). Three possible causes need to be distinguished by data:
-1. `update_positions` polls too rarely for live_momentum's hold periods (minutes-to-hours).
-2. live_momentum positions resolve so fast (sports games settling within minutes of entry) that tracker only catches one snapshot — structural, not a bug.
-3. `update_positions` has a bug and isn't running every loop iteration.
+**Problem (pre-fix).** Apr 25's first excursion_report showed `median ticks = 1` for `live_momentum`. Phase-1 read of [bot/state/positions.json](hustle-agent/bot/state/positions.json) revealed the actual problem was worse: **54/60 (90%) of live_momentum positions had `ticks_observed = None`** — never observed by tracker at all. Three causes needed disambiguation: (a) cadence-limited polling, (b) structurally-fast positions, (c) bug in `update_positions`.
 
-Without knowing which, any future excursion analysis on live_momentum is dead on arrival.
+**Diagnosis (Outcome B — cadence-limited).** Phase-1 evidence:
+1. `tracker.update_positions` was called from exactly one place, [bot/main.py:1175](hustle-agent/bot/main.py:1175), once per `_main_loop` iteration. Cadence = `scan_interval`.
+2. `scan_interval` is set by [bot/scanner.py:get_scan_interval](hustle-agent/bot/scanner.py:141) which inspects the *odds-API* games list (NBA/NHL/MLB pregame). It does not see Kalshi-native sports (UFC fights, IPL cricket, individual-match markets) that `live_watcher` actually bets on. So `scan_interval` was IDLE (1800s) most of the time live_momentum was open.
+3. live_journal.json (n=95 paired bet→exit cycles): median lifetime 647s (10.8 min), p25 = 171s, **35% exit in <5 min**. UFC fights especially were sub-2min and raced tracker to zero.
+4. live_watcher's exit path sets `pos["status"] = "exited"` ([bot/live_watcher.py:2391](hustle-agent/bot/live_watcher.py:2391)). After that, tracker's `if status not in (filled, partial): continue` guard ([bot/tracker.py:50](hustle-agent/bot/tracker.py:50)) permanently locks the position out of observation. Positions that exited before update_positions ever fired stayed at `ticks=None` forever.
+5. For the 6/60 ticked positions, implied cadence (lifetime / ticks) was 1312s–3235s, median ~2168s — consistent with IDLE, NOT with SCAN_INTERVAL_LIVE (120s). Confirms scanner saw no live games during those windows.
 
-**Plan.**
-- Read `bot/tracker.py:update_positions` and identify call sites in `bot/main.py`. What's the actual cadence today?
-- Add lightweight per-call observation logging: each `update_positions` call writes to `bot/state/tracker_cadence.jsonl` with `{ts, num_open_positions, ms_since_last_call}`. Append-only, atomic, mirror `decisions.py` pattern. Daily rotation via the existing `_rotate_jsonl` helper.
-- Run for 24h. Sample real data to answer: what's the actual update cadence per open position? For live_momentum positions specifically, what's the position-age distribution at exit?
-- Decide based on data:
-  - **If update_positions fires every 60s but live_momentum positions resolve in <60s on median:** structural-1-tick is expected. Document in CLAUDE.md "known quirks." Not a bug. Stop here.
-  - **If update_positions fires too rarely (e.g., once per scan = 30 min):** add a dedicated `bot/main.py:_position_check_loop` running every 30s independent of `scan_interval`. Touches only open positions (cheap). Re-test after deploy.
-  - **If update_positions has a bug (skipping iterations):** fix it. Likely a try/except swallowing or a circular-import lazy-load issue.
-- Sub-question worth answering even if we don't act on it now: should `live_watcher`'s 10s tick poll ALSO update the tracker for that game's open positions? That would give true tick-density excursion data for live_momentum without burdening tracker with a separate fast loop. Document the answer; build only if the cadence audit shows it's worth it.
+No bug in update_positions itself (Outcome C ruled out). Not structurally meaningless (Outcome A applies only to the sub-30s tail).
 
-**Out of scope.** Building a new ticker-by-ticker price history archive (that's the tick-replay scope, Session 19). Touching live_watcher's own polling cadence for game discovery.
+**What shipped.**
+- **New [bot/tracker_cadence.py](hustle-agent/bot/tracker_cadence.py)** — append-only `tracker_cadence.jsonl` with schema `{ts, num_open_positions, ms_since_last_call, called_from}`. Mirrors [bot/decisions.py](hustle-agent/bot/decisions.py) (threading.Lock, atomic append, never-raises). `ms_since_last_call` is per-call-site (keyed by `called_from`) so `_main_loop` and `_position_check_loop` deltas don't pollute each other.
+- **[bot/tracker.py:update_positions](hustle-agent/bot/tracker.py:35)** — added `called_from: str = "unspecified"` parameter. Calls `tracker_cadence.log_cadence` at the top of every invocation, before iterating positions. `num_open_positions` counts only `(filled, partial)` so the field measures the per-call work, not raw list size.
+- **[bot/main.py:_position_check_loop](hustle-agent/bot/main.py)** — new async loop alongside `_main_loop` / `_live_scan_loop` / `_heartbeat_loop`. Wakes every 30s after a 20s startup delay, calls `update_positions(called_from="_position_check_loop")` via `loop.run_in_executor` (avoids blocking the event loop with the synchronous market-fetch loop). **Discards alerts** — alert→exit_position flow stays driven by `_main_loop`'s call site to avoid double-firing take_profit/cut_loss. Safe because `update_positions` is idempotent (mfe/mae use `>` comparisons; ticks++ is per-call). Wraps in try/except so a market-fetch hiccup doesn't kill the observation loop.
+- **[bot/main.py:1175](hustle-agent/bot/main.py:1175)** — existing main_loop call site updated to `update_positions(called_from="_main_loop")`.
+- **[bot/scheduler.py](hustle-agent/bot/scheduler.py)** — added daily rotation block + `_rotate_tracker_cadence_log` helper, mirroring the existing `_rotate_decisions_log` / `_rotate_universe_log` pattern. Uses `last_tracker_cadence_rotation` key in bot_state.
+- **`tests/test_tracker.py`** — 6 new cases under `TestCadenceLogging`: schema integrity, default `called_from="unspecified"`, per-call-site delta isolation, num_open filters by status, empty-positions case, ticks_observed monotonicity preserved with new param. Plus the `tracker_env` fixture now isolates `tracker_cadence.CADENCE_FILE` to tmp_path so existing tests don't pollute production state.
+- **`tests/test_main.py`** — 2 new cases: `test_position_check_loop_calls_update_positions_each_cycle` (3 work cycles, asserts called_from threaded through and 30s cadence) and `test_position_check_loop_swallows_update_errors` (transient errors don't kill the loop).
 
-**Verify.**
-1. After 24h of `tracker_cadence.jsonl` accumulation: median `ms_since_last_call` for live_momentum-open windows is in the expected range (whatever is decided as "expected").
-2. `python3 tools/excursion_report.py` median ticks for live_momentum **either increases to 5+ ticks** (if a cadence fix shipped) **or is documented as expected-1** (if structural).
-3. The decision and its evidence are recorded in CLAUDE.md "Known Quirks" or similar so future-Claude doesn't re-investigate.
+**Tests.** 124 passed across `test_tracker.py`, `test_main.py`, `test_clv.py`, `test_decisions.py`, `test_excursion_report.py`, `test_bot_tracker.py`. Session 9 ratchet tests + Session 16 settlement-extension tests both still pass — confirming the called_from default keeps backward compat and the tracker_cadence write doesn't disturb existing MFE/MAE behavior.
+
+**Coordination with user (deploy).** Bot must restart to pick up the new `_position_check_loop` task and the modified `update_positions` signature. After restart, `tracker_cadence.jsonl` should have ≥1 row within the first minute (the 20s startup delay + first run_in_executor) and ≥10 rows within five minutes.
+
+**Out of scope (flagged in commit message).**
+- Outcome D (live_watcher's 10s tick poll updating tracker per-game) — defer until 30s loop's effectiveness is measured. Sub-30s positions remain unobserved (see Known Quirk below).
+- `position_observation_log.jsonl` (per-position-per-tick row) — prompt made it optional; the existing `ticks_observed` field on positions.json plus the new cadence log gives the same correlation.
+- Re-running [tools/excursion_report.py](hustle-agent/tools/excursion_report.py) — meaningful only after 48–72h of post-restart data accumulates. Schedule a follow-up agent rather than re-run prematurely.
+- Decoupling `scanner.py:get_scan_interval` from live_watcher's view of "live" (the architectural root cause). The 30s loop sidesteps this without rearchitecting; a deeper unification is out of scope.
+
+**Known quirk (residual structural — Outcome A applies to a small tail).** ~7% of live_momentum positions exit in under 30s (mostly UFC squash matches). Even with the new 30s loop, these will keep `ticks_observed ≤ 1`. To capture sub-30s observations would require integrating tracker into live_watcher's 10s tick poll (Outcome D). When reading `ticks_observed` distributions on live_momentum, treat the sub-30s tail as a known-empty bucket, not a data-quality issue. excursion_report's `n` for live_momentum is therefore a *fraction* of total positions — by design after Session 17, since the unbounded median-tick floor was the actual symptom.
+
+**Verify (post-deploy).**
+1. **Within 1 minute of restart:** `wc -l bot/state/tracker_cadence.jsonl` ≥ 1. `tail -3 bot/state/tracker_cadence.jsonl | jq .` shows the schema (ts, num_open_positions, ms_since_last_call, called_from) and both `_main_loop` + `_position_check_loop` will appear after a few minutes.
+2. **Within 5 minutes:** median `ms_since_last_call` for `_position_check_loop` ≈ 30000ms. Quick check:
+   ```bash
+   python3 -c "import json; from collections import Counter; rows=[json.loads(l) for l in open('bot/state/tracker_cadence.jsonl')]; print(Counter(r['called_from'] for r in rows)); deltas=sorted(r['ms_since_last_call'] for r in rows if r['ms_since_last_call'] and r['called_from']=='_position_check_loop'); print(f'pos-check median: {deltas[len(deltas)//2]/1000:.1f}s' if deltas else 'no data')"
+   ```
+3. **48-72h post-deploy** (scheduled follow-up agent — NOT this session): re-run `python3 tools/excursion_report.py`. Median ticks for live_momentum should improve to ≥5 (positions lasting >5 min now get observed regularly). Also: `positions.json` ticks_observed distribution — instead of 90% None, expect majority populated for new positions opened after the restart. Legacy ones keep their None.
+4. **Existing tests still pass:** `python3 -m pytest tests/test_tracker.py tests/test_main.py -v` — 24 tests including the 6 new TestCadenceLogging + 2 new _position_check_loop tests.
 
 ---
 
