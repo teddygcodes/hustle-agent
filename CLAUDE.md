@@ -886,6 +886,166 @@ Tests: 16 cases in `tests/test_order_microstructure.py` (mocked Kalshi client th
 
 ---
 
+## Apr 26+ Strategy Iteration Arc (Sessions 16–20)
+
+Sessions 12–15.5 built the eyes; this arc uses them. The first run of `tools/excursion_report.py` on Apr 25 surfaced two real findings (a math bug in the gap computation and a structural cadence gap for `live_momentum` positions) and a third gap by absence (`live_journal.json` sitting unread by any tool). Sessions 16–18 close those gaps before May 2's first full retuning report so the data we look at is trustworthy. Sessions 19–20 are explicitly DEFERRED — they're the right next moves but each has clear prerequisites that haven't been met yet (sample-size accumulation for tick-replay back-tester; `PAPER_MODE=False` decision for live microstructure verification).
+
+```
+Session 16: Excursion gap-math fix             (small, urgent — bug)
+            ↓
+Session 17: Tracker cadence audit              (medium — evidence-driven)
+            ↓
+Session 18: live_journal.json analysis tool    (small-medium — net new tool)
+            ↓
+[May 2: full retuning report runs]
+            ↓
+Session 19: Tick-replay back-tester (DEFERRED — prereqs: 16+17+18 + 30+ MFE-instrumented live_momentum settlements + retuning report greenlights live_momentum as the highest-leverage target)
+            ↓
+Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=False decision)
+```
+
+**Why this order, not "build tick-replay back-tester now":** the tick-replay back-tester proposal is a good *eventual* project, not the right *next* project. The Strategy Protocol from Session 13a doesn't fit tick-replay (snapshot vs stateful), `compute_clv_cents` isn't the right metric for swing trading (need realized P&L), and 39 settled trades is too small for parameter-sweep validation without overfitting. Building it before the existing tools have been exhausted (excursion_report, journal_analysis, May 2 retuning report) would be doing engineering work to avoid running 4 commands.
+
+---
+
+### ☐ Session 16 — Excursion gap-math fix (Apr 26+, planned, urgent)
+
+**Problem.** First production run of `tools/excursion_report.py` on Apr 25 returned median gap = -1¢ for both `live_momentum` (n=5) and `vig_stack_series` (n=3). If MFE is "max favorable excursion from entry" by Session 9's definition, then exit price cannot exceed MFE — gap should always be ≥ 0¢. A consistent -1¢ across two unrelated strategies + small samples is a math/units bug, not noise. Could be a sign-convention mismatch (MFE stored as favorable-cents-from-entry, exit_price compared as absolute cents), or comparing the wrong fields, or a rounding artifact at small N. Whatever it is, every excursion-based decision until this is fixed is built on suspect math. **This blocks meaningful use of the excursion report on May 2.**
+
+**Plan.**
+- Read `tools/excursion_report.py`, trace exactly which fields are subtracted to produce the gap.
+- Read `bot/tracker.py:update_positions` (Session 9 site) to verify what MFE actually stores: favorable-magnitude-from-entry, or absolute price?
+- Read `bot/clv.py:check_clv_settlements` propagation site to verify what gets copied from positions onto settled clv records.
+- Identify the mismatch (sign, units, or wrong field name).
+- Fix: align so MFE and exit_price are in the SAME space. Add the convention to module docstrings explicitly so this can't recur silently.
+- New `tests/test_excursion_report.py` with hand-crafted records where gap is mathematically known: e.g. `MFE=10, exit=5 → gap=5`; `MFE=10, exit=10 → gap=0`. Property test: assert gap ≥ 0 always for any synthetic input.
+- Re-run `excursion_report.py` on existing data after fix; confirm gap is non-negative.
+
+**Out of scope.** New excursion metrics (MAE breakdown, percentile distributions). Backfilling MFE on pre-Session-9 records (impossible — data wasn't captured). Tracker cadence (Session 17).
+
+**Verify.**
+1. `python3 tools/excursion_report.py` — every gap value ≥ 0¢.
+2. `python3 -m pytest tests/test_excursion_report.py -v` — property test passes including the hand-crafted equality cases.
+3. Sign convention documented in `tools/excursion_report.py` module docstring AND `bot/tracker.py` MFE-update site comment.
+
+---
+
+### ☐ Session 17 — Tracker cadence audit for short-hold strategies (Apr 26+, planned)
+
+**Problem.** Apr 25 excursion_report showed `median ticks = 1` for `live_momentum` positions. Half the settled live_momentum positions had exactly ONE tracker observation between entry and settlement. That means MFE/MAE is meaningless for live_momentum — Session 9's instrumentation goal is undermined for the strategy that matters most (our only profitable one). Three possible causes need to be distinguished by data:
+1. `update_positions` polls too rarely for live_momentum's hold periods (minutes-to-hours).
+2. live_momentum positions resolve so fast (sports games settling within minutes of entry) that tracker only catches one snapshot — structural, not a bug.
+3. `update_positions` has a bug and isn't running every loop iteration.
+
+Without knowing which, any future excursion analysis on live_momentum is dead on arrival.
+
+**Plan.**
+- Read `bot/tracker.py:update_positions` and identify call sites in `bot/main.py`. What's the actual cadence today?
+- Add lightweight per-call observation logging: each `update_positions` call writes to `bot/state/tracker_cadence.jsonl` with `{ts, num_open_positions, ms_since_last_call}`. Append-only, atomic, mirror `decisions.py` pattern. Daily rotation via the existing `_rotate_jsonl` helper.
+- Run for 24h. Sample real data to answer: what's the actual update cadence per open position? For live_momentum positions specifically, what's the position-age distribution at exit?
+- Decide based on data:
+  - **If update_positions fires every 60s but live_momentum positions resolve in <60s on median:** structural-1-tick is expected. Document in CLAUDE.md "known quirks." Not a bug. Stop here.
+  - **If update_positions fires too rarely (e.g., once per scan = 30 min):** add a dedicated `bot/main.py:_position_check_loop` running every 30s independent of `scan_interval`. Touches only open positions (cheap). Re-test after deploy.
+  - **If update_positions has a bug (skipping iterations):** fix it. Likely a try/except swallowing or a circular-import lazy-load issue.
+- Sub-question worth answering even if we don't act on it now: should `live_watcher`'s 10s tick poll ALSO update the tracker for that game's open positions? That would give true tick-density excursion data for live_momentum without burdening tracker with a separate fast loop. Document the answer; build only if the cadence audit shows it's worth it.
+
+**Out of scope.** Building a new ticker-by-ticker price history archive (that's the tick-replay scope, Session 19). Touching live_watcher's own polling cadence for game discovery.
+
+**Verify.**
+1. After 24h of `tracker_cadence.jsonl` accumulation: median `ms_since_last_call` for live_momentum-open windows is in the expected range (whatever is decided as "expected").
+2. `python3 tools/excursion_report.py` median ticks for live_momentum **either increases to 5+ ticks** (if a cadence fix shipped) **or is documented as expected-1** (if structural).
+3. The decision and its evidence are recorded in CLAUDE.md "Known Quirks" or similar so future-Claude doesn't re-investigate.
+
+---
+
+### ☐ Session 18 — live_journal.json analysis tool (Apr 26+, planned)
+
+**Problem.** `bot/state/live_journal.json` (~600 KB and growing) records every per-game event live_watcher emits (`scan_found`, `bet`, `exit`, `session_end`) for every game. This is rich behavioral data that NO existing analysis tool reads. It captures things excursion_report and cohort_report can't:
+- Time-to-exit distribution per strategy (where does the actual hold-time density live?)
+- Exit-reason breakdown (take_profit vs trailing_stop vs near_settle vs hard_cap — each is a tunable)
+- "Watched but didn't enter" funnel (per game: did we see it? Why didn't we enter? `no_leader`, `low_volume`, `disabled_sport`, `no_dip`)
+- Per-sport breakdown of all the above
+- Session_end summary per game (P&L, max drawdown, win/loss)
+
+Sessions 6–15 instrumented decisions. Session 18 reads the BEHAVIOR data sitting unanalyzed. This is also the better Step-1 we should have run before excursion_report on Apr 25.
+
+**Plan.**
+- New `tools/journal_analysis.py` (gitignored, local-only — match the `cohort_report` / `excursion_report` / `calibration_report` / `universe_report` / `microstructure_report` convention).
+- Read current `live_journal.json` plus any rotation archives if they exist. (If `live_journal.json` doesn't have rotation today, that's a separate small task — flag in commit but don't scope-creep into adding it here.)
+- Per-strategy aggregations:
+  - **Time-to-exit distribution**: bucket {<5min, 5-15min, 15-60min, >60min}. For live_momentum, where does the density live?
+  - **Exit-reason breakdown**: % via take_profit / trailing_stop / stop_loss / near_settle / hard_cap. Surface the most-common and least-common — each rare reason is either dead config or bad-data signal.
+  - **Watch-but-no-enter funnel**: aggregate `scan_found` events that have NO matching `bet`. Group by `skip_reason` if recorded; otherwise mark as `unknown_skip`.
+  - **Per-sport split**: same metrics segmented by sport (NBA / NHL / MLB / UFC / IPL).
+  - **Per-game session_end**: P&L distribution, drawdown distribution.
+- Markdown to stdout. Designed to be the **primary analysis tool for live_momentum** until tick-replay back-tester (Session 19) ships.
+- Optional: regime-slice support via `--regime-by` flag mirroring the other reports. Skip if it adds non-trivial complexity; the per-sport split already captures the most important regime axis for sports strategies.
+
+**Out of scope.** Tick-replay (Session 19). Modifying `live_watcher` to record additional event fields (forward-compatible — work with what's there). Rotation of `live_journal.json` itself if absent (separate trivial task).
+
+**Verify.**
+1. `python3 tools/journal_analysis.py` runs without errors on production journal.
+2. Output makes intuitive sense: NBA hold times ~10-30 min match expectation, exit-reason mix is roughly balanced (not 100% one path).
+3. **Find at least one actionable insight.** Examples: "85% of NBA exits via take_profit, 0% stop_loss → stop_loss is set too generous, never fires"; "60% of UFC games never get entered because of `no_leader` → leader threshold is too strict for UFC"; "median NBA hold time is 4 min → live_momentum is more scalp than swing → take_profit could be tightened." Record the insight in the Session 18 commit message; it's the deliverable, not the tool.
+
+---
+
+### ☐ Session 19 — Tick-replay back-tester for live_momentum (Apr 26+, planned, DEFERRED)
+
+**Problem.** Live_momentum is our only profitable strategy (+$12.30, 62% WR over 39 trades). Tick data has been accumulating in `live_ticks-*.jsonl.gz` archives since Session 5 (Apr 23). The natural next move is to back-test the swing-trading strategy across parameter sweeps. **But building this BEFORE the prereqs are met would be premature for four reasons surfaced in the Apr 25 design discussion:**
+1. The Strategy Protocol from Session 13a is *snapshot-based*; live_momentum is *stateful per-game*. The contract needs an extension (`TickStrategy` with a `process_tick()` method), not reuse.
+2. `compute_clv_cents` measures entry-vs-close. Swing trading needs entry-vs-EXIT (realized P&L). Different metric.
+3. 39 settled trades is too small for parameter-sweep validation without overfitting. Standard error on 62% WR with n=39 is ~8 percentage points.
+4. Market-impact slippage on Kalshi's thin sports markets is real and unmeasured (PAPER_MODE=True → microstructure data is empty). A naive back-test will look 25-50% more profitable than reality.
+
+**Prereqs (gates the session — do not start until all four met).**
+1. Sessions 16 (excursion bug fix) + 17 (tracker cadence) + 18 (journal analysis) shipped.
+2. May 2 retuning report run; outcome confirms `live_momentum` is the highest-leverage retuning target (vs say vig_stack which is bleeding $110/54 trades). If retuning report points elsewhere, build the back-tester for THAT strategy instead.
+3. At least 30 settled live_momentum positions with MFE/MAE coverage (vs Apr 25's 5). Calendar-bound.
+4. Honest acknowledgment of slippage as an UNMEASURED variable; design the back-tester with a configurable slippage assumption.
+
+**Plan (when prereqs met).**
+- Extend `bot/strategies/__init__.py` Protocol with a `TickStrategy` variant: `process_tick(state, tick) -> TickAction | None` where `TickAction` is `Buy(side, qty)` / `Sell(side, qty)` / `None`. Stateful (carries position/price-history state across ticks) — distinct from the snapshot-based `Strategy`.
+- New `bot/strategies/live_momentum.py` (or refactor existing live_watcher entry/exit logic) implementing the `TickStrategy` contract — pure function from `(state, tick) → action`. Mirror the 13a discipline: behavior-preserving refactor first, golden-file test locking equivalence to current live_watcher behavior, THEN parameter knobs.
+- New `tools/tick_backtest.py` (local-only) reads `live_ticks-*.jsonl.gz` archives, replays through TickStrategy, emits per-game realized P&L.
+- Parameter sweep grid: `dip_threshold` × `take_profit` × `stop_loss` × `max_entry_price`. Cap total combos at ~50 to avoid overfitting bait.
+- **Train/test split discipline:** sweep on 70% of games (by date order), validate on held-out 30%. Report BOTH numbers; only the validation P&L matters for retuning decisions.
+- **Slippage pessimism:** every round-trip subtracts a configurable slippage (default `+2¢` per round trip — ungenerous on purpose). Document the assumption explicitly in the report output.
+- Regime slicing via `bot/regime.py` tagger on game start time.
+- Output: per-variant table (validation_pnl, validation_winrate, validation_round_trips) + best-validated variant callout. NEVER auto-promote.
+
+**Out of scope.** Auto-promotion of best variant to live (always human gate). Refactoring live_watcher to USE the TickStrategy contract immediately (only refactor when ready to back-test live changes; pre-refactor lock-via-golden-test is the prereq).
+
+**Verify (when shipped).**
+1. **Replay matches reality:** take a known live_momentum trade from `paper_trades.json`, replay its game's ticks through TickStrategy with current parameters, assert P&L matches within 1¢. If not, the back-tester has a bug — fix before reporting any sweep.
+2. Sweep produces non-flat result curves (parameter actually matters across the range).
+3. Validation P&L ≥ 0 for the best variant. **If validation is negative when training is positive, we're overfitting** — narrow the sweep grid or reject the result.
+4. Commit message names the best-validated parameter set as a Session-21+ retuning candidate (NOT auto-promoted).
+
+---
+
+### ☐ Session 20 — Live order microstructure verification (Apr 26+, planned, DEFERRED)
+
+**Problem.** Session 15 shipped `bot/order_microstructure.py` plumbing. Verification was deferred to "when PAPER_MODE=False" since paper trades produce zero microstructure rows by construction. When the bot eventually flips live, the first 50 orders are the moment of truth: does the capture work end-to-end? Are slippage / latency / partial-fill numbers in the expected range? Does paper-mode CLV match slippage-adjusted live CLV? Without this verification, going live is flying blind on execution costs.
+
+**Prereq.** `PAPER_MODE = False` decision made and deployed. This is a Tyler-decision, not a code-decision; do not pre-empt.
+
+**Plan (when shipped).**
+- After flip to live, monitor `bot/state/order_microstructure.jsonl` after first order: row populated with all expected fields, sign convention correct (positive slippage = adverse), `terminal_status` set.
+- Run `python3 tools/microstructure_report.py` after first 10 / 50 orders.
+- Compare slippage-adjusted live CLV to paper CLV for the same strategy over the same period. **Target: ≤2¢ divergence.** If >3¢ divergence: paper-mode is over-optimistic and Session 21+ needs to bake a slippage assumption into paper simulation.
+- Per-strategy slippage / latency: any strategy with median slippage > 2¢ or fill latency > 5s p95 is a Session-21+ execution-tuning candidate.
+- Update `tools/microstructure_report.py` if live-order data reveals fields/edge cases the mock tests didn't catch (Kalshi's API has historically had quirks — see the `finalized` vs `settled` discovery in Session 13c).
+
+**Out of scope.** Order routing optimization (use this data to inform changes manually, then iterate — Session 21+). Smart-order-router. Anything that touches paper mode.
+
+**Verify (when shipped).**
+1. First live order populates a complete row in `order_microstructure.jsonl`.
+2. After 50 live orders: `microstructure_report` shows median slippage / fill latency / partial-fill rate per strategy.
+3. Slippage-adjusted CLV per strategy matches paper CLV within ≤2¢. If diverges >3¢: open Session 21+ to bake slippage into paper simulation.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
