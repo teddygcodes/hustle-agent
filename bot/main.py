@@ -972,12 +972,20 @@ class GlintBot:
 
     async def _heartbeat_loop(self):
         """Touch bot.lock every 30s so wedged-loop detection (Gotcha #6) isn't
-        masked by long scan_interval. Independent of _main_loop's per-scan touch."""
+        masked by long scan_interval. Also refreshes bot_state.last_heartbeat
+        so liveness checks (Telegram /STATUS, monitoring scripts) see fresh
+        timestamps between scans. Session 15.5."""
         while self._running:
             try:
                 LOCK_FILE.touch()
             except Exception:
                 logger.debug("heartbeat touch failed", exc_info=True)
+            try:
+                state = _load_bot_state()
+                state["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+                _save_bot_state(state)
+            except Exception:
+                logger.warning("heartbeat bot_state update failed", exc_info=True)
             await asyncio.sleep(30)
 
     async def _live_scan_loop(self):
