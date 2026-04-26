@@ -861,6 +861,31 @@ Tests: 16 cases in `tests/test_order_microstructure.py` (mocked Kalshi client th
 
 ---
 
+### ☑ Session 15.5 — Data integrity hardening before 7-day unattended run (Apr 25, shipped)
+
+**Problem.** Sessions 6–15 instrumented the bot comprehensively but four subtle gaps would let silent corruption accumulate over a week of unattended operation: (1) `_heartbeat_loop` only touched `bot.lock`, never refreshed `bot_state.last_heartbeat` — Telegram /STATUS and any future watchdog would falsely flag healthy bots as wedged. (2) Pytest runs polluted `bot/logs/bot.log` with mocked errors (190 fake ERROR/Traceback entries accumulated over 24h, ~67KB per suite run) because `bot/main.py:28` calls `setup_file_logging()` at import time — `grep ERROR bot/logs/bot.log` was an unreliable health check. (3) Universe `partial: True` snapshots (90s deadline / cursor failure / Kalshi error) were tagged but unmetered — a 30% sustained partial rate would silently bias every downstream report. (4) `event_horizon_hr` regime coverage on `decisions.jsonl` was 0/4309 because the regime tagger reads `close_ts` from the gate-context `extra` dict but no caller threaded it. (5) Two recent UFC paper positions in `positions.json` lacked regime tags (152/154). (6) No 7-day retuning checklist for the chat reading the data come May 2.
+
+**What shipped.**
+- `bot/main.py:_heartbeat_loop` now writes `bot_state.last_heartbeat = now` alongside `LOCK_FILE.touch()` every 30s. State-io errors logged-and-continued so the heartbeat task never crashes on transient FS issues.
+- `tests/conftest.py` gained an autouse session-scoped `_isolate_glint_loggers` fixture that snapshots root + glint.*/nexus.* handlers, replaces them with NullHandler, force-marks `bot.logger._initialized=True` so any later import of bot.main can't re-attach the RotatingFileHandler, and removes any `RotatingFileHandler` that slipped in pre-fixture. Restores on teardown. Tests asserting on log output use pytest's `caplog`.
+- `bot/universe.py:snapshot_universe` persists `total_snapshots_today` + `partial_snapshots_today` to `bot_state.json` (atomic via `state_io`, reset at midnight ET via `last_universe_metering_reset`). A trailing 10-snapshot deque emits a WARN if partial rate ≥ 10%.
+- `bot/executor.py` threads `close_ts` through all 13 `log_decision` call sites: `_log_position_reject` gains a `close_ts` kwarg (used by 7 position-cap gates via `_check_position_limits`'s new `close_ts` param), `_log_edge_reject` extracts close_ts from opportunity (covers 5 verify-edge gates), and the 2 direct sites (self_check_failed, all_gates_passed) include `close_ts` in extras. Caller-supplied `close_ts` in extras always wins.
+- `bot/strategies/vig_stack_series.py` adds `close_ts` to the extra dict on all 10 log_decision sites (low_liquidity, no_vig, market_closed [where extra was previously absent — added with just close_ts], forecast_in_bucket, no_price_too_low, no_price_below_floor, non_stable_below_weather_floor, edge_below_threshold, self_check_failed, all_gates_passed). Behavior-preservation regression tests still pass.
+- `bot/live_watcher.py:_log_decision_dampened` gains a `close_ts` kwarg; `_tick_momentum` extracts close_ts from the freshly-fetched market dict once and passes it to all 5 dampener call sites. Closes the last 0%-coverage gap on `event_horizon_hr` for live_momentum decisions.
+- `tools/backfill_regime.py` re-run on `positions.json` tagged the 2 UFC fight positions (`KXUFCFIGHT-26APR25VIEMCC-VIE/MCC`); both get `sport_phase: None` (UFC isn't in `SPORT_PHASES`, by design — UFC has no traditional season; defer to a future SPORT_PHASES expansion if Tyler wants UFC seasonality). `event_horizon_hr` stays null because positions.json records don't carry close_ts (not a regression — schema thing).
+- `CLAUDE.md` adds "When Tyler Asks for the 7-Day Retuning Report" section (mirrors the "How is it looking?" / "Check the Data" triad) plus check #12 in the Check the Data section for the daily partial-rate ratio.
+
+**Tests.** 5 conftest fixture cases (`tests/test_conftest_logger_isolation.py`), 2 heartbeat dual-update cases (`tests/test_main.py`), 5 universe partial-rate cases (`tests/test_universe.py::TestPartialRateMetering`), 7 close_ts threading cases (`tests/test_bot_executor.py::TestCloseTsThreading`), 5 vig_stack close_ts cases (`tests/test_vig_stack_series_strategy.py::test_every_decision_extra_carries_close_ts`), 2 dampener close_ts cases (`tests/test_live_watcher.py`). 26 new tests total; existing behavior-preservation suites still pass. The 9 pre-existing failures noted in Sessions 4/5/6 remain (unrelated).
+
+**Verify (post-restart).**
+1. `python3 -c "import json, datetime as dt; s=json.load(open('bot/state/bot_state.json')); print('hb age:', (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(s['last_heartbeat'])).total_seconds(), 's')"` — < 60s sustained.
+2. `python3 -m pytest tests/ -q` does not add ERROR/Traceback lines to `bot/logs/bot.log` (use `grep -cE 'ERROR|CRITICAL|Traceback' bot/logs/bot.log` before/after).
+3. `python3 -c "import json; s=json.load(open('bot/state/bot_state.json')); print(s.get('total_snapshots_today'), s.get('partial_snapshots_today'))"` — both fields present after first scan post-restart.
+4. After ~10 scans post-restart: `python3 -c "import json; r=[json.loads(l) for l in open('bot/state/decisions.jsonl')]; recent=[x for x in r if x.get('ts','') >= '2026-04-26']; with_ehr=sum(1 for x in recent if x.get('regime',{}).get('event_horizon_hr') is not None); print(f'{with_ehr}/{len(recent)} ({100*with_ehr/len(recent) if recent else 0:.0f}%)')"` — > 60% target, > 90% goal.
+5. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); wr=sum(1 for x in p if isinstance(x,dict) and 'regime' in x); print(f'{wr}/{len(p)}')"` — `154/154`.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
@@ -976,6 +1001,58 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - Anything before 2026-04-24 in `clv.json` may have polluted records (KXTEST, entry<3¢ CFs) that were cleaned but pre-cleanup counts in archives differ.
 - `decisions.jsonl` started fresh on Session-6 deploy date and `predictions.jsonl` on Session-11 deploy date — historical scans before each is not reconstructible.
 - Session 14 (Apr 25): `sport_phase` derived from a hardcoded date table in `bot/regime.py` (no ESPN integration); needs yearly bump. ATP/WTA/UFC/IPL/F1 return `null`.
+
+---
+
+## When Tyler Asks for the 7-Day Retuning Report
+
+This is the session where folklore turns into evidence. Bring concrete numbers, not gut feelings. After 7 days of unattended bot operation (target: ~May 2 from session 15.5 on Apr 25), Tyler will ask "what should we retune?". Walk through this checklist; each step produces a discrete artifact, and cross-cuts (step 5) tell you which gates are top-priority.
+
+**1. Verify rotations fired correctly.**
+
+```bash
+ls bot/state/archive/*-2026-04-26.jsonl.gz
+ls bot/state/archive/*-2026-05-01.jsonl.gz
+```
+
+If any day is missing, the data is partial — flag it before drawing conclusions.
+
+**2. Run all four reports together (no regime slicing).**
+
+```bash
+python3 tools/cohort_report.py --days 7
+python3 tools/excursion_report.py --days 7
+python3 tools/calibration_report.py --days 7
+python3 tools/universe_report.py --days 7
+```
+
+**3. Run regime-sliced versions for the high-signal axes.**
+
+```bash
+python3 tools/cohort_report.py --days 7 --regime-by sport_phase
+python3 tools/cohort_report.py --days 7 --regime-by time_of_day
+python3 tools/cohort_report.py --days 7 --regime-by event_horizon_hr
+python3 tools/calibration_report.py --days 7 --regime-by sport_phase
+```
+
+**4. What to look for in each.**
+
+- **COHORT:** gates with >50% reject rate AND positive mean CLV on rejects → mis-tuned (surrendering alpha). Distance-histogram: gates with >50% of rejects clustered <10% from the threshold are boundary candidates for loosening.
+- **EXCURSION:** per-strategy median(MFE − exit) > 5¢ → exit logic leaves alpha. Look for outlier positions (MFE > 20¢, exit at baseline) — those are exit-improvement targets.
+- **CALIBRATION:** any strategy where predicted bucket [80, 90¢) resolves YES <70% → fair-value formula has systematic bias. Brier > 0.18 means the strategy is poorly calibrated and shouldn't size up.
+- **UNIVERSE:** ignored market families with >$100/day volume + spread >5¢ → candidates for new strategies via `tools/backtest.py --include-history`.
+
+**5. Cross-strategy intersection.**
+
+Gates flagged by cohort AND excursion AND calibration are top-priority retuning targets. Single-report flags are interesting but lower-priority. A gate that fails just one lens may be an artifact; one that fails all three is structural.
+
+**6. Caveats.**
+
+- `calibration_report` won't have live_momentum coverage (Session 7 noted no usable scalar fair value).
+- `excursion_report` only covers strategies with settled positions in the window.
+- `sport_phase` is a hardcoded date table (`bot/regime.py:SPORT_PHASES`) — verify it's not stale (NBA playoffs end ~Jun 22 2026; UFC isn't in the table by design).
+- `event_horizon_hr` will be near-zero on rows written before Session 15.5 (4309 historical decisions.jsonl rows have null); slice on rows from Apr 25 2026+ only for that axis.
+- `partial_snapshots_today` from `bot_state.json` (Session 15.5): if any day in the window had a partial-rate WARN, that day's `universe_report` and `cohort_report` are biased toward markets that survived the truncated cursor; flag in writeup.
 
 ---
 
