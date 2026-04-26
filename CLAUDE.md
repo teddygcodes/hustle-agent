@@ -888,7 +888,11 @@ Tests: 16 cases in `tests/test_order_microstructure.py` (mocked Kalshi client th
 
 ## Apr 26+ Strategy Iteration Arc (Sessions 16–20)
 
-Sessions 12–15.5 built the eyes; this arc uses them. The first run of `tools/excursion_report.py` on Apr 25 surfaced two real findings (a math bug in the gap computation and a structural cadence gap for `live_momentum` positions) and a third gap by absence (`live_journal.json` sitting unread by any tool). Sessions 16–18 close those gaps before May 2's first full retuning report so the data we look at is trustworthy. Sessions 19–20 are explicitly DEFERRED — they're the right next moves but each has clear prerequisites that haven't been met yet (sample-size accumulation for tick-replay back-tester; `PAPER_MODE=False` decision for live microstructure verification).
+Sessions 12–15.5 built the eyes; this arc uses them. The first run of `tools/excursion_report.py` on Apr 25 surfaced two real findings (a math bug in the gap computation and a structural cadence gap for `live_momentum` positions) and a third gap by absence (`live_journal.json` sitting unread by any tool). Sessions 16–18 close those gaps so the data we look at is trustworthy.
+
+**Honest framing on the May 2 / Day-7 horizon:** Day 7 is when *vig_stack-related* signal stabilizes (cohort/calibration reports get ~250 settled CFs/gate, ~2000 settled predictions). Day 7 is **not** when live_momentum signal stabilizes — live_momentum has no fair value (no calibration), short holds (broken excursion until Session 17), and only 3 reject types (no rich cohort signal). For our profitable strategy, the path is engineering-blocked, not calendar-blocked: Sessions 17+18 unlock more live_momentum signal than another month of calendar time would. See "When Tyler Asks for the 7-Day Retuning Report" below for the per-report confidence breakdown.
+
+Sessions 19–20 are explicitly DEFERRED — they're the right next moves but each has clear prerequisites that haven't been met yet (sample-size accumulation for tick-replay back-tester; `PAPER_MODE=False` decision for live microstructure verification).
 
 ```
 Session 16: Excursion gap-math fix             (small, urgent — bug)
@@ -904,13 +908,13 @@ Session 19: Tick-replay back-tester (DEFERRED — prereqs: 16+17+18 + 30+ MFE-in
 Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=False decision)
 ```
 
-**Why this order, not "build tick-replay back-tester now":** the tick-replay back-tester proposal is a good *eventual* project, not the right *next* project. The Strategy Protocol from Session 13a doesn't fit tick-replay (snapshot vs stateful), `compute_clv_cents` isn't the right metric for swing trading (need realized P&L), and 39 settled trades is too small for parameter-sweep validation without overfitting. Building it before the existing tools have been exhausted (excursion_report, journal_analysis, May 2 retuning report) would be doing engineering work to avoid running 4 commands.
+**Why this order, not "build tick-replay back-tester now":** the tick-replay back-tester proposal is a good *eventual* project, not the right *next* project. The Strategy Protocol from Session 13a doesn't fit tick-replay (snapshot vs stateful), `compute_clv_cents` isn't the right metric for swing trading (need realized P&L), and 39 settled trades is too small for parameter-sweep validation without overfitting. Sessions 17 + 18 produce more live_momentum signal at less cost than building the back-tester immediately.
 
 ---
 
 ### ☐ Session 16 — Excursion gap-math fix (Apr 26+, planned, urgent)
 
-**Problem.** First production run of `tools/excursion_report.py` on Apr 25 returned median gap = -1¢ for both `live_momentum` (n=5) and `vig_stack_series` (n=3). If MFE is "max favorable excursion from entry" by Session 9's definition, then exit price cannot exceed MFE — gap should always be ≥ 0¢. A consistent -1¢ across two unrelated strategies + small samples is a math/units bug, not noise. Could be a sign-convention mismatch (MFE stored as favorable-cents-from-entry, exit_price compared as absolute cents), or comparing the wrong fields, or a rounding artifact at small N. Whatever it is, every excursion-based decision until this is fixed is built on suspect math. **This blocks meaningful use of the excursion report on May 2.**
+**Problem.** First production run of `tools/excursion_report.py` on Apr 25 returned median gap = -1¢ for both `live_momentum` (n=5) and `vig_stack_series` (n=3). If MFE is "max favorable excursion from entry" by Session 9's definition, then exit price cannot exceed MFE — gap should always be ≥ 0¢. A consistent -1¢ across two unrelated strategies + small samples is a math/units bug, not noise. Could be a sign-convention mismatch (MFE stored as favorable-cents-from-entry, exit_price compared as absolute cents), or comparing the wrong fields, or a rounding artifact at small N. Whatever it is, every excursion-based decision until this is fixed is built on suspect math. **This blocks meaningful use of the excursion report at any sample size — bigger N just adds confident wrong numbers.**
 
 **Plan.**
 - Read `tools/excursion_report.py`, trace exactly which fields are subtracted to produce the gap.
@@ -1000,7 +1004,7 @@ Sessions 6–15 instrumented decisions. Session 18 reads the BEHAVIOR data sitti
 
 **Prereqs (gates the session — do not start until all four met).**
 1. Sessions 16 (excursion bug fix) + 17 (tracker cadence) + 18 (journal analysis) shipped.
-2. May 2 retuning report run; outcome confirms `live_momentum` is the highest-leverage retuning target (vs say vig_stack which is bleeding $110/54 trades). If retuning report points elsewhere, build the back-tester for THAT strategy instead.
+2. Sessions 17 + 18 outputs (tracker cadence + journal_analysis) confirm that live_momentum exit-logic / parameter retuning is the highest-leverage candidate. If journal_analysis instead points at a config issue (e.g., 60% of UFC games never enter due to leader threshold), fix THAT first — it's cheaper than a back-tester. The back-tester only earns its scope when the existing analysis tools have been exhausted on live_momentum specifically.
 3. At least 30 settled live_momentum positions with MFE/MAE coverage (vs Apr 25's 5). Calendar-bound.
 4. Honest acknowledgment of slippage as an UNMEASURED variable; design the back-tester with a configurable slippage assumption.
 
@@ -1166,7 +1170,34 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 
 ## When Tyler Asks for the 7-Day Retuning Report
 
-This is the session where folklore turns into evidence. Bring concrete numbers, not gut feelings. After 7 days of unattended bot operation (target: ~May 2 from session 15.5 on Apr 25), Tyler will ask "what should we retune?". Walk through this checklist; each step produces a discrete artifact, and cross-cuts (step 5) tell you which gates are top-priority.
+After ~7 days of unattended operation (first viable date: ~May 2, 2026 from Apr 25 deploy), Tyler will ask "what should we retune?" This checklist walks through the four reports, but **the four reports are not symmetric** — they produce wildly different signal quality on Day 7, and confusing them leads to the wrong conclusions. Read this framing first.
+
+### The honest per-report confidence table
+
+| Report | Day-7 confidence | Strategy coverage | What it actually tells you |
+|---|---|---|---|
+| `cohort_report` | **HIGH** | vig_stack-dominated | Gate-by-gate "edge surrendered by rejects" — the mis-tuning signal |
+| `calibration_report` | **HIGH** | vig_stack only (live_momentum has no fair value) | Per-bucket Brier scores — is the fair-value model right? |
+| `universe_report` | **HIGH** | All strategies | What market families we ignore — independent of trade volume |
+| `excursion_report` | **WEAK to LIMITED** | Borderline-useful for vig_stack; **BLOCKED for live_momentum** until Session 17 fixes the median-1-tick cadence problem | Whether exit logic leaves alpha on the table — only if MFE/MAE has enough observations per position |
+
+### What this means strategically
+
+**Day 7 is a vig_stack story, not a live_momentum story.**
+
+- **vig_stack_series is bleeding money** (−$110.62 over 54 trades). Day 7 reports will say a lot about it: which gates are mis-tuned, whether the fair-value model is biased, whether the entire strategy is structurally broken. **Real retuning value here.**
+- **live_momentum is profitable** (+$12.30, 62% WR over 39 trades). Day 7 reports will tell us **almost nothing actionable** about it. Excursion is blocked by tracker cadence. Calibration is structurally absent (no fair value). Cohort has only 3 reject types so no "many gates need tuning" signal possible.
+
+**For live_momentum, the path to real signal is engineering-blocked, not calendar-blocked:**
+- Session 17 (tracker cadence audit) — without this, no MFE-based analysis works for sub-hour holds
+- Session 18 (live_journal.json analysis) — actually-rich live_momentum data
+- Session 19 (tick-replay back-tester, deferred) — the real answer
+
+If the Apr 26+ arc has shipped Sessions 16-18 by Day 7, you'll have richer live_momentum signal from `journal_analysis.py` than from the Day-7 reports. Don't pretend May 2 is an oracle.
+
+---
+
+### The actual checklist
 
 **1. Verify rotations fired correctly.**
 
@@ -1177,16 +1208,25 @@ ls bot/state/archive/*-2026-05-01.jsonl.gz
 
 If any day is missing, the data is partial — flag it before drawing conclusions.
 
-**2. Run all four reports together (no regime slicing).**
+**2. Run the high-confidence reports first.**
 
 ```bash
 python3 tools/cohort_report.py --days 7
-python3 tools/excursion_report.py --days 7
 python3 tools/calibration_report.py --days 7
 python3 tools/universe_report.py --days 7
 ```
 
-**3. Run regime-sliced versions for the high-signal axes.**
+These three produce trustworthy Day-7 signal. Spend 80% of analysis time here.
+
+**3. Run excursion only as a sanity check, not for decisions.**
+
+```bash
+python3 tools/excursion_report.py --days 7
+```
+
+Sample size is borderline-useful for vig_stack and structurally meaningless for live_momentum (until Session 17 ships). If Session 16 has shipped, the gap math is at least correct; if not, treat any non-zero gap with deep skepticism.
+
+**4. Run regime-sliced versions for the high-signal axes.**
 
 ```bash
 python3 tools/cohort_report.py --days 7 --regime-by sport_phase
@@ -1195,24 +1235,36 @@ python3 tools/cohort_report.py --days 7 --regime-by event_horizon_hr
 python3 tools/calibration_report.py --days 7 --regime-by sport_phase
 ```
 
-**4. What to look for in each.**
+**5. If Sessions 17/18 have shipped, ALSO run journal_analysis for live_momentum.**
 
-- **COHORT:** gates with >50% reject rate AND positive mean CLV on rejects → mis-tuned (surrendering alpha). Distance-histogram: gates with >50% of rejects clustered <10% from the threshold are boundary candidates for loosening.
-- **EXCURSION:** per-strategy median(MFE − exit) > 5¢ → exit logic leaves alpha. Look for outlier positions (MFE > 20¢, exit at baseline) — those are exit-improvement targets.
-- **CALIBRATION:** any strategy where predicted bucket [80, 90¢) resolves YES <70% → fair-value formula has systematic bias. Brier > 0.18 means the strategy is poorly calibrated and shouldn't size up.
-- **UNIVERSE:** ignored market families with >$100/day volume + spread >5¢ → candidates for new strategies via `tools/backtest.py --include-history`.
+```bash
+python3 tools/journal_analysis.py
+```
 
-**5. Cross-strategy intersection.**
+This is where actual live_momentum retuning candidates surface — exit-reason mix, hold-time distribution, watch-but-no-enter funnel. Far richer than the Day-7 reports for our profitable strategy.
 
-Gates flagged by cohort AND excursion AND calibration are top-priority retuning targets. Single-report flags are interesting but lower-priority. A gate that fails just one lens may be an artifact; one that fails all three is structural.
+**6. What to look for in each.**
 
-**6. Caveats.**
+- **COHORT (vig_stack-dominated, high confidence):** gates with >50% reject rate AND positive mean CLV on rejects → mis-tuned (surrendering alpha). Distance-histogram: gates with >50% of rejects clustered <10% from threshold are boundary candidates for loosening. **This is where vig_stack retuning targets come from.**
+- **CALIBRATION (vig_stack only, high confidence):** any strategy where predicted bucket [80, 90¢) resolves YES <70% → fair-value formula has systematic bias. Brier > 0.18 means the strategy is poorly calibrated and shouldn't size up. **No live_momentum row will appear; that's expected, not a bug.**
+- **UNIVERSE (all strategies, high confidence):** ignored market families with >$100/day volume + spread >5¢ → candidates for new strategies via `tools/backtest.py --include-history`.
+- **EXCURSION (low confidence, sanity check only):** if median(MFE − exit) > 5¢ for vig_stack, that's a real exit-logic candidate. For live_momentum, treat any number with extreme skepticism unless Session 17 confirmed cadence is healthy.
+- **JOURNAL_ANALYSIS (live_momentum, available if Session 18 shipped):** exit-reason distribution, time-to-exit histogram, watch-but-no-enter funnel. **This is where live_momentum retuning targets come from.**
 
-- `calibration_report` won't have live_momentum coverage (Session 7 noted no usable scalar fair value).
-- `excursion_report` only covers strategies with settled positions in the window.
-- `sport_phase` is a hardcoded date table (`bot/regime.py:SPORT_PHASES`) — verify it's not stale (NBA playoffs end ~Jun 22 2026; UFC isn't in the table by design).
-- `event_horizon_hr` will be near-zero on rows written before Session 15.5 (4309 historical decisions.jsonl rows have null); slice on rows from Apr 25 2026+ only for that axis.
+**7. Cross-strategy intersection (vig_stack only).**
+
+For vig_stack: gates flagged by cohort AND calibration are top-priority retuning targets. Single-report flags are interesting but lower-priority. A gate that fails one lens may be an artifact; one that fails both is structural.
+
+For live_momentum: cross-intersection doesn't apply. Use journal_analysis findings + (if Session 19 has shipped) tick-replay back-tester results as the primary source.
+
+**8. Caveats.**
+
+- `calibration_report` has zero live_momentum coverage by design (Session 7 noted no usable scalar fair value). This is a structural gap, not a data gap. Don't expect Day 14 / Day 30 to fix it — only a future "live momentum fair value proxy" session will.
+- `excursion_report` is sample-limited for both strategies and cadence-broken for live_momentum until Session 17 ships.
+- `sport_phase` is a hardcoded date table (`bot/regime.py:SPORT_PHASES`) — verify it's not stale (NBA playoffs end ~Jun 22, 2026; UFC isn't in the table by design).
+- `event_horizon_hr` will be near-zero on rows written before Session 15.5 (the historical decisions.jsonl rows have null); slice on rows from Apr 25, 2026+ only for that axis.
 - `partial_snapshots_today` from `bot_state.json` (Session 15.5): if any day in the window had a partial-rate WARN, that day's `universe_report` and `cohort_report` are biased toward markets that survived the truncated cursor; flag in writeup.
+- **The Day-7 framing is convenient, not magic.** If Sessions 16/17/18 ship before May 2, run reports earlier and re-run after each session lands. If they don't ship by May 2, the Day-7 report is mostly a vig_stack-retuning report — which is still valuable, just don't oversell it as a "we now know what to do about live_momentum" moment.
 
 ---
 
