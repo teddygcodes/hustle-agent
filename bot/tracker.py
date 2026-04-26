@@ -81,9 +81,22 @@ def update_positions() -> list[dict]:
         pos["last_checked"] = datetime.now(timezone.utc).isoformat()
 
         # MFE/MAE excursion tracking (Session 9). Side-aware: mfe_cents is the
-        # max favorable excursion in the side's own bid space, mae_cents the
-        # max adverse. Both are non-negative magnitudes. Lazy-init on first
-        # observation so pre-Session-9 open positions upgrade cleanly.
+        # max favorable excursion in side's-own-bid-cents space (= YES-cents-
+        # favorable after side conversion: NO-side favorable_cents = no_bid -
+        # no_entry = yes_entry_implied - yes_bid_proxy). Both mfe_cents and
+        # mae_cents are non-negative magnitudes capped by OBSERVED BIDS during
+        # open life.
+        #
+        # IMPORTANT (Session 16): settlement payouts (100 or 0) are NOT folded
+        # in here. bot.clv.check_clv_settlements extends mfe_cents at
+        # settlement-time propagation so gap = mfe_cents - clv_cents ≥ 0 in
+        # tools/excursion_report.py. Don't move the settlement extension back
+        # into update_positions — it has no business looking at clv data
+        # during the live ratchet path; the live tracker only sees observed
+        # bids, the settlement extension only fires once the market resolves.
+        #
+        # Lazy-init on first observation so pre-Session-9 open positions
+        # upgrade cleanly.
         now_iso = datetime.now(timezone.utc).isoformat()
         entry_cents = int(pos.get("price_cents", 0))
         current_bid_cents = int(round(current_bid * 100))

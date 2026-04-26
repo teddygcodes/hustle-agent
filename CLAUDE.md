@@ -912,25 +912,36 @@ Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=Fa
 
 ---
 
-### ☐ Session 16 — Excursion gap-math fix (Apr 26+, planned, urgent)
+### ☑ Session 16 — Excursion gap-math fix (Apr 25, shipped, deeper-fix scope)
 
-**Problem.** First production run of `tools/excursion_report.py` on Apr 25 returned median gap = -1¢ for both `live_momentum` (n=5) and `vig_stack_series` (n=3). If MFE is "max favorable excursion from entry" by Session 9's definition, then exit price cannot exceed MFE — gap should always be ≥ 0¢. A consistent -1¢ across two unrelated strategies + small samples is a math/units bug, not noise. Could be a sign-convention mismatch (MFE stored as favorable-cents-from-entry, exit_price compared as absolute cents), or comparing the wrong fields, or a rounding artifact at small N. Whatever it is, every excursion-based decision until this is fixed is built on suspect math. **This blocks meaningful use of the excursion report at any sample size — bigger N just adds confident wrong numbers.**
+**Problem (pre-fix).** First production run of `tools/excursion_report.py` on Apr 25 returned median gap = -1¢ for both `live_momentum` (n=5) and `vig_stack_series` (n=3). User intuition: gap should be ≥ 0¢ if MFE means "max favorable excursion from entry." Until fixed, every excursion-based decision was built on suspect math.
 
-**Plan.**
-- Read `tools/excursion_report.py`, trace exactly which fields are subtracted to produce the gap.
-- Read `bot/tracker.py:update_positions` (Session 9 site) to verify what MFE actually stores: favorable-magnitude-from-entry, or absolute price?
-- Read `bot/clv.py:check_clv_settlements` propagation site to verify what gets copied from positions onto settled clv records.
-- Identify the mismatch (sign, units, or wrong field name).
-- Fix: align so MFE and exit_price are in the SAME space. Add the convention to module docstrings explicitly so this can't recur silently.
-- New `tests/test_excursion_report.py` with hand-crafted records where gap is mathematically known: e.g. `MFE=10, exit=5 → gap=5`; `MFE=10, exit=10 → gap=0`. Property test: assert gap ≥ 0 always for any synthetic input.
-- Re-run `excursion_report.py` on existing data after fix; confirm gap is non-negative.
+**Diagnosis.** Not a units bug. Not a sign bug. The math was self-consistent — `gap = mfe_cents - clv_cents`, and `clv_cents` IS exit_favorable_magnitude under the YES-cents convention (verified by reading `bot/clv.py:compute_clv_cents`). The actual cause was structural: `mfe_cents` from `positions.json` tracks the highest *observed bid* during open life — for winners that caps at ~99¢ (yes_bid never quite reaches 100, no_bid never quite reaches 100), while `clv_cents` at settlement uses the payout value (100/0). So gap = (99-entry) - (100-entry) = -1¢ for every winning held-to-settlement position. Confirmed against the 8 settled records: 6 winners all showed gap=-1, 2 losers showed gap=+74 / +78. Median trended to winner-cluster (-1) when winners outnumbered losers.
 
-**Out of scope.** New excursion metrics (MAE breakdown, percentile distributions). Backfilling MFE on pre-Session-9 records (impossible — data wasn't captured). Tracker cadence (Session 17).
+**What shipped.**
+- `bot/clv.py:check_clv_settlements` — Session 16 ratchet at the settlement-time propagation site ([bot/clv.py:363-392](hustle-agent/bot/clv.py:363)). After copying mfe/mae/ticks from positions to the settled clv record, extends `mfe_cents = max(existing, max(0, clv_cents_rounded))`. For winners, this folds the settlement event into MFE (mfe goes from 99-entry to 100-entry = clv); for losers, the ratchet is a no-op (clv negative ≤ existing 0). Updates `mfe_at` to `settled_at` only when the value actually changed. `mae_cents` NOT extended — out of scope, report doesn't read MAE.
+- `tools/excursion_report.py` — refactored to compute `exit_favorable_magnitude(side, entry, closing_yes)` explicitly per side ([tools/excursion_report.py:35-46](hustle-agent/tools/excursion_report.py:35)). Mathematically equivalent to `compute_clv_cents` but legible at the report site (Session 13b discipline: same formula in both places). Updated load filter to require `closing_yes_price`, `side`, and `entry_price_cents` defensively. Module docstring spells out the YES-cents-favorable convention and the `gap ≥ 0` invariant.
+- `bot/tracker.py:83-100` — expanded MFE-update site comment. Documents (a) the YES-cents-favorable convention (NO-side conversion), (b) that observed bids ARE NOT folded with settlement payouts in the live path, and (c) where the settlement extension lives (`bot/clv.py:check_clv_settlements`), with a "don't move it back here" note.
+- `tools/backfill_extended_mfe.py` (new, gitignored) — one-shot mirroring `tools/purge_clv_disabled.py`. Asserts `bot.lock` gone or PID dead, requires `--yes`, backs up `clv.json` → `.bak-YYYYMMDD`. Iterates settled records and ratchets `mfe_cents = max(existing, max(0, clv_cents))`, advancing `mfe_at` only when value changes. Idempotent — re-runs are no-ops. Expected output on production: 6 records updated (all winners). Losers unchanged.
+- `tests/test_excursion_report.py` (new) — 29 cases. 7 helper tests on `exit_favorable_magnitude`. 8 hand-crafted gap tests covering YES/NO winners (extended), losers (positive gap), MFE=0 adverse-only positions (acceptance criterion: exit_favorable ≤ 0 → gap > 0), perfect-extension case, and the pre-Session-16 -1¢ shape. Two property tests (each 100 random `(side, entry, mfe, closing_yes)` tuples seeded at 42/123): the report's helper matches by-hand re-derivation within float epsilon, and post-extension records yield non-negative gaps. 12 load-filter defensive cases (missing/invalid `mfe_cents` / `clv_cents` / `closing_yes_price` / `side` / `entry_price_cents`, malformed JSON, non-list).
+- `tests/test_clv.py` — appended `class TestSettlementMfeExtension` with 9 cases: winner pos.mfe < settlement (extension fires, mfe_at advances to settled_at), winner pos.mfe ≥ settlement (no-op, preserves both), loser (no-op, clv negative), no matching pos / winner (seeds mfe to clv_cents), no matching pos / loser (clamps to 0 — report includes record with gap = -clv > 0), counterfactual record untouched (mfe_cents stays None), idempotency on re-settlement (second call doesn't re-touch settled records), and frozen mfe_at when value didn't change.
+- `tests/test_tracker.py` — updated 2 propagation tests in `TestSettlementPropagation` to match new behavior. `test_settlement_carries_mfe_to_clv_record`: pos.mfe=12 with NO@79 settles at clv=21 → mfe extended to 21 (was: assertion 12). `test_settlement_without_position_match_seeds_mfe_to_clv` (renamed from `..._leaves_clv_unchanged`): no-pos winner gets mfe seeded to clv_cents=40 (was: assertion mfe_cents not in rec). Both now reflect the Session 16 contract.
 
-**Verify.**
-1. `python3 tools/excursion_report.py` — every gap value ≥ 0¢.
-2. `python3 -m pytest tests/test_excursion_report.py -v` — property test passes including the hand-crafted equality cases.
-3. Sign convention documented in `tools/excursion_report.py` module docstring AND `bot/tracker.py` MFE-update site comment.
+**Tests.** 220+ passed across the touched surfaces (`test_clv.py`, `test_tracker.py`, `test_excursion_report.py`, `test_vig_stack_series_strategy.py`, plus `test_backtest`, `test_calibration`, `test_decisions`, `test_strategies`, `test_universe`, `test_main`, `test_regime`, `test_backfill_regime`). The 13a golden-file regression and Session 9's MFE/MAE ratchet tests both still pass — confirming the tracker.py change was truly comment-only and the gap fix didn't reach into shared code.
+
+**Coordination with user (deploy).** Stop bot → `python3 tools/backfill_extended_mfe.py --yes` (extends 6 winning records on production data, backs up clv.json) → `python3 tools/excursion_report.py` (verify gap ≥ 0 on every record) → restart bot. Code-path change in `bot/clv.py` deploys via the restart. After next live settlement, verify the extension fires (any new settled clv record will have `mfe_cents ≥ clv_cents`).
+
+**Out of scope (flagged in commit message).**
+- MAE extension at settlement (parallel pattern; report doesn't read MAE — defer).
+- Other report tools (`cohort_report.py`, `calibration_report.py`, `microstructure_report.py`, `universe_report.py`, `journal_analysis.py`) may have similar untested propagation patterns. Not investigated this session.
+- Backfilling MFE on pre-Session-9 records (impossible — data wasn't captured).
+- Tracker cadence audit (Session 17 — separate problem; the median-1-tick issue for live_momentum is unrelated to the gap-math fix).
+
+**Verify (post-deploy).**
+1. `python3 tools/excursion_report.py` — every gap value ≥ 0¢. Specifically: 6 winners go to gap=0 (mfe extended to clv); 2 losers stay at +74 / +78. Median for both strategies is now 0¢ on this small sample.
+2. `python3 -m pytest tests/test_excursion_report.py tests/test_clv.py -v` — property test passes (100 random tuples) plus 9 settlement-extension cases.
+3. Convention documented in three places: `tools/excursion_report.py` module docstring, `bot/tracker.py` MFE-update comment, `bot/clv.py:check_clv_settlements` extension comment.
+4. Existing tests still pass: `python3 -m pytest tests/test_tracker.py tests/test_vig_stack_series_strategy.py -v` — Session 9's MFE/MAE tests + 13a golden-file regression.
 
 ---
 

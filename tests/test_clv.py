@@ -418,3 +418,255 @@ class TestComputeClvCents:
         cents, rel = clv.compute_clv_cents("yes", 33, 100.0)
         assert cents == 67.0
         assert rel == round(67 / 33, 4)
+
+
+# ---------------------------------------------------------------------------
+# Session 16 (Apr 26+) — Settlement-time MFE extension
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def tmp_positions_file(tmp_path, monkeypatch):
+    """Repoint bot.config.POSITIONS_FILE so check_clv_settlements reads
+    a tmp positions.json. The lazy `from bot.config import POSITIONS_FILE`
+    inside check_clv_settlements resolves to the patched value."""
+    import bot.config
+    f = tmp_path / "positions.json"
+    monkeypatch.setattr(bot.config, "POSITIONS_FILE", f)
+    return f
+
+
+def _settled_market(result: str = "YES") -> dict:
+    """Mock get_market response for a settled market."""
+    return {
+        "market": {
+            "status": "settled",
+            "result": result,
+            "yes_bid": 0,
+            "yes_ask": 0,
+        }
+    }
+
+
+class TestSettlementMfeExtension:
+    """Session 16: at settlement-time propagation, mfe_cents is ratcheted
+    to max(observed_mfe, clv_cents) clamped ≥0, so gap = mfe - clv ≥ 0
+    in tools/excursion_report.py.
+
+    Eliminates the structural -1¢ gap on every winning held-to-settlement
+    position (where observed bid ≤ 99 but settlement payout is 100).
+    """
+
+    def test_winner_pos_mfe_below_settlement_gets_extended(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # YES @77, settles YES (closing=100 → clv=23). Pos observed mfe=22
+        # (yes_bid topped at 99). Post-extension: mfe_cents=23, gap=0.
+        clv.record_clv_entry(
+            ticker="KXLM-WIN1", opp_type="live_momentum", side="yes",
+            entry_price_cents=77, fair_value_cents=85.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-WIN1", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-WIN1",
+            "mfe_cents": 22,
+            "mae_cents": 1,
+            "mfe_at": "2026-04-25T10:00:00+00:00",
+            "mae_at": "2026-04-25T09:30:00+00:00",
+            "ticks_observed": 3,
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            settled_now = clv.check_clv_settlements()
+
+        assert len(settled_now) == 1
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == 23.0
+        # Extended: max(22, 23) = 23. mfe_at advances to settled_at.
+        assert rec["mfe_cents"] == 23
+        assert rec["mfe_at"] == rec["settled_at"]
+        # MAE NOT extended (out of scope for Session 16).
+        assert rec["mae_cents"] == 1
+        assert rec["mae_at"] == "2026-04-25T09:30:00+00:00"
+        # gap = 23 - 23 = 0 ✓
+        assert rec["mfe_cents"] - rec["clv_cents"] == 0
+
+    def test_no_winner_extended_to_clv(self, tmp_clv_file, tmp_positions_file):
+        # NO @93, settles NO (closing=0 → clv=7). Pos mfe=6.
+        # Post-extension: mfe_cents=7, gap=0.
+        clv.record_clv_entry(
+            ticker="KXVS-WIN1", opp_type="vig_stack_series", side="no",
+            entry_price_cents=93, fair_value_cents=98.0, edge_at_trade=0.05,
+            contracts=2, trade_id="ORD-VS1", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-VS1",
+            "mfe_cents": 6,
+            "mae_cents": 0,
+            "mfe_at": "2026-04-25T08:00:00+00:00",
+            "mae_at": "2026-04-25T08:00:00+00:00",
+            "ticks_observed": 9,
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("NO")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == 7.0
+        assert rec["mfe_cents"] == 7
+        assert rec["mfe_at"] == rec["settled_at"]
+
+    def test_observed_mfe_above_clv_no_change(self, tmp_clv_file, tmp_positions_file):
+        # Edge case: pos.mfe = 24 (theoretically possible if record entry
+        # was lower than the bid range observed). clv=23. max(24,23)=24,
+        # so existing mfe_cents and mfe_at preserved.
+        clv.record_clv_entry(
+            ticker="KXLM-EDGE", opp_type="live_momentum", side="yes",
+            entry_price_cents=77, fair_value_cents=85.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-EDGE", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-EDGE",
+            "mfe_cents": 24,
+            "mfe_at": "2026-04-25T10:00:00+00:00",
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == 23.0
+        # No change — observed MFE was already higher.
+        assert rec["mfe_cents"] == 24
+        assert rec["mfe_at"] == "2026-04-25T10:00:00+00:00"
+
+    def test_loser_no_extension(self, tmp_clv_file, tmp_positions_file):
+        # YES @78, settles NO (closing=0 → clv=-78). Pos mfe=15
+        # (briefly went favorable). max(15, max(0, -78)) = max(15, 0) = 15.
+        # No change — losers can never have MFE extended.
+        clv.record_clv_entry(
+            ticker="KXLM-LOSE", opp_type="live_momentum", side="yes",
+            entry_price_cents=78, fair_value_cents=85.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-LOSE", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-LOSE",
+            "mfe_cents": 15,
+            "mfe_at": "2026-04-25T11:00:00+00:00",
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("NO")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == -78.0
+        # No change for loser.
+        assert rec["mfe_cents"] == 15
+        assert rec["mfe_at"] == "2026-04-25T11:00:00+00:00"
+
+    def test_no_matching_position_winner_seeds_mfe_to_clv(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # CLV record has no matching pos (e.g., positions purged).
+        # Winner case: existing mfe_cents=None, clv=70. Extension sets
+        # mfe_cents=70, mfe_at=settled_at. Report can include this record.
+        clv.record_clv_entry(
+            ticker="KXLM-NOPOS", opp_type="live_momentum", side="yes",
+            entry_price_cents=30, fair_value_cents=50.0, edge_at_trade=0.20,
+            contracts=1, trade_id="ORD-NOPOS", paper=True,
+        )
+        # Empty positions.json — pos lookup misses
+        tmp_positions_file.write_text(json.dumps([]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == 70.0
+        assert rec["mfe_cents"] == 70
+        assert rec["mfe_at"] == rec["settled_at"]
+
+    def test_no_matching_position_loser_leaves_mfe_none(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # Loser, no matching pos: clv=-78. max(0, -78)=0. existing_mfe is
+        # None, so 0 > None evaluates True (None special-case in extension).
+        # Result: mfe_cents=0 (clamped). Report can still include — gap = 0 - (-78) = 78.
+        clv.record_clv_entry(
+            ticker="KXLM-NOPOS-LOSE", opp_type="live_momentum", side="yes",
+            entry_price_cents=78, fair_value_cents=85.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-NOPOS-LOSE", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("NO")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == -78.0
+        # mfe_cents was None pre-settlement; extension clamp gives 0.
+        # Report load filter requires mfe_cents is not None — 0 passes.
+        assert rec["mfe_cents"] == 0
+        # gap = 0 - (-78) = 78 ✓
+        assert rec["mfe_cents"] - rec["clv_cents"] == 78.0
+
+    def test_counterfactual_record_untouched_by_extension(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # CF records skip the entire if-not-is-cf block. mfe_cents stays None.
+        clv.record_counterfactual_skip(
+            {
+                "ticker": "KXVS-CF",
+                "opp_type": "vig_stack_series",
+                "side": "no",
+                "price_cents": 92,
+                "fair_value_cents": 95.0,
+                "edge": 0.05,
+            },
+            "edge_below_threshold",
+            "SCAN-X",
+        )
+        tmp_positions_file.write_text(json.dumps([]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["status"] == "counterfactual_settled"
+        # MFE extension didn't fire for CF — mfe_cents stays None.
+        assert rec.get("mfe_cents") is None
+
+    def test_idempotency_on_repeat_check(self, tmp_clv_file, tmp_positions_file):
+        # Running check_clv_settlements twice on the same fixtures must
+        # produce identical output. After the first run the record is
+        # status="settled" and the loop's status filter skips it.
+        clv.record_clv_entry(
+            ticker="KXLM-IDEM", opp_type="live_momentum", side="yes",
+            entry_price_cents=77, fair_value_cents=85.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-IDEM", paper=True,
+        )
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-IDEM",
+            "mfe_cents": 22,
+            "mfe_at": "2026-04-25T10:00:00+00:00",
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec_after_first = dict(_read(tmp_clv_file)[0])
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec_after_second = _read(tmp_clv_file)[0]
+        assert rec_after_first == rec_after_second
+
+    def test_extension_only_advances_mfe_at_when_value_changes(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # Sister to test_observed_mfe_above_clv_no_change. Confirms mfe_at
+        # is preserved (not advanced to settled_at) when the value didn't
+        # change. Locks the gating logic — we only update both fields
+        # together, never one without the other.
+        clv.record_clv_entry(
+            ticker="KXLM-FROZEN", opp_type="live_momentum", side="yes",
+            entry_price_cents=70, fair_value_cents=80.0, edge_at_trade=0.10,
+            contracts=1, trade_id="ORD-FROZEN", paper=True,
+        )
+        original_mfe_at = "2026-04-25T08:30:00+00:00"
+        tmp_positions_file.write_text(json.dumps([{
+            "order_id": "ORD-FROZEN",
+            # mfe equals clv (30); ratchet condition (clv > existing) is False
+            "mfe_cents": 30,
+            "mfe_at": original_mfe_at,
+        }]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            clv.check_clv_settlements()
+        rec = _read(tmp_clv_file)[0]
+        assert rec["clv_cents"] == 30.0
+        assert rec["mfe_cents"] == 30
+        # No change → mfe_at NOT advanced to settled_at
+        assert rec["mfe_at"] == original_mfe_at

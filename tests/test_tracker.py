@@ -260,7 +260,10 @@ def clv_env(tmp_path, monkeypatch):
 class TestSettlementPropagation:
 
     def test_settlement_carries_mfe_to_clv_record(self, clv_env):
-        # Seed a position with MFE/MAE data already ratcheted
+        # Session 16: settlement-time MFE extension. Pos has mfe=12 (observed
+        # high-water mark in side's-own-bid-cents). NO @79 settles NO, so
+        # closing_yes=0 → clv_cents = (100-79) - 0 = 21. Extension ratchets
+        # mfe to max(12, 21) = 21 and mfe_at to settled_at. mae untouched.
         positions = [{
             **_base_position(order_id="PAPER-SETTLE-1", side="no", price_cents=79),
             "mfe_cents": 12,
@@ -286,15 +289,20 @@ class TestSettlementPropagation:
         assert len(settled_now) == 1
         rec = json.loads(clv_env["clv_file"].read_text())[0]
         assert rec["status"] == "settled"
-        assert rec["mfe_cents"] == 12
+        # Session 16: mfe extended from observed 12 → settlement-favorable 21.
+        assert rec["mfe_cents"] == 21
+        assert rec["mfe_at"] == rec["settled_at"]
+        # mae NOT extended (out of scope for Session 16 — report doesn't read it).
         assert rec["mae_cents"] == 4
-        assert rec["mfe_at"] == "2026-04-24T10:00:00+00:00"
         assert rec["mae_at"] == "2026-04-24T09:00:00+00:00"
         assert rec["ticks_observed"] == 42
 
-    def test_settlement_without_position_match_leaves_clv_unchanged(self, clv_env):
+    def test_settlement_without_position_match_seeds_mfe_to_clv(self, clv_env):
         """CLV record whose trade_id has no matching position still settles
-        cleanly — mfe fields are simply absent."""
+        cleanly. Session 16: the settlement-time MFE extension runs even
+        when pos is None — for winners it seeds mfe_cents to clv_cents so
+        the excursion report can include the record. mae/ticks remain
+        absent (no observed-life data to fabricate)."""
         clv.record_clv_entry(
             ticker="KXTEST-ORPHAN", opp_type="vig_stack_series", side="yes",
             entry_price_cents=60, fair_value_cents=70.0, edge_at_trade=0.15,
@@ -309,6 +317,9 @@ class TestSettlementPropagation:
         assert len(settled_now) == 1
         rec = json.loads(clv_env["clv_file"].read_text())[0]
         assert rec["status"] == "settled"
-        assert "mfe_cents" not in rec
+        # Session 16: winner without pos → mfe seeded to clv_cents = 100-60 = 40.
+        assert rec["mfe_cents"] == 40
+        assert rec["mfe_at"] == rec["settled_at"]
+        # mae/ticks have no observed-life data and the extension only touches mfe.
         assert "mae_cents" not in rec
         assert "ticks_observed" not in rec

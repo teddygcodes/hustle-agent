@@ -366,6 +366,23 @@ def check_clv_settlements() -> list[dict]:
                 for key in ("mfe_cents", "mae_cents", "mfe_at", "mae_at", "ticks_observed"):
                     if pos.get(key) is not None:
                         rec[key] = pos[key]
+            # Session 16: extend mfe_cents to include the settlement event so
+            # gap = mfe_cents - clv_cents is ≥ 0 in the excursion report.
+            # mfe_cents from positions caps at the highest *observed bid*
+            # during open life (yes_bid ≤ 99 for winning YES, no_bid ≤ 99 for
+            # winning NO). clv_cents at settlement uses the payout value
+            # (100/0). Without this max, every winning held-to-settlement
+            # position has a structural -1¢ gap that obscures the "exit
+            # logic" signal. After this max, gap > 0 truly means "MFE during
+            # open life exceeded the eventual exit-favorable" — i.e. the bot
+            # peaked and gave it back. The clamp to ≥ 0 preserves the MFE
+            # convention (non-negative magnitude); for losers clv_cents is
+            # negative and the ratchet is a no-op.
+            mfe_with_settlement = max(0, int(round(clv_cents_rounded)))
+            existing_mfe = rec.get("mfe_cents")
+            if existing_mfe is None or mfe_with_settlement > existing_mfe:
+                rec["mfe_cents"] = mfe_with_settlement
+                rec["mfe_at"] = rec.get("settled_at") or datetime.now(timezone.utc).isoformat()
             settled_now.append(rec.copy())
             logger.info(
                 f"CLV settled: {ticker} | {rec['side'].upper()} entry={rec['entry_price_cents']}¢ "
