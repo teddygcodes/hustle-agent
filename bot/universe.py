@@ -32,12 +32,22 @@ import json
 import logging
 import threading
 import time as _time
+from collections import deque
 from datetime import datetime, timezone
 
 from bot.config import BOT_STATE_DIR
 from bot.regime import tag as regime_tag
+from bot.state_io import load_json, save_json
 
 UNIVERSE_FILE = BOT_STATE_DIR / "universe.jsonl"
+BOT_STATE_FILE = BOT_STATE_DIR / "bot_state.json"
+
+# Session 15.5: trailing-window partial-rate metering. Persistent counters
+# live in bot_state.json (total_snapshots_today, partial_snapshots_today,
+# last_universe_metering_reset); the window below is in-memory for the
+# WARN trigger only.
+_PARTIAL_WINDOW: deque[bool] = deque(maxlen=10)
+_PARTIAL_WARN_THRESHOLD = 0.10
 
 # Page size for the cursor enumeration. Kalshi caps at 200.
 _PAGE_LIMIT = 200
@@ -268,10 +278,54 @@ def snapshot_universe(scan_id: str) -> int:
             scan_id, pages, cursor_count, active_added, len(rows),
             " (PARTIAL)" if partial else "",
         )
+        # Session 15.5: per-day counters + sliding-window WARN.
+        try:
+            _record_partial_meter(partial=partial)
+        except Exception:
+            _logger.debug("partial meter update failed", exc_info=True)
         return len(rows)
     except Exception:
         _logger.exception("universe.snapshot_universe failed for scan_id=%s", scan_id)
         return 0
+
+
+def _record_partial_meter(*, partial: bool) -> None:
+    """Increment per-day snapshot counters in bot_state.json and log a WARN
+    when the trailing-window partial rate exceeds the threshold.
+
+    Counters reset at midnight ET via the last_universe_metering_reset
+    marker (mirrors the Session 5+6 rotation pattern). Atomic write via
+    bot.state_io.save_json. Session 15.5.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo("America/New_York")
+    except Exception:
+        et_tz = timezone.utc  # fallback when tzdata is missing
+
+    _PARTIAL_WINDOW.append(bool(partial))
+
+    state = load_json(BOT_STATE_FILE)
+    if not isinstance(state, dict):
+        state = {}
+    today_et = datetime.now(et_tz).date().isoformat()
+    if state.get("last_universe_metering_reset") != today_et:
+        state["total_snapshots_today"] = 0
+        state["partial_snapshots_today"] = 0
+        state["last_universe_metering_reset"] = today_et
+
+    state["total_snapshots_today"] = int(state.get("total_snapshots_today", 0)) + 1
+    if partial:
+        state["partial_snapshots_today"] = int(state.get("partial_snapshots_today", 0)) + 1
+    save_json(BOT_STATE_FILE, state)
+
+    if len(_PARTIAL_WINDOW) >= 10:
+        rate = sum(_PARTIAL_WINDOW) / len(_PARTIAL_WINDOW)
+        if rate >= _PARTIAL_WARN_THRESHOLD:
+            _logger.warning(
+                "universe partial rate elevated: %.0f%% over last %d snapshots",
+                rate * 100, len(_PARTIAL_WINDOW),
+            )
 
 
 def on_market_seen(scan_id: str, ticker: str, scanner_name: str) -> None:

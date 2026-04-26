@@ -958,6 +958,12 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 - **v1 known gaps:** (a) `slippage_source: "limit_price_echo"` means production slippage will read 0 until a `/portfolio/fills` endpoint integration (Kalshi's `place_order` SDK echoes limit price as `cost_dollars`). (b) Bot crashes between place_order and terminal observation lose that row (in-memory `_PENDING` dict is process-local). (c) Kalshi-side cancellation pruning returns errors that get_order swallows.
 - **Session 14:** every row carries `regime` (event_horizon_hr resolves from the order's market close_ts).
 
+### 12. `bot/state/bot_state.json` — universe partial-rate ratio (Session 15.5)
+- **Inspect:** `python3 -c "import json; s=json.load(open('bot/state/bot_state.json')); t=s.get('total_snapshots_today',0); p=s.get('partial_snapshots_today',0); print(f'snapshots today: {t}, partial: {p} ({100*p/t if t else 0:.1f}%)')"`
+- **Expect:** `total_snapshots_today` ratchets up across the day, resets at midnight ET via `last_universe_metering_reset`. `partial_snapshots_today` should stay near 0 — Kalshi cursor pagination usually exhausts within the 90s deadline.
+- **WARN signal:** `bot/universe.py` logs a WARN when the trailing 10-snapshot window has ≥10% partial rate. Surfaces in `bot.log` as `universe partial rate elevated: N% over last 10 snapshots` — if you see it sustained, the bot is silently working with incomplete universe rows; investigate Kalshi rate-limiting (usually live_watcher polling competing for connections) or extend the 90s deadline.
+- **Caveat:** an occasional partial during heavy live-game windows is normal. The 10% threshold is the bar at which downstream analysis (cohort_report, hypothetical back-tests) starts being biased by missing markets.
+
 ### Cross-cutting checks
 - **Decisions ↔ CFs.** `decisions.jsonl` rejects in the last 30 min should produce ≤5 new CF records per scan in `clv.json` (top-K selection). If decisions has 200 rejects/scan but CFs aren't growing, CF emission broke.
 - **Active strategies ↔ records.** Every strategy in `ACTIVE_STRATEGIES` ([bot/config.py:578](hustle-agent/bot/config.py:578)) should appear in `decisions.jsonl` within 1 hour. Missing = scanner not loading that strategy.

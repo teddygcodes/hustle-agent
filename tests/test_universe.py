@@ -305,3 +305,101 @@ class TestNeverRaises:
         monkeypatch.setattr(builtins, "__import__", boom)
         n = universe.snapshot_universe("S1")
         assert n == 0
+
+
+# ---------------------------------------------------------------------------
+# Session 15.5 — partial-rate metering
+# ---------------------------------------------------------------------------
+
+class TestPartialRateMetering:
+    """snapshot_universe persists daily counters total_snapshots_today and
+    partial_snapshots_today to bot_state.json (atomic), resets at midnight ET,
+    and logs a WARN if the trailing-window partial rate exceeds the threshold."""
+
+    @pytest.fixture
+    def metering_state_file(self, tmp_path, monkeypatch):
+        """Redirect bot_state.json to tmp_path and clear the sliding window
+        between tests to avoid cross-contamination."""
+        state_file = tmp_path / "bot_state.json"
+        state_file.write_text("{}")
+        monkeypatch.setattr(universe, "BOT_STATE_FILE", state_file)
+        universe._PARTIAL_WINDOW.clear()
+        return state_file
+
+    def test_counter_increments_on_full_snapshot(self, monkeypatch, tmp_universe_file, metering_state_file):
+        """A non-partial snapshot increments total but not partial."""
+        stub = _fake_kalshi_pages([[_market("KXTEMP-26APR25-T70.5")]])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        universe.snapshot_universe("S1")
+
+        state = json.loads(metering_state_file.read_text())
+        assert state["total_snapshots_today"] == 1
+        assert state.get("partial_snapshots_today", 0) == 0
+
+    def test_counter_increments_partial_on_deadline_hit(self, monkeypatch, tmp_universe_file, metering_state_file):
+        """When the deadline triggers partial=True, both counters increment."""
+        # Force the deadline to immediately trigger by setting it to 0s.
+        monkeypatch.setattr(universe, "_SNAPSHOT_DEADLINE_SEC", 0)
+        stub = _fake_kalshi_pages([[_market("KXTEMP-26APR25-T70.5")]])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        universe.snapshot_universe("S2")
+
+        state = json.loads(metering_state_file.read_text())
+        assert state["total_snapshots_today"] == 1
+        assert state["partial_snapshots_today"] == 1
+
+    def test_partial_warn_fires_when_window_full_at_threshold(self, monkeypatch, tmp_universe_file,
+                                                              metering_state_file, caplog):
+        """When sliding window of 10 has >=10% partial, WARN is logged."""
+        import logging as _logging
+        # Force partial on every snapshot.
+        monkeypatch.setattr(universe, "_SNAPSHOT_DEADLINE_SEC", 0)
+        stub = _fake_kalshi_pages([[_market("KXTEMP-26APR25-T70.5")]])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        with caplog.at_level(_logging.WARNING, logger="glint.universe"):
+            for i in range(10):
+                universe.snapshot_universe(f"warn-{i}")
+
+        warn_msgs = [r.message for r in caplog.records
+                     if r.levelno >= _logging.WARNING and "partial rate" in r.message.lower()]
+        assert warn_msgs, f"expected partial-rate WARN, got records: {[r.message for r in caplog.records]}"
+
+    def test_no_warn_below_threshold(self, monkeypatch, tmp_universe_file, metering_state_file, caplog):
+        """If window is shorter than 10, WARN does NOT fire even at 100% partial rate."""
+        import logging as _logging
+        monkeypatch.setattr(universe, "_SNAPSHOT_DEADLINE_SEC", 0)
+        stub = _fake_kalshi_pages([[_market("KXTEMP-26APR25-T70.5")]])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        with caplog.at_level(_logging.WARNING, logger="glint.universe"):
+            # Only 5 partial snapshots — under-filled window.
+            for i in range(5):
+                universe.snapshot_universe(f"under-{i}")
+
+        warn_msgs = [r.message for r in caplog.records
+                     if "partial rate" in r.message.lower()]
+        assert not warn_msgs, f"unexpected WARN with under-filled window: {warn_msgs}"
+
+    def test_daily_reset_zeroes_counters(self, monkeypatch, tmp_universe_file, metering_state_file):
+        """When ET date rolls over, both counters reset to 0 and last_universe_metering_reset advances."""
+        # Seed yesterday's counters.
+        state_file = metering_state_file
+        state_file.write_text(json.dumps({
+            "total_snapshots_today": 50,
+            "partial_snapshots_today": 5,
+            "last_universe_metering_reset": "2020-01-01",  # ancient stamp
+        }))
+
+        stub = _fake_kalshi_pages([[_market("KXTEMP-26APR25-T70.5")]])
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        universe.snapshot_universe("RESET-1")
+
+        state = json.loads(state_file.read_text())
+        # Should reset to 0 then increment to 1 — NOT 51.
+        assert state["total_snapshots_today"] == 1
+        assert state["partial_snapshots_today"] == 0
+        assert state["last_universe_metering_reset"] != "2020-01-01"
