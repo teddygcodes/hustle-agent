@@ -92,13 +92,22 @@ def _edge_gate_fingerprint(reason: str) -> dict[str, bool]:
 
 
 def _log_position_reject(ticker: str, opp_type: str | None, reason: str,
-                          extra: dict | None = None) -> None:
+                          extra: dict | None = None,
+                          close_ts: str | None = None) -> None:
+    """Log a position-limit reject. Session 15.5: callers pass close_ts so
+    bot.regime.tag can populate event_horizon_hr (extras dict is the only
+    place the regime tagger looks for close_ts). Caller-supplied close_ts
+    in `extra` wins over the close_ts kwarg."""
     try:
         from bot import decisions
+        merged = dict(extra) if extra else None
+        if close_ts and (merged is None or "close_ts" not in merged):
+            merged = merged or {}
+            merged["close_ts"] = close_ts
         decisions.log_decision(
             ticker=ticker, opp_type=opp_type or "unknown", edge=None,
             gates=_pos_gate_fingerprint(reason),
-            decision="reject", reason=reason, extra=extra,
+            decision="reject", reason=reason, extra=merged,
         )
     except Exception:
         pass  # never block trades because logging failed
@@ -106,14 +115,26 @@ def _log_position_reject(ticker: str, opp_type: str | None, reason: str,
 
 def _log_edge_reject(opportunity: dict, reason: str,
                       extra: dict | None = None) -> None:
+    """Log a verify-edge reject. Session 15.5: extracts close_ts from
+    opportunity (top-level or .market.close_ts) and threads it into the
+    extras dict for regime tagging."""
     try:
         from bot import decisions
+        merged = dict(extra) if extra else None
+        if merged is None or "close_ts" not in merged:
+            close_ts = (
+                opportunity.get("close_ts")
+                or (opportunity.get("market") or {}).get("close_ts")
+            )
+            if close_ts:
+                merged = merged or {}
+                merged["close_ts"] = close_ts
         decisions.log_decision(
             ticker=opportunity.get("ticker", ""),
             opp_type=opportunity.get("type", "unknown"),
             edge=opportunity.get("edge"),
             gates=_edge_gate_fingerprint(reason),
-            decision="reject", reason=reason, extra=extra,
+            decision="reject", reason=reason, extra=merged,
         )
     except Exception:
         pass
@@ -181,6 +202,7 @@ def _check_position_limits(
     cost_dollars: float,
     ticker: str,
     opp_type: str | None = None,
+    close_ts: str | None = None,
 ) -> tuple[bool, str]:
     """Check position limits: per-position cap, dedupe, cooldown, daily loss,
     per-strategy budget (Tier 2.1), and global exposure.
@@ -189,6 +211,9 @@ def _check_position_limits(
         opp_type: opportunity["type"] — used to enforce STRATEGY_BUDGETS. Pass
             None (default) to skip the budget check (e.g. market-maker hedges
             that close existing risk rather than opening new exposure).
+        close_ts: opportunity's market close timestamp. Threaded into every
+            reject log's `extra` dict so bot.regime.tag can populate
+            event_horizon_hr (Session 15.5).
     """
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
@@ -201,6 +226,7 @@ def _check_position_limits(
                 "exposure_pct": round(cost_dollars / balance, 4) if balance > 0 else None,
                 "max_pct": MAX_POSITION_PERCENT,
             },
+            close_ts=close_ts,
         )
         return False, (
             f"Position too large: ${cost_dollars:.2f} > "
@@ -276,6 +302,7 @@ def _check_position_limits(
                         "existing_status": existing[0].get("status") if existing else None,
                         "existing_filled": existing[0].get("filled", 0) if existing else 0,
                     },
+                    close_ts=close_ts,
                 )
                 return False, f"Already hold open position in {ticker} — skipping duplicate entry"
         except Exception as e:
@@ -302,6 +329,7 @@ def _check_position_limits(
                     "held_team": held_team,
                     "held_ticker": same_game[0].get("ticker"),
                 },
+                close_ts=close_ts,
             )
             return False, (
                 f"SAME GAME: already hold {held_team} in {game_key} — "
@@ -331,6 +359,7 @@ def _check_position_limits(
                         "last_trade_age_min": int((_now - exited_at).total_seconds() / 60),
                         "cooldown_min": int(_COOLDOWN.total_seconds() / 60),
                     },
+                    close_ts=close_ts,
                 )
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
         except Exception as e:
@@ -360,6 +389,7 @@ def _check_position_limits(
                 "daily_ticker_loss": round(daily_ticker_loss, 2),
                 "limit": _DAILY_TICKER_LOSS_LIMIT,
             },
+            close_ts=close_ts,
         )
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
 
@@ -417,6 +447,7 @@ def _check_position_limits(
                     "budget_frac": budget_frac,
                     "exposure_pct": round((bucket_exposure + cost_dollars) / bucket_cap, 4) if bucket_cap > 0 else None,
                 },
+                close_ts=close_ts,
             )
             return False, (
                 f"STRATEGY_BUDGET: {bucket} has ${bucket_exposure:.2f} of "
@@ -437,6 +468,7 @@ def _check_position_limits(
                 "exposure_pct": round((total_exposure + cost_dollars) / (equity * MAX_TOTAL_EXPOSURE), 4) if equity > 0 else None,
                 "max_pct": MAX_TOTAL_EXPOSURE,
             },
+            close_ts=close_ts,
         )
         return False, (
             f"Total exposure too high: ${total_exposure + cost_dollars:.2f} > "
@@ -810,7 +842,13 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     # ------------------------------------------------------------------
     # CHECK 3: Position limits
     # ------------------------------------------------------------------
-    pos_ok, pos_msg = _check_position_limits(balance, total_cost, ticker, opp_type=opp_type)
+    _close_ts = (
+        opportunity.get("close_ts")
+        or (opportunity.get("market") or {}).get("close_ts")
+    )
+    pos_ok, pos_msg = _check_position_limits(
+        balance, total_cost, ticker, opp_type=opp_type, close_ts=_close_ts
+    )
     checks.append({"name": "position_limits", "passed": pos_ok, "detail": pos_msg})
 
     if not pos_ok:
@@ -850,6 +888,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                 extra={
                     "edge": opportunity.get("edge"),
                     "warnings": (edge_result.get("warnings") or [])[:3],
+                    "close_ts": _close_ts,
                 },
             )
         except Exception:
@@ -870,7 +909,8 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             decision="accept", reason="all_gates_passed",
             extra={"contracts": contracts, "price_cents": price_cents,
                    "cost_dollars": round(total_cost, 2),
-                   "paper": PAPER_MODE, "side": side},
+                   "paper": PAPER_MODE, "side": side,
+                   "close_ts": _close_ts},
         )
     except Exception:
         pass

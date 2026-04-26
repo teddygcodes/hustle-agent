@@ -544,3 +544,127 @@ class TestLogRejectExtra:
             )
         recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
         assert recs[0]["extra"] == {"move_cents": 7.5, "kill_cents": 5}
+
+
+class TestCloseTsThreading:
+    """Session 15.5 — every reject extras dict must carry close_ts so
+    bot.regime.tag can populate event_horizon_hr. Closes the 0%-coverage gap
+    on the event_horizon_hr regime axis."""
+
+    def test_log_edge_reject_threads_close_ts_from_opportunity(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_edge.jsonl"
+        opp = {
+            "ticker": "KX-Y", "type": "vig_stack_series", "edge": 0.15,
+            "close_ts": "2026-04-26T00:00:00Z",
+        }
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_edge_reject(opp, "edge_evaporated",
+                                 extra={"new_relative": 0.01})
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs[0]["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+    def test_log_edge_reject_falls_back_to_market_close_ts(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_edge_fallback.jsonl"
+        # No top-level close_ts; only nested under .market.
+        opp = {
+            "ticker": "KX-Y", "type": "vig_stack_series", "edge": 0.15,
+            "market": {"close_ts": "2026-04-26T12:00:00Z"},
+        }
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_edge_reject(opp, "price_moved", extra={"move_cents": 7})
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs[0]["extra"]["close_ts"] == "2026-04-26T12:00:00Z"
+
+    def test_log_position_reject_accepts_close_ts_param(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_pos.jsonl"
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_position_reject(
+                "KX-Y", "vig_stack_series", "position_cap",
+                extra={"cost_dollars": 100},
+                close_ts="2026-04-26T00:00:00Z",
+            )
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs[0]["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+    def test_log_position_reject_explicit_extra_close_ts_wins(self, tmp_state):
+        """If the caller already put close_ts in extra, helper does not overwrite."""
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_pos_explicit.jsonl"
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._log_position_reject(
+                "KX-Y", "vig_stack_series", "duplicate",
+                extra={"close_ts": "EXPLICIT", "existing_count": 1},
+                close_ts="FALLBACK",
+            )
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs[0]["extra"]["close_ts"] == "EXPLICIT"
+
+    def test_check_position_limits_threads_close_ts_to_reject(self, tmp_state):
+        """A real _check_position_limits failure path includes close_ts in extra."""
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_pos_limit.jsonl"
+        # Force the position_cap path: cost_dollars > balance * MAX_POSITION_PERCENT.
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._check_position_limits(
+                balance=100.0,
+                cost_dollars=50.0,  # 50% of balance, certainly over 20%.
+                ticker="KX-Y",
+                opp_type="vig_stack_series",
+                close_ts="2026-04-26T00:00:00Z",
+            )
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        assert recs, "expected a position_cap reject log"
+        assert recs[0]["reason"] == "position_cap"
+        assert recs[0]["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+    def test_self_check_failed_extra_includes_close_ts(self, tmp_state):
+        """The self_check_failed direct log_decision call (executor.py:844)
+        must include opportunity.close_ts in extra."""
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_self_check.jsonl"
+        opp = _make_opp(opp_type="weather", self_check=False)
+        opp["close_ts"] = "2026-04-26T00:00:00Z"
+        sizing = _make_sizing(contracts=2, price_cents=45)
+        with patch.object(decisions, "DECISIONS_FILE", sandbox), \
+             patch("bot.executor.verify_contract_direction",
+                   return_value={
+                       "direction_correct": True, "confidence": "HIGH",
+                       "explanation": "test", "warnings": [],
+                       "yes_means": "yes", "no_means": "no",
+                       "thesis_supports": "yes", "intended_side": "yes",
+                   }), \
+             patch("bot.executor._verify_edge_still_exists",
+                   return_value=(True, "ok")):
+            exc.execute_trade(opp, sizing)
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        # Find the self_check_failed reject in the log stream.
+        reject = next((r for r in recs if r.get("reason") == "self_check_failed"), None)
+        assert reject is not None, f"expected self_check_failed log, got: {[r['reason'] for r in recs]}"
+        assert reject["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+    def test_all_gates_passed_extra_includes_close_ts(self, tmp_state):
+        """The accept-path direct log_decision call (executor.py:865) must
+        include opportunity.close_ts in extra."""
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "ct_accept.jsonl"
+        opp = _make_opp(opp_type="weather", self_check=True)
+        opp["close_ts"] = "2026-04-26T00:00:00Z"
+        sizing = _make_sizing(contracts=2, price_cents=45)
+        with patch.object(decisions, "DECISIONS_FILE", sandbox), \
+             patch("bot.executor.verify_contract_direction",
+                   return_value={
+                       "direction_correct": True, "confidence": "HIGH",
+                       "explanation": "test", "warnings": [],
+                       "yes_means": "yes", "no_means": "no",
+                       "thesis_supports": "yes", "intended_side": "yes",
+                   }), \
+             patch("bot.executor._verify_edge_still_exists",
+                   return_value=(True, "ok")):
+            exc.execute_trade(opp, sizing)
+        recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
+        accept = next((r for r in recs if r.get("decision") == "accept"), None)
+        assert accept is not None, f"expected an accept log, got decisions: {[r['decision'] for r in recs]}"
+        assert accept["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
