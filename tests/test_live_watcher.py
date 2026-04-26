@@ -268,3 +268,62 @@ def test_log_decision_dampened_handles_missing_wp(tmp_path, monkeypatch):
     assert rec["edge"] is None
     assert rec["extra"]["wp"] is None
     assert rec["extra"]["sport"] == "atp_challenger"
+
+
+# ---------------------------------------------------------------------------
+# Session 15.5: close_ts threaded through dampener for regime tagging
+# ---------------------------------------------------------------------------
+
+def test_log_decision_dampened_threads_close_ts_into_extra(tmp_path, monkeypatch):
+    """The dampener accepts a close_ts kwarg and merges it into extra so
+    bot.regime.tag can populate event_horizon_hr."""
+    import json
+    from bot import decisions
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXNBAGAME-T1"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject", reason="dip_too_big",
+        gates={"can_enter": True, "dip_max": False},
+        edge=0.05,
+        extra={"wp": 0.6, "kalshi_price": 55, "dip_cents": 9, "dqs": None,
+               "max_dip": 8},
+        close_ts="2026-04-26T00:00:00Z",
+    )
+
+    rec = json.loads(f.read_text().splitlines()[0])
+    assert rec["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+
+def test_log_decision_dampened_close_ts_does_not_overwrite_explicit(tmp_path, monkeypatch):
+    """If extra already contains close_ts, the kwarg fallback does not overwrite."""
+    import json
+    from bot import decisions
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXNBAGAME-T2"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="accept", reason="dip_buy",
+        gates={"can_enter": True, "dqs": True},
+        edge=0.08,
+        extra={"close_ts": "EXPLICIT-IN-EXTRA",
+               "wp": 0.7, "kalshi_price": 50},
+        close_ts="FALLBACK-IGNORED",
+    )
+
+    rec = json.loads(f.read_text().splitlines()[0])
+    assert rec["extra"]["close_ts"] == "EXPLICIT-IN-EXTRA"

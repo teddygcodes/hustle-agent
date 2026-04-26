@@ -391,14 +391,24 @@ class LiveGameWatcher:
         gates: dict[str, bool],
         edge: float | None = None,
         extra: dict | None = None,
+        close_ts: str | None = None,
     ) -> None:
         """Emit a decisions.log_decision row only on (decision, reason) state
         change. A flat-market live watcher would otherwise emit ~6 records/sec
-        per ticker — the dampener compresses to one record per transition."""
+        per ticker — the dampener compresses to one record per transition.
+
+        Session 15.5: optional close_ts kwarg threads market close into extra
+        so bot.regime.tag can populate event_horizon_hr. An explicit close_ts
+        in `extra` always wins over the kwarg fallback.
+        """
         key = (decision, reason)
         if key == self._last_decision:
             return
         self._last_decision = key
+        merged = dict(extra) if extra else None
+        if close_ts and (merged is None or "close_ts" not in merged):
+            merged = merged or {}
+            merged["close_ts"] = close_ts
         try:
             from bot import decisions
             decisions.log_decision(
@@ -408,7 +418,7 @@ class LiveGameWatcher:
                 gates=gates,
                 decision=decision,
                 reason=reason,
-                extra=extra,
+                extra=merged,
             )
         except Exception:
             pass
@@ -854,6 +864,10 @@ class LiveGameWatcher:
             return
         self._gone_ticks = 0
 
+        # Session 15.5: thread market close into every dampener call so
+        # bot.regime.tag can populate event_horizon_hr on live_momentum decisions.
+        _close_ts = market.get("close_ts") or market.get("close_time")
+
         yes_ask = market.get("yes_ask", 0)
         if not yes_ask:
             return
@@ -1073,6 +1087,7 @@ class LiveGameWatcher:
                        "entry_count": self._entry_count,
                        "cooldown_remaining": self._cooldown_remaining,
                        "open_bets": len(self.bets_placed)},
+                close_ts=_close_ts,
             )
 
         buy_ticker = None
@@ -1111,6 +1126,7 @@ class LiveGameWatcher:
                                        "dip_window": True, "variance_quality": False},
                                 edge=wp_edge,
                                 extra={**mom_ctx, "q_reason": q_reason},
+                                close_ts=_close_ts,
                             )
                         else:
                             # DATA-DRIVEN: Tennis/UFC — skip DQS, pure price action
@@ -1163,6 +1179,7 @@ class LiveGameWatcher:
                                 edge=wp_edge,
                                 extra={**mom_ctx, "dqs": round(dqs, 3),
                                        "threshold": MOMENTUM_DQS_THRESHOLD},
+                                close_ts=_close_ts,
                             )
                 else:
                     logger.info(
@@ -1176,6 +1193,7 @@ class LiveGameWatcher:
                                "dip_min": True, "dip_max": False},
                         edge=wp_edge,
                         extra={**mom_ctx, "max_dip": max_dip},
+                        close_ts=_close_ts,
                     )
 
             # Check opponent side (if primary didn't qualify)
@@ -1400,6 +1418,7 @@ class LiveGameWatcher:
                        "dqs": round(buy_dqs, 3) if buy_dqs else None,
                        "buy_price": buy_price, "buy_dip": buy_dip,
                        "ticker": buy_ticker},
+                close_ts=_close_ts,
             )
             await self._auto_bet_momentum(
                 buy_market, buy_price,
