@@ -290,6 +290,73 @@ def _isolate_predictions_log(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Auto-isolate logger output. Session 15.5 (Apr 25): bot/main.py imports
+# call bot/logger.py:setup_file_logging() at module load, which attaches a
+# RotatingFileHandler pointing at bot/logs/bot.log. Without this fixture,
+# any test that imports bot.main (transitively or directly) causes mocked
+# error/traceback noise to land in the production log file. After 24h of
+# pytest runs Tyler counted 190 ERROR/Traceback entries from tests, making
+# `grep ERROR bot/logs/bot.log` an unreliable health check.
+#
+# This autouse session-scoped fixture snapshots root + every glint.*
+# logger's handlers, replaces them with a NullHandler for the test
+# session, and restores them on teardown. Tests that need to assert on
+# log output should use pytest's caplog fixture, which still works
+# because caplog attaches its own handler.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_glint_loggers():
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    # Strip any RotatingFileHandler that bot/logger.setup_file_logging() attached
+    # during test collection / module import. Replace ALL handlers on root and
+    # glint.* / nexus.* loggers with a single NullHandler.
+    saved: dict[str, list[logging.Handler]] = {}
+    targets: list[logging.Logger] = [logging.getLogger()]
+    for name, lg in list(logging.Logger.manager.loggerDict.items()):
+        if not isinstance(lg, logging.Logger):
+            continue
+        if name == "glint" or name.startswith("glint.") or name == "nexus" or name.startswith("nexus."):
+            targets.append(lg)
+    for lg in targets:
+        saved[lg.name] = list(lg.handlers)
+        lg.handlers = [logging.NullHandler()]
+
+    # Also short-circuit setup_file_logging() so any later import that calls
+    # it cannot re-attach a RotatingFileHandler. Force _initialized=True; the
+    # function early-returns on that guard.
+    saved_initialized = None
+    try:
+        from bot import logger as _bot_logger
+        saved_initialized = _bot_logger._initialized
+        _bot_logger._initialized = True
+        # Also clean any handler that snuck in before this fixture ran but
+        # wasn't on the targets list because the logger hadn't been created yet.
+        for lg in [logging.getLogger()]:
+            for h in list(lg.handlers):
+                if isinstance(h, RotatingFileHandler):
+                    lg.removeHandler(h)
+                    h.close()
+    except Exception:
+        pass
+
+    try:
+        yield
+    finally:
+        for lg in targets:
+            if lg.name in saved:
+                lg.handlers = saved[lg.name]
+        if saved_initialized is not None:
+            try:
+                from bot import logger as _bot_logger
+                _bot_logger._initialized = saved_initialized
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # Filesystem isolation fixture
 # ---------------------------------------------------------------------------
 
