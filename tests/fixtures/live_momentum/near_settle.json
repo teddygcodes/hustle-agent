@@ -1,0 +1,471 @@
+{
+  "scenario": "near_settle",
+  "ticks": [
+    {
+      "ts": "2026-04-26T00:00:00Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 84,
+      "yes_ask": 85,
+      "no_bid": 14,
+      "no_ask": 15,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 14,
+      "opp_yes_ask": 15,
+      "opp_no_bid": 84,
+      "opp_no_ask": 85,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 85,
+        "yes_bid": 84,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 15,
+        "yes_bid": 14,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:01Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 86,
+      "yes_ask": 87,
+      "no_bid": 12,
+      "no_ask": 13,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 12,
+      "opp_yes_ask": 13,
+      "opp_no_bid": 86,
+      "opp_no_ask": 87,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 87,
+        "yes_bid": 86,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 13,
+        "yes_bid": 12,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:02Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 88,
+      "yes_ask": 89,
+      "no_bid": 10,
+      "no_ask": 11,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 10,
+      "opp_yes_ask": 11,
+      "opp_no_bid": 88,
+      "opp_no_ask": 89,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 89,
+        "yes_bid": 88,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 11,
+        "yes_bid": 10,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:03Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 89,
+      "yes_ask": 90,
+      "no_bid": 9,
+      "no_ask": 10,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 9,
+      "opp_yes_ask": 10,
+      "opp_no_bid": 89,
+      "opp_no_ask": 90,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 90,
+        "yes_bid": 89,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 10,
+        "yes_bid": 9,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:04Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 87,
+      "yes_ask": 88,
+      "no_bid": 11,
+      "no_ask": 12,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 11,
+      "opp_yes_ask": 12,
+      "opp_no_bid": 87,
+      "opp_no_ask": 88,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 88,
+        "yes_bid": 87,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 12,
+        "yes_bid": 11,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:05Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 85,
+      "yes_ask": 86,
+      "no_bid": 13,
+      "no_ask": 14,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 13,
+      "opp_yes_ask": 14,
+      "opp_no_bid": 85,
+      "opp_no_ask": 86,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 86,
+        "yes_bid": 85,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 14,
+        "yes_bid": 13,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:06Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 83,
+      "yes_ask": 84,
+      "no_bid": 15,
+      "no_ask": 16,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 15,
+      "opp_yes_ask": 16,
+      "opp_no_bid": 83,
+      "opp_no_ask": 84,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 84,
+        "yes_bid": 83,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 16,
+        "yes_bid": 15,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:07Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 85,
+      "yes_ask": 86,
+      "no_bid": 13,
+      "no_ask": 14,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 13,
+      "opp_yes_ask": 14,
+      "opp_no_bid": 85,
+      "opp_no_ask": 86,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 86,
+        "yes_bid": 85,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 14,
+        "yes_bid": 13,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:08Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 88,
+      "yes_ask": 89,
+      "no_bid": 10,
+      "no_ask": 11,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 10,
+      "opp_yes_ask": 11,
+      "opp_no_bid": 88,
+      "opp_no_ask": 89,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 89,
+        "yes_bid": 88,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 11,
+        "yes_bid": 10,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:09Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 91,
+      "yes_ask": 92,
+      "no_bid": 7,
+      "no_ask": 8,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 7,
+      "opp_yes_ask": 8,
+      "opp_no_bid": 91,
+      "opp_no_ask": 92,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 92,
+        "yes_bid": 91,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 8,
+        "yes_bid": 7,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    },
+    {
+      "ts": "2026-04-26T00:00:10Z",
+      "ticker": "KXATPMATCH-TEST",
+      "yes_bid": 93,
+      "yes_ask": 94,
+      "no_bid": 5,
+      "no_ask": 6,
+      "opp_ticker": "KXATPMATCH-OPP",
+      "opp_yes_bid": 5,
+      "opp_yes_ask": 6,
+      "opp_no_bid": 93,
+      "opp_no_ask": 94,
+      "wp": null,
+      "score_diff": null,
+      "period": null,
+      "espn_data": null,
+      "close_ts": "2026-12-31T23:59:00Z",
+      "raw": {
+        "yes_ask": 94,
+        "yes_bid": 93,
+        "ticker": "KXATPMATCH-TEST",
+        "title": "Test Match"
+      },
+      "raw_opp": {
+        "yes_ask": 6,
+        "yes_bid": 5,
+        "ticker": "KXATPMATCH-OPP",
+        "title": "Test Match"
+      }
+    }
+  ],
+  "expected": {
+    "actions": [
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Buy",
+        "side": "yes",
+        "qty": 20,
+        "reason": "MOMENTUM: leader at 84c, dipped 6c from recent 90c (SCALP MODE \u2014 pure price action)",
+        "ticker": "KXATPMATCH-TEST",
+        "price_cents": 84
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Hold",
+        "reason": ""
+      },
+      {
+        "type": "Sell",
+        "side": "yes",
+        "qty": 20,
+        "reason": "NEAR-SETTLE: 93\u00a2 (match nearly won, entry 84\u00a2, gain +9\u00a2)",
+        "ticker": "KXATPMATCH-TEST",
+        "exit_price": 93
+      }
+    ],
+    "log_calls": [
+      {
+        "ticker": "KXATPMATCH-TEST",
+        "decision": "accept",
+        "reason": "dip_buy"
+      },
+      {
+        "ticker": "KXATPMATCH-TEST",
+        "decision": "reject",
+        "reason": "position_open"
+      }
+    ],
+    "states": [
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 0,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 1,
+        "entry_count": 1,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 1,
+        "entry_count": 1,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 1,
+        "entry_count": 1,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 1,
+        "entry_count": 1,
+        "cooldown_remaining": 0,
+        "peak_values": {}
+      },
+      {
+        "bets_placed_count": 0,
+        "entry_count": 1,
+        "cooldown_remaining": 5,
+        "peak_values": {}
+      }
+    ]
+  }
+}
