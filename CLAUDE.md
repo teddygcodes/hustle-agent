@@ -990,35 +990,38 @@ No bug in update_positions itself (Outcome C ruled out). Not structurally meanin
 
 ---
 
-### ☐ Session 18 — live_journal.json analysis tool (Apr 26+, planned)
+### ☑ Session 18 — live_journal.json analysis tool (Apr 26, shipped)
 
-**Problem.** `bot/state/live_journal.json` (~600 KB and growing) records every per-game event live_watcher emits (`scan_found`, `bet`, `exit`, `session_end`) for every game. This is rich behavioral data that NO existing analysis tool reads. It captures things excursion_report and cohort_report can't:
-- Time-to-exit distribution per strategy (where does the actual hold-time density live?)
-- Exit-reason breakdown (take_profit vs trailing_stop vs near_settle vs hard_cap — each is a tunable)
-- "Watched but didn't enter" funnel (per game: did we see it? Why didn't we enter? `no_leader`, `low_volume`, `disabled_sport`, `no_dip`)
-- Per-sport breakdown of all the above
-- Session_end summary per game (P&L, max drawdown, win/loss)
+**Problem (pre-fix).** [bot/state/live_journal.json](hustle-agent/bot/state/live_journal.json) (617 KB, 1,710 records, Apr 9 → Apr 26) records every per-game event live_watcher emits (`scan_found` × 1026, `session_end` × 476, `bet` × 113, `exit` × 95). NO existing analysis tool reads it. Sessions 6–15 instrumented decisions; Session 18 is "build the lens, look through it, write down what you see." Session 19's tick-replay back-tester is gated on Session 18 surfacing whether retuning candidates exist before a back-tester earns its scope.
 
-Sessions 6–15 instrumented decisions. Session 18 reads the BEHAVIOR data sitting unanalyzed. This is also the better Step-1 we should have run before excursion_report on Apr 25.
+**What shipped.**
+- **New [tools/journal_analysis.py](hustle-agent/tools/journal_analysis.py)** (gitignored — matches `cohort_report.py` / `excursion_report.py` convention). Loader mirrors [tools/excursion_report.py:50-68](hustle-agent/tools/excursion_report.py:50) (defensive against missing/malformed/non-list); helpers `_parse_ts` and aggregator decomposition mirror [tools/cohort_report.py:32-38](hustle-agent/tools/cohort_report.py:32) and `cohort_report.aggregate_decisions`. Sport inference falls back to `bot.regime._ticker_to_sport` for pre-Apr-16 records that lack the `sport` field. Bet→exit pairing is greedy first-eligible: globally sort events by ts; for each bet in order, claim the first ticker-matched exit with `ts ≥ bet.ts` not already claimed (handles the re-entry case observed for 1 ticker in production data).
+- **Five aggregations.** (a) Time-to-exit per `(sport, mode)` bucketed `<60s / 60s-5min / 5-15min / 15-60min / >60min` with median + p25. (b) Exit-reason classified into 11-key enum (`take_profit, trailing_stop, stop_loss, dollar_stop, underwater_exit, near_settle, settled_win, settled_loss, score_flip, opp_run_exit, other`); spec called the dollar-cap path `hard_cap` but [bot/live_watcher.py:2342](hustle-agent/bot/live_watcher.py:2342) writes it as `DOLLAR STOP` — using the code's name as the enum key. (c) Watch-but-no-enter funnel per sport (unique scan_found tickers with vs without a matching bet). (d) Per-sport split (a/b/c segmented). (e) Per-game session_end summary (P&L distribution + top-5 best/worst).
+- **`FINDINGS` list constant** at the top of `journal_analysis.py`, rendered in the report's Findings section. Initially empty → renders an explicit "no findings yet" placeholder. Populated after running the tool against production data; commit message names the same finding strings (single source of truth via redundant emission). Spec required ≥1 finding; this session ships 3.
+- **`--regime-by` flag deferred per spec** ("skip if non-trivial complexity"). Per-sport split already captures the dominant regime axis for sports strategies. Trivial to add later when warranted.
+- **`tests/test_journal_analysis.py`** (committed — `tests/` is not gitignored). 38 cases across 9 classes: `TestLoader` (5 — well-formed list, missing file, malformed JSON, non-list, drops non-dict and event-less entries), `TestSportInference` (3), `TestParseTs` (3), `TestExitReasonClassifier` (12 parametrized + fallback + empty/None), `TestPairBetsToExits` (3 — simple pair, unpaired-as-open, two-bet re-entry), `TestComputeTimeToExit` (2 — bucket boundaries, open not in n), `TestComputeExitReasons` (1), `TestComputeWatchFunnel` (2 — per-sport split + repeat-scan collapse), `TestComputeSessionEnds` (1), `TestSchemaTolerance` (2 — missing mode → `unknown_mode`, missing sport → ticker-prefix inference), `TestRenderMarkdown` (4 — empty placeholder, full sections present, findings empty/populated).
 
-**Plan.**
-- New `tools/journal_analysis.py` (gitignored, local-only — match the `cohort_report` / `excursion_report` / `calibration_report` / `universe_report` / `microstructure_report` convention).
-- Read current `live_journal.json` plus any rotation archives if they exist. (If `live_journal.json` doesn't have rotation today, that's a separate small task — flag in commit but don't scope-creep into adding it here.)
-- Per-strategy aggregations:
-  - **Time-to-exit distribution**: bucket {<5min, 5-15min, 15-60min, >60min}. For live_momentum, where does the density live?
-  - **Exit-reason breakdown**: % via take_profit / trailing_stop / stop_loss / near_settle / hard_cap. Surface the most-common and least-common — each rare reason is either dead config or bad-data signal.
-  - **Watch-but-no-enter funnel**: aggregate `scan_found` events that have NO matching `bet`. Group by `skip_reason` if recorded; otherwise mark as `unknown_skip`.
-  - **Per-sport split**: same metrics segmented by sport (NBA / NHL / MLB / UFC / IPL).
-  - **Per-game session_end**: P&L distribution, drawdown distribution.
-- Markdown to stdout. Designed to be the **primary analysis tool for live_momentum** until tick-replay back-tester (Session 19) ships.
-- Optional: regime-slice support via `--regime-by` flag mirroring the other reports. Skip if it adds non-trivial complexity; the per-sport split already captures the most important regime axis for sports strategies.
+**Findings (the deliverable; commit message names all three).**
+1. **TRAILING STOP and DOLLAR STOP exits are 0% across all sports/modes** (n=95 paired bet→exit lifecycles, Apr 9–Apr 26). Both code paths exist ([bot/live_watcher.py:2276](hustle-agent/bot/live_watcher.py:2276) trailing stop, [bot/live_watcher.py:2342](hustle-agent/bot/live_watcher.py:2342) dollar stop) but never fire — TAKE PROFIT / STOP-LOSS / UNDERWATER EXIT always trigger first. Trailing stop requires `LIVE_PROFIT_TARGET=0.50` (50% gain) before activating; `LIVE_TAKE_PROFIT_CENTS` fires on the +12-15¢ moves we actually observe. Dollar stop's $5 cap (`MOMENTUM_MAX_LOSS_DOLLARS=5.00`) is wider than STOP-LOSS's 10-12¢ × typical 1-6 contracts. **Confidence: high.** Candidate config change: lower `LIVE_PROFIT_TARGET` to 0.20 so winners ride into trailing-stop territory before TAKE_PROFIT exits flat, OR remove these two paths from live_watcher as dead code. Worth A/B-testing in Session 19's tick-replay rather than retuning live.
+2. **UFC live_momentum is mechanically a different strategy** from court-sports live_momentum. Median hold = 123s (p25 = 47s) vs 642–1791s for atp_challenger / nba / nhl / wta. UFC has the best scan→bet conversion (44% vs 9–25% elsewhere) and the only positive session win/loss ratio (5W / 2L of 17 games we bet on; all other sports with n>10 are roughly 1:1 or worse). 0% UNDERWATER EXIT in UFC vs 21–25% in slow sports — UFC fights end before that path's 5-tick threshold can fire. **Confidence: medium** (n=9 paired UFC holds is small). Candidate: do NOT retune UFC down to slow-sport thresholds; consider raising UFC sizing or pulling UFC into a dedicated TickStrategy when Session 19 ships.
+3. **Watch-but-no-enter rate is 56–91% across all sports** (494 unique scan tickers, 391 = 79% had no bet; UFC lowest at 56%, wta_challenger highest at 91%). NO visibility into WHY — `scan_found` events do not record `skip_reason`. **Confidence: high** (volume), **low** (causes). Candidate: instrument live_watcher's `scan_live_matches` to write `skip_reason` on scan_found events (forward-only — won't recover historical reasons). Tracked separately as a small live_watcher follow-up.
 
-**Out of scope.** Tick-replay (Session 19). Modifying `live_watcher` to record additional event fields (forward-compatible — work with what's there). Rotation of `live_journal.json` itself if absent (separate trivial task).
+**Tests.** 38 passed in `tests/test_journal_analysis.py`. Existing test files unaffected (`bot/regime._ticker_to_sport` is the only new import — pure function, no state).
 
-**Verify.**
-1. `python3 tools/journal_analysis.py` runs without errors on production journal.
-2. Output makes intuitive sense: NBA hold times ~10-30 min match expectation, exit-reason mix is roughly balanced (not 100% one path).
-3. **Find at least one actionable insight.** Examples: "85% of NBA exits via take_profit, 0% stop_loss → stop_loss is set too generous, never fires"; "60% of UFC games never get entered because of `no_leader` → leader threshold is too strict for UFC"; "median NBA hold time is 4 min → live_momentum is more scalp than swing → take_profit could be tightened." Record the insight in the Session 18 commit message; it's the deliverable, not the tool.
+**Coordination with user (deploy).** Bot does NOT need restart — `tools/journal_analysis.py` is read-only, gitignored, and not imported by `bot/main.py`. Run on demand: `python3 tools/journal_analysis.py`.
+
+**Out of scope (flagged in commit message).**
+- `--regime-by AXIS` flag (deferred — per-sport already covers the dominant axis; ~30-40 LOC to add when warranted).
+- Tick-replay back-tester (Session 19; Finding #1's candidates are A/B-test material for that session, not retuning live).
+- Modifying `live_watcher` to record `skip_reason` on `scan_found` events (forward-only follow-up; Finding #3 quantifies the visibility gap).
+- Adding rotation to `live_journal.json` (~36 KB/day growth; future small task before file exceeds ~10 MB).
+- Acting on Finding #1's config candidates (Session 19+ retuning work; this session surfaces, doesn't act).
+- Cross-source joins to `clv.json` / `decisions.jsonl` (journal-only this session).
+
+**Verify (post-ship).**
+1. `python3 tools/journal_analysis.py` — emits markdown report. Findings section renders all 3 strings; per-sport totals match scan_found distribution (atp_challenger 284, nba 193, atp 168, mlb 108, nhl 94, wta 78, ufc 69, wta_challenger 19, ipl 13); 95 paired bet→exit lifecycles total across all `(sport, mode)` keys; no NaN, no negative counts, no >100% percentages.
+2. `python3 -m pytest tests/test_journal_analysis.py -v` — 38 tests pass.
+3. Findings text in [tools/journal_analysis.py](hustle-agent/tools/journal_analysis.py) `FINDINGS` list matches the commit-message bullets verbatim.
 
 ---
 
