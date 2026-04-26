@@ -903,7 +903,7 @@ Session 18: live_journal.json analysis tool    (small-medium — net new tool)
             ↓
 [May 2: full retuning report runs]
             ↓
-Session 19: Tick-replay back-tester (DEFERRED — prereqs: 16+17+18 + 30+ MFE-instrumented live_momentum settlements + retuning report greenlights live_momentum as the highest-leverage target)
+Session 19: Tick-replay back-tester (READY as of Apr 26 — prereqs closed by Sessions 16+17+18+18.5; 2-3 sub-sessions following the 13a/b/c pattern: TickStrategy contract → tick replay infra → param sweep with train/test split. 18.5 sharpened the design with concrete constraints — see Session 19 block for details)
             ↓
 Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=False decision)
 ```
@@ -1067,37 +1067,76 @@ No bug in update_positions itself (Outcome C ruled out). Not structurally meanin
 
 ---
 
-### ☐ Session 19 — Tick-replay back-tester for live_momentum (Apr 26+, planned, DEFERRED)
+### ☐ Session 19 — Tick-replay back-tester for live_momentum (Apr 26+, planned, READY — 2-3 sub-sessions)
 
-**Problem.** Live_momentum is our only profitable strategy (+$12.30, 62% WR over 39 trades). Tick data has been accumulating in `live_ticks-*.jsonl.gz` archives since Session 5 (Apr 23). The natural next move is to back-test the swing-trading strategy across parameter sweeps. **But building this BEFORE the prereqs are met would be premature for four reasons surfaced in the Apr 25 design discussion:**
-1. The Strategy Protocol from Session 13a is *snapshot-based*; live_momentum is *stateful per-game*. The contract needs an extension (`TickStrategy` with a `process_tick()` method), not reuse.
-2. `compute_clv_cents` measures entry-vs-close. Swing trading needs entry-vs-EXIT (realized P&L). Different metric.
-3. 39 settled trades is too small for parameter-sweep validation without overfitting. Standard error on 62% WR with n=39 is ~8 percentage points.
-4. Market-impact slippage on Kalshi's thin sports markets is real and unmeasured (PAPER_MODE=True → microstructure data is empty). A naive back-test will look 25-50% more profitable than reality.
+**Problem.** Live_momentum is our only profitable strategy (+$12.30, 62% WR over 39 trades). Tick data has been accumulating in `live_ticks-*.jsonl.gz` archives since Session 5 (Apr 23). The natural next move is to back-test the swing-trading strategy across parameter sweeps. **Apr 26 update: original framing had four "prereq" gates; Sessions 16-18 + 18.5 closed three of them and sharpened the fourth into concrete design constraints. Status flipped DEFERRED → READY.**
 
-**Prereqs (gates the session — do not start until all four met).**
-1. Sessions 16 (excursion bug fix) + 17 (tracker cadence) + 18 (journal analysis) shipped.
-2. Sessions 17 + 18 outputs (tracker cadence + journal_analysis) confirm that live_momentum exit-logic / parameter retuning is the highest-leverage candidate. If journal_analysis instead points at a config issue (e.g., 60% of UFC games never enter due to leader threshold), fix THAT first — it's cheaper than a back-tester. The back-tester only earns its scope when the existing analysis tools have been exhausted on live_momentum specifically.
-3. At least 30 settled live_momentum positions with MFE/MAE coverage (vs Apr 25's 5). Calendar-bound.
-4. Honest acknowledgment of slippage as an UNMEASURED variable; design the back-tester with a configurable slippage assumption.
+**Original four risks (and their current status):**
+1. ☑ Strategy Protocol from Session 13a is *snapshot-based*; live_momentum is *stateful per-game*. **Resolution: 19a explicitly extends the Protocol with `TickStrategy`.**
+2. ☑ `compute_clv_cents` measures entry-vs-close; swing trading needs entry-vs-EXIT (realized P&L). **Resolution: 18.5 already proved realized P&L is the right metric and built the per-side sign-convention helpers in `tools/exit_replay.py`. 19 reuses that math.**
+3. ⚠️ Sample size: 39 settled trades was the original concern. **Status: Session 17's 30s `_position_check_loop` started accumulating MFE/MAE coverage Apr 26; verify ≥30 instrumented settlements at session start. If not yet there, ship 19a (the refactor) but defer 19c (the sweep) until sample matures.**
+4. ☑ Market-impact slippage is unmeasured. **Resolution: bake `+2¢` per round-trip slippage pessimism into the back-tester output as a configurable knob. Document explicitly that back-test results are upper-bound; live likely 20-30% worse.**
 
-**Plan (when prereqs met).**
-- Extend `bot/strategies/__init__.py` Protocol with a `TickStrategy` variant: `process_tick(state, tick) -> TickAction | None` where `TickAction` is `Buy(side, qty)` / `Sell(side, qty)` / `None`. Stateful (carries position/price-history state across ticks) — distinct from the snapshot-based `Strategy`.
-- New `bot/strategies/live_momentum.py` (or refactor existing live_watcher entry/exit logic) implementing the `TickStrategy` contract — pure function from `(state, tick) → action`. Mirror the 13a discipline: behavior-preserving refactor first, golden-file test locking equivalence to current live_watcher behavior, THEN parameter knobs.
-- New `tools/tick_backtest.py` (local-only) reads `live_ticks-*.jsonl.gz` archives, replays through TickStrategy, emits per-game realized P&L.
-- Parameter sweep grid: `dip_threshold` × `take_profit` × `stop_loss` × `max_entry_price`. Cap total combos at ~50 to avoid overfitting bait.
-- **Train/test split discipline:** sweep on 70% of games (by date order), validate on held-out 30%. Report BOTH numbers; only the validation P&L matters for retuning decisions.
-- **Slippage pessimism:** every round-trip subtracts a configurable slippage (default `+2¢` per round trip — ungenerous on purpose). Document the assumption explicitly in the report output.
-- Regime slicing via `bot/regime.py` tagger on game start time.
-- Output: per-variant table (validation_pnl, validation_winrate, validation_round_trips) + best-validated variant callout. NEVER auto-promote.
+**New prereqs surfaced by Session 18.5 (the real value of 18.5).** These were not on the radar in the original Apr 25 design:
 
-**Out of scope.** Auto-promotion of best variant to live (always human gate). Refactoring live_watcher to USE the TickStrategy contract immediately (only refactor when ready to back-test live changes; pre-refactor lock-via-golden-test is the prereq).
+A. **Tick window must extend beyond production exit_ts.** 18.5's exit_replay was constrained to the `[bet.ts, exit.ts]` window because that's where live_journal pairs end. This made the simulator unable to honestly evaluate ANY strategy variant that DELAYS exit relative to production — positions fell through to NO_EXIT with last-tick value bias. Session 19 must either:
+   - **(a)** Read ticks for the ticker out to game settlement (cap at known close_ts), OR
+   - **(b)** Only evaluate variants that exit EARLIER than production (one-sided sweep)
+   - **Recommendation:** (a). Game settlement is in `clv.json` for settled markets and via `bot/kalshi_history.py:fetch_settled_close` (Session 13c) for unmatched tickers. The window is `[game_open_ts, min(now, settlement_ts)]`.
 
-**Verify (when shipped).**
-1. **Replay matches reality:** take a known live_momentum trade from `paper_trades.json`, replay its game's ticks through TickStrategy with current parameters, assert P&L matches within 1¢. If not, the back-tester has a bug — fix before reporting any sweep.
-2. Sweep produces non-flat result curves (parameter actually matters across the range).
-3. Validation P&L ≥ 0 for the best variant. **If validation is negative when training is positive, we're overfitting** — narrow the sweep grid or reject the result.
-4. Commit message names the best-validated parameter set as a Session-21+ retuning candidate (NOT auto-promoted).
+B. **Pre-flight dead-config grep is mandatory before sweeping any parameter.** 18.5 discovered three dead config constants (`LIVE_PROFIT_TARGET`, `LIVE_TRAILING_STOP`, `LIVE_HARD_PROFIT_TARGET`) that I had named in the Session 18 commit message as live gates but were never read in any logic. Before sweeping ANY config knob in 19c, grep the entire codebase to verify the knob is actually read in production. If a knob is dead, fix the docs and pivot the sweep axis BEFORE building the simulation.
+
+C. **In-sample sweeps produce non-monotonic noise; train/test split is empirically required, not just theoretically.** 18.5's in-sample sweep on `MOMENTUM_DQS_TRAIL_STOP` across [3,4,5,6,7,8]¢ produced Σ P&L of -11/-3/-11/-3/-14/+13. Non-monotonic. Best variant delta < +50¢ "clear winner" threshold. Train on 70% by date order, validate on held-out 30% — this is the floor, not an aspiration.
+
+D. **Exit-only sweeps don't move the needle in this sample.** 18.5 ruled out the cheap exit-only path with high confidence. Session 19 must sweep entry parameters too (`dip_threshold`, `max_entry_price`, `MOMENTUM_LEADER_MIN`) for the back-tester to earn its scope. An entry-only sweep would also be insufficient — entries and exits interact; the value is in their joint optimization.
+
+**Plan: 2-3 sub-sessions following the Session 13 pattern (refactor → tool → sweep).**
+
+**Sub-session 19a — TickStrategy Protocol extension + behavior-preserving live_momentum refactor (~4-5 hours).**
+- Extend `bot/strategies/__init__.py` Protocol with `TickStrategy` variant:
+  ```python
+  class TickStrategy(Protocol):
+      name: str
+      def init_state(self, market: Market) -> State: ...
+      def process_tick(self, state: State, tick: Tick) -> tuple[State, TickAction | None]: ...
+  ```
+  Where `TickAction` is `Buy(side, qty, reason)` / `Sell(side, qty, reason)` / `Hold`. Stateful — explicit state passed through (not internal mutable). Pure function: `(state, tick) → (new_state, action)`. Distinct from snapshot-based `Strategy`.
+- New `bot/strategies/live_momentum.py` implementing the `TickStrategy` contract. **Behavior-preserving refactor of `bot/live_watcher.py:_tick_momentum`** — same gates, same exit priority, same telemetry. Mirror the 13a discipline: lock the regression with a golden-file test BEFORE deleting the old code path. The goal is a code-shape change, not a math change.
+- Run pre-flight dead-config grep (Prereq B) on every constant `live_watcher.py` reads. Document each as live or dead. Surface in commit message.
+- Tests: `tests/test_live_momentum_strategy.py` golden-file regression — hand-craft 5 game tick streams covering the key paths (TAKE_PROFIT, STOP_LOSS, NEAR_SETTLE, TRAILING_STOP-eligible, NO_EXIT). For each, assert the new `TickStrategy.process_tick()` produces the same action sequence as the old `_tick_momentum` would.
+- Acceptance: 0 behavior change in production live_watcher (the new class isn't wired in yet — same pattern as 13a).
+
+**Sub-session 19b — Offline tick replay back-tester (~3-4 hours).**
+- New `tools/tick_backtest.py` (local-only, gitignored).
+- Universe: per-game tick streams from `live_ticks-*.jsonl.gz` archives (current + last 14-30 days as needed).
+- **Window discipline (Prereq A):** for each historical game, replay from game_open_ts to `min(now, settlement_ts)`. Settlement_ts pulled from `clv.json` for tickers in our trade history; otherwise from `bot/kalshi_history.py:fetch_settled_close()` (Session 13c). Skip games we can't get a settlement for; report skip count.
+- Replay loop: instantiate the TickStrategy, walk ticks in order, accumulate state + actions. Track entries/exits as round-trips. Compute realized P&L per round-trip (reuse 18.5's per-side sign-convention helpers via `from tools.exit_replay import compute_realized_pnl_cents` or extract to a shared module — single source of truth, no parallel codepath).
+- **Slippage pessimism (Prereq 4):** subtract `+2¢` per round-trip from realized P&L. Configurable via CLI flag `--slippage-cents N` (default 2).
+- Reality check: take 5 known live_momentum trades from `paper_trades.json` from a date in `live_ticks-*.jsonl.gz`. Replay through TickStrategy with current production parameters. **Assert each P&L matches within 1¢ of the actual paper trade outcome.** This is the regression that proves the back-tester is honest. If divergence > 1¢, the back-tester has a bug — fix before any sweep result is reported.
+- Output: per-game realized P&L table, aggregate stats. Markdown to stdout matching cohort_report style.
+
+**Sub-session 19c — Parameter sweep with train/test split + actionable findings (~3-4 hours).**
+- Sweep grid (entry × exit, capped at ~50 total combos to avoid overfitting bait):
+  - Entry params: `MOMENTUM_LEADER_MIN ∈ [0.65, 0.70, 0.75]`, `MOMENTUM_DIP_BUY ∈ [3, 4, 5]`, `MOMENTUM_DIP_MAX ∈ [8, 10, 12]`
+  - Exit params: `LIVE_TAKE_PROFIT_CENTS ∈ [10, 12, 14]`, `MOMENTUM_DQS_TRAIL_STOP ∈ [4, 6, 8]`
+  - **Run pre-flight grep (Prereq B) on each constant before including it in the grid.** If any are dead, drop them from the sweep and add a finding to the report.
+  - Joint sweep: 3 × 3 × 3 × 3 × 3 = 243 combos. Too many. Pick a 2D primary sweep (most promising entry knob × most promising exit knob from 18.5's exit_replay results) and a 1D fallback for the rest. Cap at 25-50 combos total.
+- **Train/test split (Prereq C):** sweep on 70% of games by date order, validate on held-out 30%. Report:
+  - Training Σ P&L per variant (in-sample)
+  - Validation Σ P&L per variant (out-of-sample) — **the only number that matters for retuning**
+  - Validation P&L delta vs current production parameters
+  - Per-variant exit-reason breakdown
+  - Per-sport breakdown (UFC vs court-sports — Session 18 Finding #2)
+- Regime slicing via `bot/regime.py` tagger on game start time. Report variant performance by `time_of_day` and `sport_phase`.
+- Best-validated-variant callout. **NEVER auto-promote.** Findings section is the deliverable.
+- If the best validation Σ P&L delta vs production is < +50¢ over the test set OR validation P&L sign disagrees with training, the sweep produced no actionable signal. Document as Outcome B (mirror 18.5's discipline) and ship the back-tester infrastructure as a Session 21+ retuning enabler instead.
+
+**Out of scope (across all 3 sub-sessions).** Auto-promotion of best variant to live (always human gate). Refactoring live_watcher to USE the TickStrategy contract immediately (post-19a, the new class lives alongside the old code; live wiring waits for separate decision). Per-sport individual TickStrategy instances (Session 22+; Session 18 Finding #2 raised this — defer until joint sweep shows whether per-sport really matters).
+
+**Verify (per sub-session).**
+- 19a: golden-file test passes on 5 hand-crafted scenarios; 0 behavior change in live production; pre-flight dead-config grep documented.
+- 19b: 5 known paper trades replay within 1¢ of actual outcome; window-extension verified (replay reads ticks beyond production exit_ts when settlement is later); skip count for un-settleable games reported.
+- 19c: validation Σ P&L > training Σ P&L by ≤30% (overfitting check); per-sport breakdown surfaces UFC-vs-court split (or rules out 18 Finding #2 as a candidate); commit message names best-validated parameter set with explicit "candidate for Session 21+, NOT auto-promoted" framing.
 
 ---
 
