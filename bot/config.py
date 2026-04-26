@@ -58,9 +58,10 @@ ODDS_API_MONTHLY_LIMIT = 450   # Buffer from 500 free tier limit
 LIVE_POLL_INTERVAL        = 10    # seconds between ticks while watching a game
 LIVE_WATCH_EDGE_THRESHOLD = 0.10  # 10% relative edge to auto-bet in watch mode
 LIVE_TAKE_PROFIT_CENTS   = 12    # sell when up 12¢ from entry — backtested sweet spot
-LIVE_PROFIT_TARGET       = 0.50  # 50% gain activates trailing stop (fallback)
-LIVE_TRAILING_STOP       = 0.25  # sell if price drops 25% from peak after target hit
-LIVE_HARD_PROFIT_TARGET  = 1.00  # 100% gain — take profit immediately (safety)
+# LIVE_PROFIT_TARGET / LIVE_TRAILING_STOP / LIVE_HARD_PROFIT_TARGET removed
+# Apr 26 (Session 18.5 Task 7) — verified dead via grep (0 readers across
+# bot/, tests/, tools/). Trailing stop fires on MOMENTUM_DQS_TRAIL_STOP, not
+# on a profit-target activation gate. See [bot/live_watcher.py:2178-2361].
 LIVE_STOP_LOSS_CENTS     = 30   # exit if position drops 30¢ from entry
 LIVE_NEAR_SETTLE_CENTS   = 93   # exit if price >= 93¢ (match almost over, lock in win)
 LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant

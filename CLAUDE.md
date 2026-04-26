@@ -1023,6 +1023,48 @@ No bug in update_positions itself (Outcome C ruled out). Not structurally meanin
 2. `python3 -m pytest tests/test_journal_analysis.py -v` — 38 tests pass.
 3. Findings text in [tools/journal_analysis.py](hustle-agent/tools/journal_analysis.py) `FINDINGS` list matches the commit-message bullets verbatim.
 
+#### Session 18.5 follow-up — exit-logic replay tool (Apr 26, shipped, Outcome B)
+
+**Problem.** Session 18 Finding #1 said TRAILING STOP / DOLLAR STOP fire 0/95 paired bet→exit cycles. Session 19 (full tick-replay back-tester) is gated on prereqs. Session 18.5 is the cheap intermediate: build a focused exit-logic replay simulator (~250 LOC), sweep one parameter, ship a config change OR commit to Session 19 with sharper evidence.
+
+**Phase-1 dead-config discovery (changed the sweep axis).** The Session 18 commit message claimed trailing was gated by `LIVE_PROFIT_TARGET=0.50` (50% gain activation). Phase-1 grep across the entire codebase proved otherwise: `LIVE_PROFIT_TARGET`, `LIVE_TRAILING_STOP`, `LIVE_HARD_PROFIT_TARGET` are all defined in [bot/config.py:61-63](hustle-agent/bot/config.py:61) and imported in [bot/live_watcher.py:36](hustle-agent/bot/live_watcher.py:36) but **never read in any logic anywhere**. The trailing-stop in production fires when `drop_from_peak >= sport_trail AND gain_cents > 0` with NO `LIVE_PROFIT_TARGET` activation gate — `sport_trail` resolves to `MOMENTUM_DQS_TRAIL_STOP=6¢` (default) with sport profile overrides (NBA=4¢, NHL=8¢). The reason TRAILING_STOP fires 0/95 is that TAKE_PROFIT (sport_tp default 12¢) fires first whenever peak reaches the TP threshold. Sweep axis pivoted from `LIVE_PROFIT_TARGET` (dead config) to `MOMENTUM_DQS_TRAIL_STOP` (the parameter that actually gates trailing).
+
+**What shipped.**
+- **New [tools/exit_replay.py](hustle-agent/tools/exit_replay.py)** (gitignored). Mirrors [bot/live_watcher.py:2178-2361](hustle-agent/bot/live_watcher.py:2178) priority order byte-for-byte. Implements TAKE_PROFIT, NEAR_SETTLE, TRAILING_STOP, SCORE_FLIP, STOP_LOSS, DOLLAR_STOP. Skips UNDERWATER_EXIT (dead Apr 16) and EDGE_REVERSAL/FADING (arb-mode only). NO_EXIT fall-through uses last-tick value as conservative realized P&L.
+- **Sweep design.** `MOMENTUM_DQS_TRAIL_STOP ∈ [3,4,5,6,7,8]¢`. Swept value applied as OVERRIDE to all sports (else NBA stays 4¢, NHL stays 8¢ via SPORT_PROFILES regardless of global). Strict cohort = bets with ≥10 ticks in the [bet.ts, exit.ts] window (n=53). Relaxed cohort = ≥5 ticks (n=64), reported sensitivity-only.
+- **Pair counts.** Total: 115 bets / 96 exits → 86 paired (after excluding 10 SETTLED, 29 still-open). Tick coverage: 8 no-tick + 14 thin (<5) + 11 relaxed-only + 53 strict.
+- **`tests/test_exit_replay.py`** (committed) — 24 cases across 5 classes: TestLoadBetExitPairs (6), TestLoadTickIndex (3), TestSliceTicks (3), TestAttachTicks (1), TestSimulateExit (8 — including the smoking-gun test that proves trail=3 vs trail=8 produce DIFFERENT exit reasons on the same tick stream), TestSweepAndRender (3).
+
+**Sweep results (strict cohort, n=53).**
+
+| trail_stop | Σ P&L¢ | Win% | TAKE_PROFIT% | TRAILING_STOP% | STOP_LOSS% | NO_EXIT% |
+|---|---|---|---|---|---|---|
+| 3¢ | +15 | 60% | 13% | 32% | 11% | 40% |
+| 4¢ | +23 | 60% | 17% | 25% | 11% | 43% |
+| 5¢ | +15 | 58% | 19% | 21% | 11% | 45% |
+| 6¢ (current) | +23 | 57% | 23% | 15% | 11% | 47% |
+| 7¢ | +12 | 53% | 25% | 8% | 13% | 51% |
+| 8¢ | +39 | 53% | 28% | 2% | 13% | 53% |
+
+**Findings (the deliverable).**
+1. **Tightening MOMENTUM_DQS_TRAIL_STOP fires trailing far more often (0% prod → 32% at 3¢) but does NOT improve total P&L.** Strict cohort (n=53) Σ P&L: trail=3 → +15¢, trail=4 → +23¢ (ties current), trail=5 → +15¢, trail=6 (current) → +23¢. The trailing fires that the sweep induces do NOT capture more value than letting TAKE_PROFIT do its work — they cut winners short. Confidence: high.
+2. **Widening MOMENTUM_DQS_TRAIL_STOP shows the best apparent total P&L (trail=8 → +39¢ strict, +74¢ relaxed) but is METHODOLOGICALLY BIASED and not trustworthy as a config recommendation.** The replay window is [bet.ts, exit.ts] — widening the trail means trailing rarely fires within that window, so positions fall through to NO_EXIT (47% at trail=6 → 53% at trail=8). NO_EXIT realized P&L = last_observed_value − entry, which captures whatever momentary price the position happened to be at when production exited — NOT what would have actually happened under the wider trail. Confidence: low. Acting on this would be manufacturing a config change from noise.
+3. **Sweep is non-monotonic across the 6 variants** (strict cohort Σ¢: 3→+15, 4→+23, 5→+15, 6→+23, 7→+12, 8→+39). Best variant delta vs current = +16¢ — well below the +50¢ "clear winner" threshold defined in the Session 18.5 plan.
+4. **Companion dead-config finding** (see Phase-1 discovery above) — `LIVE_PROFIT_TARGET` / `LIVE_TRAILING_STOP` / `LIVE_HARD_PROFIT_TARGET` removed in Session 18.5 Task 7 (separate small commit). Docstring at [bot/live_watcher.py:2184-2196](hustle-agent/bot/live_watcher.py:2184) corrected to remove the misleading "after profit target hit" note.
+5. **Decision: OUTCOME B (marginal/noisy + methodologically constrained).** Do NOT update `MOMENTUM_DQS_TRAIL_STOP`. **Two real takeaways for Session 19:** (a) the [bet.ts, exit.ts] tick window is fundamentally inadequate for evaluating ANY exit-logic change that DELAYS exit relative to production — Session 19's tick-replay needs ticks beyond the production exit ts (cap at game settlement); (b) any exit-logic sweep needs train/test split discipline (current sweep is in-sample on n=53). Session 18.5 sharpens the case for Session 19 with concrete prereqs.
+
+**Verify (post-ship).**
+1. `python3 -m pytest tests/test_exit_replay.py -v` — 24 tests pass.
+2. `python3 tools/exit_replay.py` — markdown report on stdout. Strict-cohort table renders 6 variants × 12 columns; per-sport breakdown renders only when best ≠ current; relaxed-cohort table renders as sensitivity-only. Findings section renders all 5 authored strings.
+3. Bot does NOT need restart — `tools/exit_replay.py` is read-only, gitignored, and not imported by `bot/main.py`. Task 7 (dead-config cleanup) DOES need a restart since it removes constants that `live_watcher.py` imports.
+
+**Out of scope (flagged in commit message).**
+- Acting on Finding #2 (widen-direction is biased; no live config change).
+- Tick-replay back-tester (Session 19; this session's findings sharpened its prereqs).
+- Multi-position-per-game support.
+- Sweeping other params (`LIVE_TAKE_PROFIT_CENTS` etc.) — same methodological bias would apply.
+- Adding regime axes (mirror `journal_analysis.py`'s deferral).
+
 ---
 
 ### ☐ Session 19 — Tick-replay back-tester for live_momentum (Apr 26+, planned, DEFERRED)

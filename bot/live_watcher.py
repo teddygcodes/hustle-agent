@@ -33,7 +33,6 @@ from bot.config import (
     ESPN_BASE, ESPN_SPORT_PATHS, ACTIVE_SPORTS,
     LIVE_POLL_INTERVAL, LIVE_WATCH_EDGE_THRESHOLD,
     LIVE_TAKE_PROFIT_CENTS, LIVE_NEAR_SETTLE_CENTS,
-    LIVE_PROFIT_TARGET, LIVE_TRAILING_STOP, LIVE_HARD_PROFIT_TARGET,
     LIVE_STOP_LOSS_CENTS,
     MOMENTUM_LEADER_MIN, MOMENTUM_DIP_BUY, MOMENTUM_DIP_MAX,
     MOMENTUM_PRICE_WINDOW,
@@ -2182,12 +2181,12 @@ class LiveGameWatcher:
         Smart exit logic — take profits fast, cut losses faster.
 
         Priority order (momentum mode):
-        1. TAKE PROFIT — up 12¢+ from entry → sell immediately (backtested optimal)
-        2. NEAR-SETTLEMENT — price >= 93¢ → match is essentially won, lock it in
-        2b. TRAILING STOP — price dropped 4¢+ from peak after we entered
-        2c. SCORE FLIP — the team we bet on lost the lead (ESPN data)
+        1. TAKE PROFIT — gain ≥ sport_tp (default 12¢) → sell immediately
+        2. NEAR-SETTLEMENT — yes-side AND price ≥ 93¢ → match nearly won, lock in
+        2b. TRAILING STOP — drop_from_peak ≥ sport_trail (default 6¢) AND gain > 0
+        2c. SCORE FLIP — momentum + lead_trend negative AND we're trailing
         3. UNDERWATER EXIT — REMOVED Apr 16 (data-killed, see config note)
-        4. HARD STOP-LOSS — 30¢ drop safety net for price gaps
+        4. HARD STOP-LOSS — drop ≥ sport_sl (default 30¢, tennis 8¢) safety net
         4b. DOLLAR STOP — unrealized loss exceeds MOMENTUM_MAX_LOSS_DOLLARS
 
         Priority order (arb mode additions):
