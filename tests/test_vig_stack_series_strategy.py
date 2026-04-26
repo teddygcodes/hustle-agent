@@ -298,3 +298,52 @@ def test_no_vig_emits_single_decision() -> None:
     assert len(expected_no_vig) == len(new_no_vig) == 1, (
         f"no_vig: expected={expected_no_vig} new={new_no_vig}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Session 15.5 — close_ts threading through every log_decision in vig_stack
+# ---------------------------------------------------------------------------
+
+def _run_capturing_extras(market_dicts: list[dict]) -> list[dict]:
+    """Same as _new_run but captures the full kwargs (including extra) per
+    log_decision call. Returns a list of (ticker, reason, extra) tuples."""
+    universe = _markets_to_market_objs(market_dicts)
+    captured: list[dict] = []
+
+    def capture(**kw):
+        captured.append({
+            "ticker": kw.get("ticker", ""),
+            "reason": kw.get("reason", ""),
+            "decision": kw.get("decision", ""),
+            "extra": kw.get("extra"),
+        })
+
+    s = VigStackSeries()
+    with patch("bot.strategies.vig_stack_series._fetch_vig_stack_forecasts", return_value={}), \
+         patch("bot.decisions.log_decision", side_effect=capture), \
+         patch("bot.clv.record_counterfactual_skip"):
+        candidates = s.candidate_markets(universe)
+        for m in candidates:
+            s.evaluate(m)
+        s.finalize("test_scan")
+    return captured
+
+
+@pytest.mark.parametrize("scenario_name", list(SCENARIOS.keys()))
+def test_every_decision_extra_carries_close_ts(scenario_name: str) -> None:
+    """Session 15.5: every log_decision call from vig_stack_series must include
+    market.close_ts in extra so bot.regime.tag can populate event_horizon_hr."""
+    market_dicts, _, _ = _load_legacy_fixture(scenario_name)
+    # The fixtures all use the same close_time (2026-12-31T23:59:00Z).
+    expected_close = market_dicts[0]["close_time"]
+
+    captured = _run_capturing_extras(market_dicts)
+    assert captured, f"scenario {scenario_name} produced no log_decision calls"
+
+    missing = [c for c in captured
+               if not (c["extra"] and c["extra"].get("close_ts") == expected_close)]
+    assert not missing, (
+        f"scenario {scenario_name}: log_decision call(s) missing close_ts in extra:\n"
+        + "\n".join(f"  ticker={c['ticker']} reason={c['reason']} extra={c['extra']}"
+                    for c in missing)
+    )

@@ -431,7 +431,8 @@ class VigStackSeries:
                     decision="reject",
                     reason="low_liquidity",
                     extra={"volume": volume, "open_interest": open_interest,
-                           "min_volume": 10, "min_open_interest": 5},
+                           "min_volume": 10, "min_open_interest": 5,
+                           "close_ts": m.close_ts},
                 )
                 low_liq_tickers.add(m.ticker)
                 continue
@@ -457,7 +458,8 @@ class VigStackSeries:
                 gates=_vig_stack_gate_fingerprint("no_vig"),
                 decision="reject",
                 reason="no_vig",
-                extra={"yes_sum": yes_sum, "group_size": len(valid)},
+                extra={"yes_sum": yes_sum, "group_size": len(valid),
+                       "close_ts": valid[0].close_ts if valid else None},
             )
             ladder["no_vig_rejected"] = True
             ladder["valid_tickers"] = {m.ticker for m in valid}
@@ -533,6 +535,7 @@ class VigStackSeries:
                             gates=_vig_stack_gate_fingerprint("market_closed"),
                             decision="reject",
                             reason="market_closed",
+                            extra={"close_ts": market.close_ts},
                         )
                         return None
                 except (ValueError, TypeError):
@@ -567,7 +570,8 @@ class VigStackSeries:
                         reason="forecast_in_bucket",
                         extra={"forecast_temp": forecast_temp,
                                "bucket_lo": lo, "bucket_hi": hi,
-                               "distance": round(_forecast_distance_from_bucket(forecast_temp, lo, hi), 2)},
+                               "distance": round(_forecast_distance_from_bucket(forecast_temp, lo, hi), 2),
+                               "close_ts": market.close_ts},
                     )
                     self._rejected_opps.append(self._build_reject_opp(
                         ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -582,7 +586,8 @@ class VigStackSeries:
                 edge=round(relative_no_edge, 4),
                 gates=_vig_stack_gate_fingerprint("no_price_too_low"),
                 decision="reject", reason="no_price_too_low",
-                extra={"no_ask_prob": round(no_ask_prob, 4)},
+                extra={"no_ask_prob": round(no_ask_prob, 4),
+                       "close_ts": market.close_ts},
             )
             self._rejected_opps.append(self._build_reject_opp(
                 ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -601,7 +606,8 @@ class VigStackSeries:
                     decision="reject", reason="no_price_below_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
                            "floor": self._stable_min_no,
-                           "family": fam},
+                           "family": fam,
+                           "close_ts": market.close_ts},
                 )
                 self._rejected_opps.append(self._build_reject_opp(
                     ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -617,7 +623,8 @@ class VigStackSeries:
                     decision="reject", reason="non_stable_below_weather_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
                            "floor": self._volatile_min_no,
-                           "family": fam},
+                           "family": fam,
+                           "close_ts": market.close_ts},
                 )
                 self._rejected_opps.append(self._build_reject_opp(
                     ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -645,7 +652,8 @@ class VigStackSeries:
                 extra={"min_edge": self._min_relative_edge,
                        "edge": round(relative_no_edge, 4),
                        "vig": round(yes_sum - 100.0, 2),
-                       "time_to_settle_hr": tts_hr},
+                       "time_to_settle_hr": tts_hr,
+                       "close_ts": market.close_ts},
             )
             self._rejected_opps.append(self._build_reject_opp(
                 ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -661,7 +669,8 @@ class VigStackSeries:
                 edge=round(relative_no_edge, 4),
                 gates=_vig_stack_gate_fingerprint("self_check_failed"),
                 decision="reject", reason="self_check_failed",
-                extra={"check_msg": check_msg[:100] if check_msg else ""},
+                extra={"check_msg": check_msg[:100] if check_msg else "",
+                       "close_ts": market.close_ts},
             )
             self._rejected_opps.append(self._build_reject_opp(
                 ladder, market, no_ask, no_fair_cents, relative_no_edge,
@@ -693,7 +702,8 @@ class VigStackSeries:
             edge=round(relative_no_edge, 4),
             gates={g: True for g in _VIG_STACK_GATES},
             decision="accept", reason="all_gates_passed",
-            extra={"no_ask": no_ask, "no_fair_cents": round(no_fair_cents, 2)},
+            extra={"no_ask": no_ask, "no_fair_cents": round(no_fair_cents, 2),
+                   "close_ts": market.close_ts},
         )
 
         return {
