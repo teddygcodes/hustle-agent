@@ -1370,7 +1370,7 @@ The Apr 26-27 arc proved the bot can evidence-test config changes; the May 2 / M
 
 ```
 Tier 1 (May 2-blocking — must ship first):
-  Session 21: live_watcher skip_reason instrumentation  (~1h, forward-only)
+  Session 21: live_watcher skip_reason instrumentation  (☑ shipped Apr 27)
   Session 23: live_momentum counterfactuals             (~3-4h, mirrors Session 8/9 pattern)
 
 Tier 2 (sustainability — make analysis cycles cheap):
@@ -1391,26 +1391,41 @@ Tier 3 (defense-in-depth — catch silent regressions):
 
 ---
 
-### ☐ Session 21 — live_watcher skip_reason instrumentation (Apr 27+, planned, urgent)
+### ☑ Session 21 — live_watcher skip_reason instrumentation (Apr 27, shipped)
 
-**Problem.** `bot/state/live_journal.json` records every `scan_found` event for every game live_watcher discovers, but does NOT record WHY a `scan_found` failed to become a `bet`. Session 18 found 56–91% of `scan_found` events have no matching `bet` across all sports — UFC at 56% (best), wta_challenger at 91% (worst). We're filtering hundreds of potential bets per week and have zero causal data on what's filtering them. **This is the single biggest blind spot for live_momentum optimization.** Forward-only (can't recover historical events), so every day before shipping is data we won't have on May 2.
+**Problem (pre-fix).** [bot/state/live_journal.json](hustle-agent/bot/state/live_journal.json) recorded `scan_found` events ONLY at the spawn-watcher branch ([bot/live_watcher.py:2923](hustle-agent/bot/live_watcher.py:2923)) — every pre-Session-21 `scan_found` was a successful spawn, so the 1026 historical records over Apr 9–26 were all "watcher created." Session 18 Finding #3 surfaced that 56–91% of *post-spawn* matches never become a `bet` (UFC 56% best, wta_challenger 91% worst), but the WHY was unknown — no causal data per-gate. Plus: the gates BEFORE spawn (low_volume, not_today, no_leader, etc.) were filtering ~118 events/scan-cycle (LIVE_SCAN_TELEMETRY drops dict) without ANY journaled trace.
 
-**Plan.**
-- Read `bot/live_watcher.py:scan_live_matches` to find the per-match decision path. Each match goes through several gates (`MOMENTUM_DISABLED_SPORTS`, `MOMENTUM_LEADER_MIN`, `low_volume`, `not_today`, `no_leader`, `no_vol_growth_idle`, `bad_event_shape`, etc. — see existing `LIVE_SCAN_TELEMETRY: drops={...}` log line for the full set).
-- Add a `skip_reason` field to the `scan_found` event recorded in `live_journal.json`. Schema: enum from the existing telemetry drop keys; null when the match passes all gates and a watcher gets spawned.
-- Wire `skip_reason` capture at every gate in `scan_live_matches`. Mirror the Session 6 `decisions.log_decision` pattern — single string per gate, recorded BEFORE the `continue`/return.
-- Update `tools/journal_analysis.py` to read the new field and produce a per-(sport, skip_reason) breakdown table. Replaces the existing "watch-but-no-enter funnel" with attributable causes.
-- Tests: extend `tests/test_live_watcher.py` with cases asserting each gate writes the correct `skip_reason`. Mock the journal-write site, drive each gate's input, assert the recorded reason.
+**What shipped.**
+- New helper `bot/live_watcher.py:_journal_record_scan` next to `_journal_append`. Optional `skip_reason: str | None` field; `None` = passed all gates / watcher spawned (preserves pre-Session-21 semantic), string = matches a LIVE_SCAN_TELEMETRY drop dict key.
+- Wired `_journal_record_scan` at every match-level gate's `continue` site in `scan_live_matches`: `bad_event_shape`, `low_volume`, `not_today`, `no_leader`, `settled`, `unknown_name`, `already_watching`, `recently_watched`, `no_vol_growth_first_seen`, `no_vol_growth_idle`, plus the post-eligibility `capacity_capped` cap. Spawn-site dict (line 2923) extended with `skip_reason: None`. Existing `_telem[key] += 1` lines preserved verbatim, so the LIVE_SCAN_TELEMETRY log line that production grep patterns rely on is byte-identical pre/post.
+- Series-level gates (`disabled_sport`, `api_error`, `no_markets`) NOT instrumented — they fire before any per-match ticker exists. Telemetry log still counts them.
+- Semantic expansion of `scan_found`: was "watcher spawned" (skip_reason field absent), now "match observed in scan." `skip_reason=None` continues to mean "watcher spawned" so journal_analysis cross-era comparability is preserved.
+- [tools/journal_analysis.py](hustle-agent/tools/journal_analysis.py) — added `compute_skip_reason_breakdown` and `_render_skip_reason_section` for a per-(sport, skip_reason) table. Pre-Session-21 records (no `skip_reason` field) bucket as `unknown_skip`; post-Session-21 spawns bucket as `_spawned`; filtered records carry their gate name. Existing `compute_watch_funnel` updated to filter to spawned-equivalent records (skip_reason absent or None) so the watch-but-no-enter funnel stays comparable across the schema migration. Limitations + module docstring updated.
+- 13 new tests in `tests/test_live_watcher.py::TestScanLiveMatchesSkipReason` — one per gate + accept-path + a record-shape sanity check. Each test mocks `_journal_append`, drives `scan_live_matches` with a crafted Kalshi `get_markets` response that triggers exactly that gate, asserts the captured journal record's `skip_reason` matches the expected string. Covers `bad_event_shape`, `low_volume`, `not_today`, `no_leader`, `settled`, `unknown_name`, `already_watching`, `recently_watched`, `no_vol_growth_first_seen`, `no_vol_growth_idle`, `capacity_capped`, accept (`skip_reason=None`).
 
-**Out of scope.**
-- Backfilling historical `scan_found` events (impossible; data wasn't captured).
-- Acting on the findings — that's Session 23+ scope when CFs are in place.
-- Touching `live_watcher`'s actual gate logic; this session adds observability ONLY.
+**Test results.** 13/13 new tests pass. Broader `tests/` suite: 970 passed, 8 pre-existing failures (4 listed in Sessions 4/5/6 docs as unrelated; 4 due to test-side `__new__()` bypass-init bugs unrelated to scan_live_matches). 0 regressions caused by Session 21.
 
-**Verify.**
-1. `tail bot/state/live_journal.json | python3 -c "import sys, json; [print(json.loads(l).get('skip_reason')) for l in sys.stdin if 'scan_found' in l]"` — every new `scan_found` either has a populated `skip_reason` or `null` (passed all gates).
-2. `python3 tools/journal_analysis.py` after 24h shows the watch-but-no-enter funnel broken down by skip_reason. UFC's 56% should be attributable; if the dominant reason is `no_leader`, that's a candidate for `MOMENTUM_LEADER_MIN` per-sport tuning at the next checkpoint.
-3. Bot restart required after deploy (live_watcher.py change).
+**Post-restart verification (5 min after launchd respawn).** Within the first scan cycle: 744 new scan_found records carry `skip_reason`; distribution matches the LIVE_SCAN_TELEMETRY log: `low_volume` 348 (47%) > `not_today` 132 (18%) > `no_leader` 78 (10%) > `no_vol_growth_first_seen` 78 > `no_vol_growth_idle` 56 > `settled` 27 > spawned (None) 13 > `bad_event_shape` 6 > `capacity_capped` 6. Every gate from the LIVE_SCAN_TELEMETRY drop dict registered ≥1 event. `python3 tools/journal_analysis.py` renders the new per-(sport, skip_reason) section with cross-era `unknown_skip` column for legacy records.
+
+**Initial findings (Session 21 + ~5 min, fragile sample — full distribution awaits 24h+).**
+- `atp_challenger` 18% low_volume + 4% no_leader; `wta_challenger` 33% low_volume + 13% no_leader (consistent with Session 18's "tennis dominantly volume-starved" lens).
+- `ipl` 33% not_today + `ufc` 37% not_today — both far above other sports — `_is_today_market` may be tagging legitimate same-day markets as not-today for these series. Investigate before May 2 if this pattern holds at higher sample.
+- `mlb` 100% unknown_skip + 0% post-Session-21 records reflects MLB being disabled in `SPORT_PROFILES` — series-level `disabled_sport` gate fires before the per-match instrumentation. Expected.
+
+**Out of scope (preserved from spec).**
+- Backfilling historical `scan_found` events with `skip_reason` (impossible — data wasn't captured).
+- Changing any gate's logic, threshold, or order.
+- Acting on the findings (Session 23 uses this data; that's where CFs land for live_momentum).
+- NDJSON migration of `live_journal.json` (read-modify-write pattern at the new ~70k-110k records/day projected volume costs ~5MB/day file growth + O(N²) cumulative I/O — flagged but not blocking; future small task before file exceeds ~10 MB).
+- Cosmetic edits to journal_analysis.py FINDINGS list (Session 18's "no skip_reason visibility" finding is now resolved by Session 21; left in place for historical-finding integrity).
+
+**Files modified.** [bot/live_watcher.py](hustle-agent/bot/live_watcher.py) (~80 LOC net add — helper + 11 gate sites), [tools/journal_analysis.py](hustle-agent/tools/journal_analysis.py) (~80 LOC net change — new aggregator + renderer, funnel filter), [tests/test_live_watcher.py](hustle-agent/tests/test_live_watcher.py) (+13 cases). No new files. No state-format migrations.
+
+**Verify (post-restart).**
+1. `python3 -c "import json; from collections import Counter; data=json.load(open('bot/state/live_journal.json')); sf=[e for e in data if e.get('event')=='scan_found' and 'skip_reason' in e]; print(f'new skip_reason events: {len(sf)}'); print('reasons:', Counter(e.get('skip_reason') for e in sf))"` — distribution matches LIVE_SCAN_TELEMETRY drops.
+2. `python3 tools/journal_analysis.py` — per-(sport, skip_reason) section renders with `_spawned`, gate columns, and `unknown_skip` for legacy.
+3. `python3 -m pytest tests/test_live_watcher.py -v -k SkipReason` → 13/13 pass.
+4. `grep "LIVE_SCAN_TELEMETRY" bot/logs/bot.log | tail` — `drops={...}` dict format unchanged.
 
 ---
 

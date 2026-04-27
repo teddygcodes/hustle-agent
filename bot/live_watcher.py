@@ -73,6 +73,49 @@ def _journal_append(entry: dict):
         logger.warning("Journal write error: %s", e)
 
 
+def _journal_record_scan(
+    *,
+    ticker: str,
+    sport: str | None,
+    skip_reason: str | None,
+    match: str | None = None,
+    price: int | None = None,
+    volume: int | None = None,
+    event_ticker: str | None = None,
+):
+    """Record a scan_found journal event with optional skip_reason (Session 21).
+
+    Pre-Session-21, scan_found was emitted only on the spawn-watcher branch.
+    Now it's emitted at every match-level gate's continue site too:
+        skip_reason=None        → match passed all gates, watcher spawning
+                                  (preserves the pre-Session-21 semantic)
+        skip_reason="<key>"     → match was filtered at the named gate; the
+                                  string matches a LIVE_SCAN_TELEMETRY drop
+                                  dict key (low_volume / no_leader / settled /
+                                  not_today / unknown_name / already_watching /
+                                  recently_watched / no_vol_growth_first_seen /
+                                  no_vol_growth_idle / bad_event_shape /
+                                  capacity_capped).
+    Optional fields are omitted when not yet known at the gate's call site
+    (e.g. early gates have no `match` name).
+    """
+    entry: dict = {
+        "event": "scan_found",
+        "ticker": ticker,
+        "sport": sport,
+        "skip_reason": skip_reason,
+    }
+    if match is not None:
+        entry["match"] = match
+    if price is not None:
+        entry["price"] = price
+    if volume is not None:
+        entry["volume"] = volume
+    if event_ticker is not None:
+        entry["event_ticker"] = event_ticker
+    _journal_append(entry)
+
+
 def get_daily_recap(date_str: str | None = None) -> str:
     """
     Build a human-readable recap of all live watcher activity for a given date.
@@ -2783,6 +2826,12 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
             _telem["seen"] += 1
             if len(sides) != 2:
                 _telem["bad_event_shape"] += 1
+                _journal_record_scan(
+                    ticker=event_tk,
+                    sport=sport,
+                    skip_reason="bad_event_shape",
+                    event_ticker=event_tk,
+                )
                 continue
 
             side_a, side_b = sides
@@ -2795,12 +2844,28 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
             # Must have real trading activity (live match, not upcoming)
             if total_vol < MIN_VOLUME_LIVE:
                 _telem["low_volume"] += 1
+                _journal_record_scan(
+                    ticker=side_a.get("ticker", "") or event_tk,
+                    sport=sport,
+                    skip_reason="low_volume",
+                    price=max(price_a, price_b),
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
             # Must be today's match (ticker date = today) — skip pre-fight/upcoming
             leader_ticker_raw = side_a.get("ticker", "")
             if not _is_today_market(leader_ticker_raw):
                 _telem["not_today"] += 1
+                _journal_record_scan(
+                    ticker=leader_ticker_raw or event_tk,
+                    sport=sport,
+                    skip_reason="not_today",
+                    price=max(price_a, price_b),
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
             # Determine the leader
@@ -2810,11 +2875,30 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 leader, leader_price = side_b, price_b
             else:
                 _telem["no_leader"] += 1
+                # Pick the higher-priced side for the journal record so the
+                # ticker reflects whichever was closer to being the leader.
+                higher_side = side_a if price_a >= price_b else side_b
+                _journal_record_scan(
+                    ticker=higher_side.get("ticker", "") or event_tk,
+                    sport=sport,
+                    skip_reason="no_leader",
+                    price=max(price_a, price_b),
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
             # Skip settled markets
             if leader_price >= 95:
                 _telem["settled"] += 1
+                _journal_record_scan(
+                    ticker=leader.get("ticker", "") or event_tk,
+                    sport=sport,
+                    skip_reason="settled",
+                    price=leader_price,
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
             title = (leader.get("title") or "").lower()
@@ -2828,6 +2912,14 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     player_name = team_abbrev.upper()
             if not player_name or player_name == "?":
                 _telem["unknown_name"] += 1
+                _journal_record_scan(
+                    ticker=leader_ticker or event_tk,
+                    sport=sport,
+                    skip_reason="unknown_name",
+                    price=leader_price,
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
             query_key = _normalize(player_name)
@@ -2842,12 +2934,30 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     break
             if already_watching:
                 _telem["already_watching"] += 1
+                _journal_record_scan(
+                    ticker=leader_ticker or event_tk,
+                    sport=sport,
+                    skip_reason="already_watching",
+                    match=player_name,
+                    price=leader_price,
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
             # Also skip if this event_ticker was already watched (prevents
             # scanner from restarting a watcher that just finished)
             ev_ticker = leader.get("event_ticker", "")
             if ev_ticker and ev_ticker in _recently_watched:
                 _telem["recently_watched"] += 1
+                _journal_record_scan(
+                    ticker=leader_ticker or event_tk,
+                    sport=sport,
+                    skip_reason="recently_watched",
+                    match=player_name,
+                    price=leader_price,
+                    volume=total_vol,
+                    event_ticker=event_tk,
+                )
                 continue
 
 
@@ -2894,6 +3004,15 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 c["player_name"], current_vol,
             )
             _telem["no_vol_growth_first_seen"] += 1
+            _journal_record_scan(
+                ticker=c["ticker"],
+                sport=c["sport"],
+                skip_reason="no_vol_growth_first_seen",
+                match=c["player_name"],
+                price=c["price"],
+                volume=current_vol,
+                event_ticker=c.get("event_ticker"),
+            )
             continue
 
         vol_growth = current_vol - prev_vol
@@ -2904,6 +3023,15 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 c["player_name"], vol_growth,
             )
             _telem["no_vol_growth_idle"] += 1
+            _journal_record_scan(
+                ticker=c["ticker"],
+                sport=c["sport"],
+                skip_reason="no_vol_growth_idle",
+                match=c["player_name"],
+                price=c["price"],
+                volume=current_vol,
+                event_ticker=c.get("event_ticker"),
+            )
             continue
 
         logger.info(
@@ -2915,19 +3043,30 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
     # Capacity is capped at `slots`; the remainder are eligible but dropped this tick
     if len(active_candidates) > slots:
         _telem["capacity_capped"] += len(active_candidates) - slots
+        for c in active_candidates[slots:]:
+            _journal_record_scan(
+                ticker=c["ticker"],
+                sport=c["sport"],
+                skip_reason="capacity_capped",
+                match=c["player_name"],
+                price=c["price"],
+                volume=c["volume"],
+                event_ticker=c.get("event_ticker"),
+            )
     for c in active_candidates[:slots]:
         logger.info(
             "Live scan FOUND: %s at %d%% in %s (%s) vol=%d — starting momentum watcher",
             c["player_name"], c["price"], c["sport"].upper(), c["ticker"], c["volume"],
         )
-        _journal_append({
-            "event": "scan_found",
-            "match": c["player_name"],
-            "ticker": c["ticker"],
-            "sport": c["sport"],
-            "price": c["price"],
-            "volume": c["volume"],
-        })
+        _journal_record_scan(
+            ticker=c["ticker"],
+            sport=c["sport"],
+            skip_reason=None,
+            match=c["player_name"],
+            price=c["price"],
+            volume=c["volume"],
+            event_ticker=c.get("event_ticker"),
+        )
         # Mark this event as watched so scanner doesn't restart it
         if c.get("event_ticker"):
             _recently_watched.add(c["event_ticker"])

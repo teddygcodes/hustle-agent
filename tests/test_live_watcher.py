@@ -1,6 +1,10 @@
 """Tests for Live Game Watcher (WATCH command)."""
 
+import asyncio
+from datetime import date, datetime, timezone
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -416,3 +420,315 @@ def test_check_exit_trailing_stop_fires_after_peak_fix(monkeypatch):
     assert "TRAILING STOP" in watcher.exits[0]["reason"], (
         f"exit reason should be TRAILING STOP; got {watcher.exits[0]['reason']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Session 21: scan_live_matches skip_reason instrumentation
+# ---------------------------------------------------------------------------
+
+def _today_ticker_date() -> str:
+    """Build the YYJANDD-style date prefix _is_today_market accepts."""
+    months = {1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+              7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC"}
+    today = datetime.now(timezone.utc).date()
+    return f"{today.year % 100:02d}{months[today.month]}{today.day:02d}"
+
+
+def _make_market(*, ticker, event_ticker, yes_ask=70, volume=10000, title="",
+                 volume_24h=10000):
+    return {
+        "ticker": ticker,
+        "event_ticker": event_ticker,
+        "yes_ask": yes_ask,
+        "volume": volume,
+        "volume_24h": volume_24h,
+        "title": title,
+    }
+
+
+def _make_event_pair(event_ticker, *, ticker_a=None, ticker_b=None,
+                     yes_ask_a=70, yes_ask_b=30, volume_a=5000, volume_b=5000,
+                     title_a="Player Alpha vs Player Beta",
+                     title_b="Player Beta vs Player Alpha"):
+    """Build a 2-sided event (A and B markets) for one event_ticker."""
+    today = _today_ticker_date()
+    ta = ticker_a or f"KXNBAGAME-{today}ALPHA-A"
+    tb = ticker_b or f"KXNBAGAME-{today}ALPHA-B"
+    return [
+        _make_market(ticker=ta, event_ticker=event_ticker,
+                     yes_ask=yes_ask_a, volume=volume_a, title=title_a),
+        _make_market(ticker=tb, event_ticker=event_ticker,
+                     yes_ask=yes_ask_b, volume=volume_b, title=title_b),
+    ]
+
+
+@pytest.fixture
+def skip_reason_env(monkeypatch):
+    """Reset live_watcher module state and patch external deps for scan tests."""
+    from bot import live_watcher
+    # Reset module-level scan caches so each test starts clean. Set
+    # _prev_scan_date to TODAY so scan_live_matches' "new day" branch (which
+    # clears _prev_scan_volumes + _recently_watched) does NOT fire — that
+    # branch would wipe per-test pre-seeds.
+    live_watcher._prev_scan_volumes.clear()
+    live_watcher._recently_watched.clear()
+    live_watcher._prev_scan_date = date.today().isoformat()
+
+    # Patch series dicts so we only iterate ONE sport per test
+    monkeypatch.setattr("bot.kalshi_series.MATCH_SERIES", {"nba": "KXNBAGAME"})
+    monkeypatch.setattr("bot.kalshi_series.SPORTS_SERIES", {})
+
+    # Capture journal writes
+    captured: list[dict] = []
+
+    def _capture(entry):
+        captured.append(dict(entry))
+
+    monkeypatch.setattr(live_watcher, "_journal_append", _capture)
+
+    # Prevent real watcher startup (accept-path test) but preserve the real
+    # static method `_extract_player_name` — scan_live_matches calls it BEFORE
+    # constructing a watcher, so a bare MagicMock breaks player-name parsing.
+    real_extract = live_watcher.LiveGameWatcher._extract_player_name
+    fake_watcher_class = MagicMock()
+    fake_watcher_class._extract_player_name = real_extract
+    monkeypatch.setattr(live_watcher, "LiveGameWatcher", fake_watcher_class)
+
+    yield {"captured": captured, "live_watcher": live_watcher}
+
+    live_watcher._prev_scan_volumes.clear()
+    live_watcher._recently_watched.clear()
+    live_watcher._prev_scan_date = None
+
+
+def _scan_records(captured: list[dict]) -> list[dict]:
+    return [r for r in captured if r.get("event") == "scan_found"]
+
+
+def _run_scan(markets):
+    """Run scan_live_matches once with get_markets returning the given markets."""
+    with patch("agent.kalshi_client.get_markets",
+               return_value={"markets": markets}):
+        asyncio.run(_dummy_scan())
+
+
+async def _dummy_scan(active_watchers=None):
+    from bot.live_watcher import scan_live_matches
+    return await scan_live_matches(
+        notifier=MagicMock(),
+        active_watchers=active_watchers or {},
+        balance=500.0,
+    )
+
+
+def _run_scan_with(markets, *, active_watchers=None):
+    with patch("agent.kalshi_client.get_markets",
+               return_value={"markets": markets}):
+        asyncio.run(_dummy_scan(active_watchers=active_watchers))
+
+
+class TestScanLiveMatchesSkipReason:
+    """Session 21: every match-level gate writes the right skip_reason."""
+
+    def test_bad_event_shape_records_skip_reason(self, skip_reason_env):
+        # Single-sided event → bad_event_shape
+        today = _today_ticker_date()
+        m = _make_market(ticker=f"KXNBAGAME-{today}A-A",
+                         event_ticker="KXNBAGAME-EV1")
+        _run_scan_with([m])
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "bad_event_shape" for s in scans), scans
+
+    def test_low_volume_records_skip_reason(self, skip_reason_env):
+        # Both sides volume below MIN_VOLUME_LIVE (1000)
+        markets = _make_event_pair("KXNBAGAME-EV2",
+                                   yes_ask_a=70, yes_ask_b=30,
+                                   volume_a=100, volume_b=100)
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "low_volume" for s in scans), scans
+
+    def test_not_today_records_skip_reason(self, skip_reason_env):
+        # Ticker date in January (won't match today/yesterday-UTC)
+        markets = [
+            _make_market(ticker="KXNBAGAME-26JAN01ALPHA-A",
+                         event_ticker="KXNBAGAME-EVOLD",
+                         yes_ask=70, volume=5000),
+            _make_market(ticker="KXNBAGAME-26JAN01ALPHA-B",
+                         event_ticker="KXNBAGAME-EVOLD",
+                         yes_ask=30, volume=5000),
+        ]
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "not_today" for s in scans), scans
+
+    def test_no_leader_records_skip_reason(self, skip_reason_env):
+        # Both sides below MOMENTUM_LEADER_MIN * 100 (post-Session-19c: 0.65)
+        markets = _make_event_pair("KXNBAGAME-EV3",
+                                   yes_ask_a=55, yes_ask_b=45,
+                                   volume_a=5000, volume_b=5000)
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "no_leader" for s in scans), scans
+
+    def test_settled_records_skip_reason(self, skip_reason_env):
+        # Leader >= 95
+        markets = _make_event_pair("KXNBAGAME-EV4",
+                                   yes_ask_a=97, yes_ask_b=3,
+                                   volume_a=5000, volume_b=5000)
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "settled" for s in scans), scans
+
+    def test_unknown_name_records_skip_reason(self, skip_reason_env):
+        # Empty title AND ticker without "-" → no team abbrev → unknown_name
+        today = _today_ticker_date()
+        markets = [
+            _make_market(ticker=f"KXNBAGAME{today}NONAMEA",
+                         event_ticker="KXNBAGAME-EV5",
+                         yes_ask=70, volume=5000, title=""),
+            _make_market(ticker=f"KXNBAGAME{today}NONAMEB",
+                         event_ticker="KXNBAGAME-EV5",
+                         yes_ask=30, volume=5000, title=""),
+        ]
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "unknown_name" for s in scans), scans
+
+    def test_already_watching_records_skip_reason(self, skip_reason_env):
+        # active_watchers contains a watcher whose ticker matches the leader
+        today = _today_ticker_date()
+        leader_ticker = f"KXNBAGAME-{today}DUP-DUP"
+        markets = _make_event_pair(
+            "KXNBAGAME-EV6",
+            ticker_a=leader_ticker,
+            ticker_b=f"KXNBAGAME-{today}DUP-OTH",
+            yes_ask_a=72, yes_ask_b=28,
+            volume_a=5000, volume_b=5000,
+        )
+        existing = MagicMock()
+        existing.ticker = leader_ticker
+        active_watchers = {"alpha vs beta": (existing, None)}
+        _run_scan_with(markets, active_watchers=active_watchers)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "already_watching" for s in scans), scans
+
+    def test_recently_watched_records_skip_reason(self, skip_reason_env):
+        from bot import live_watcher
+        live_watcher._recently_watched.add("KXNBAGAME-EV7")
+        markets = _make_event_pair(
+            "KXNBAGAME-EV7",
+            yes_ask_a=72, yes_ask_b=28,
+            volume_a=5000, volume_b=5000,
+        )
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "recently_watched" for s in scans), scans
+
+    def test_no_vol_growth_first_seen_records_skip_reason(self, skip_reason_env):
+        # _prev_scan_volumes empty → first sighting → no_vol_growth_first_seen
+        markets = _make_event_pair(
+            "KXNBAGAME-EV8",
+            yes_ask_a=72, yes_ask_b=28,
+            volume_a=5000, volume_b=5000,
+        )
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "no_vol_growth_first_seen" for s in scans), scans
+
+    def test_no_vol_growth_idle_records_skip_reason(self, skip_reason_env):
+        from bot import live_watcher
+        today = _today_ticker_date()
+        leader_ticker = f"KXNBAGAME-{today}IDL-IDL"
+        # Pre-seed with current_vol - 100 → growth = 100 < 500 → idle
+        live_watcher._prev_scan_volumes[leader_ticker] = 9900
+        markets = _make_event_pair(
+            "KXNBAGAME-EV9",
+            ticker_a=leader_ticker,
+            ticker_b=f"KXNBAGAME-{today}IDL-OTH",
+            yes_ask_a=72, yes_ask_b=28,
+            volume_a=10000, volume_b=0,
+        )
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "no_vol_growth_idle" for s in scans), scans
+
+    def test_capacity_capped_records_skip_reason(self, skip_reason_env):
+        from bot import live_watcher
+        # Fill active_watchers to MAX_AUTO_WATCHERS so slots = 0
+        active_watchers = {
+            f"q{i}": (MagicMock(ticker=f"OTHER-{i}"), None)
+            for i in range(live_watcher.MAX_AUTO_WATCHERS)
+        }
+        # No markets needed — early return at slots <= 0 means we never reach
+        # any gate. Confirm this branch doesn't silently break (no records,
+        # not an exception).
+        _run_scan_with([], active_watchers=active_watchers)
+        # Now exercise the post-eligibility cap with slots > 0 but more
+        # candidates than slots. Pre-seed enough tickers in
+        # _prev_scan_volumes so the volume-growth filter passes. Keep
+        # _prev_scan_date pinned to today so scan_live_matches doesn't
+        # wipe the pre-seeds via its "new day" branch.
+        live_watcher._prev_scan_volumes.clear()
+        live_watcher._recently_watched.clear()
+        skip_reason_env["captured"].clear()
+
+        today = _today_ticker_date()
+        markets: list[dict] = []
+        for i in range(live_watcher.MAX_AUTO_WATCHERS + 2):
+            ev = f"KXNBAGAME-CAP{i}"
+            la = f"KXNBAGAME-{today}CAP{i}-A"
+            lb = f"KXNBAGAME-{today}CAP{i}-B"
+            markets.extend([
+                _make_market(ticker=la, event_ticker=ev, yes_ask=72,
+                             volume=10000, title=f"Cap{i} Alpha vs Beta"),
+                _make_market(ticker=lb, event_ticker=ev, yes_ask=28,
+                             volume=5000, title=f"Cap{i} Beta vs Alpha"),
+            ])
+            # Pre-seed prev_vol below current so growth check passes
+            live_watcher._prev_scan_volumes[la] = 1000
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert any(s["skip_reason"] == "capacity_capped" for s in scans), scans
+
+    def test_accept_records_skip_reason_none(self, skip_reason_env):
+        """Match passes every gate → scan_found has skip_reason=None."""
+        from bot import live_watcher
+        today = _today_ticker_date()
+        leader_ticker = f"KXNBAGAME-{today}OK-OK"
+        # Pre-seed prev_vol so the growth check passes (current=10000 > prev+500)
+        live_watcher._prev_scan_volumes[leader_ticker] = 1000
+        markets = _make_event_pair(
+            "KXNBAGAME-EVOK",
+            ticker_a=leader_ticker,
+            ticker_b=f"KXNBAGAME-{today}OK-OTH",
+            yes_ask_a=72, yes_ask_b=28,
+            volume_a=10000, volume_b=5000,
+        )
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        # Among the scan_found records, exactly one for the accept path with
+        # skip_reason=None for our leader_ticker
+        accepted = [s for s in scans
+                    if s.get("skip_reason") is None
+                    and s.get("ticker") == leader_ticker]
+        assert len(accepted) == 1, (
+            f"expected one scan_found(skip_reason=None) for {leader_ticker}, "
+            f"got {scans}"
+        )
+
+    def test_journal_record_has_required_fields(self, skip_reason_env):
+        """Every scan_found record carries event/ticker/sport/skip_reason."""
+        markets = _make_event_pair(
+            "KXNBAGAME-EVF",
+            yes_ask_a=55, yes_ask_b=45,  # triggers no_leader
+            volume_a=5000, volume_b=5000,
+        )
+        _run_scan_with(markets)
+        scans = _scan_records(skip_reason_env["captured"])
+        assert scans, "expected at least one scan_found record"
+        for s in scans:
+            assert s["event"] == "scan_found"
+            assert "ticker" in s
+            assert "sport" in s
+            assert "skip_reason" in s  # explicitly present, may be None
