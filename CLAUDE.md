@@ -1409,8 +1409,10 @@ Tier 3 (defense-in-depth — catch silent regressions):
 
 **Initial findings (Session 21 + ~5 min, fragile sample — full distribution awaits 24h+).**
 - `atp_challenger` 18% low_volume + 4% no_leader; `wta_challenger` 33% low_volume + 13% no_leader (consistent with Session 18's "tennis dominantly volume-starved" lens).
-- `ipl` 33% not_today + `ufc` 37% not_today — both far above other sports — `_is_today_market` may be tagging legitimate same-day markets as not-today for these series. Investigate before May 2 if this pattern holds at higher sample.
+- `ipl` 33% not_today + `ufc` 37% not_today — both far above other sports — `_is_today_market` may be tagging legitimate same-day markets as not-today for these series. Investigate before May 2 if this pattern holds at higher sample. **Resolved by Session 21-followup (below) — not a bug.**
 - `mlb` 100% unknown_skip + 0% post-Session-21 records reflects MLB being disabled in `SPORT_PROFILES` — series-level `disabled_sport` gate fires before the per-match instrumentation. Expected.
+
+**Session 21-followup — IPL/UFC not_today rates are sport-calendar artifacts, not a timezone bug (Apr 27, Outcome B).** ~30-min investigation. Sampled all 42 IPL + 66 UFC `not_today` records from the post-Session-21 journal slice and parsed each ticker's date prefix. Result: 100% of filtered records carry FUTURE ticker dates (IPL: Apr 28 → May 3, spread across the next 6 IPL match days; UFC: all 66 are 26MAY02, the next UFC card). Today is Apr 27. The gate is correctly filtering pre-game markets that Kalshi lists as `status="open"` ahead of the actual event. Mechanism per sport: IPL runs daily for ~6 days ahead → ~36 future markets vs. ~12 today (~75% forward-dated at any moment). UFC only fights on weekends → between cards, ~100% of UFC markets on Kalshi are next-Saturday's fights. `_is_today_market`'s `valid_dates = {today_local, today_utc, today_utc - 1day}` is correct — accepts both date conventions plus a 1-day UTC/ET grace. **No code change. No restart.** The high not_today % for IPL/UFC is expected and load-bearing — those filters are doing their job.
 
 **Out of scope (preserved from spec).**
 - Backfilling historical `scan_found` events with `skip_reason` (impossible — data wasn't captured).
