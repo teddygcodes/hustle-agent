@@ -1364,6 +1364,241 @@ Expected: 53 tests pass; 4/4 (or 8/8) PASS / 0 FAIL with coverage gaps named; +0
 
 ---
 
+## Apr 27+ Pre-checkpoint Coverage Arc (Sessions 21, 23–27)
+
+The Apr 26-27 arc proved the bot can evidence-test config changes; the May 2 / May 18 checkpoints are when knowledge actually converts to action. **This arc closes the data gaps that would limit analytical depth at those checkpoints, plus the readability gaps that would let findings sit unread.** Six tier-ranked sessions:
+
+```
+Tier 1 (May 2-blocking — must ship first):
+  Session 21: live_watcher skip_reason instrumentation  (~1h, forward-only)
+  Session 23: live_momentum counterfactuals             (~3-4h, mirrors Session 8/9 pattern)
+
+Tier 2 (sustainability — make analysis cycles cheap):
+  Session 24: Weekly digest tool                        (~2h, aggregator)
+  Session 25: Telegram findings push                    (~1-2h, scheduler integration)
+
+Tier 3 (defense-in-depth — catch silent regressions):
+  Session 26: Data health check                         (~2h, scheduled task)
+  Session 27: Findings registry                         (~1-2h, structured records)
+
+[Already scheduled: Session 22 — auto-fires May 18 to re-validate Session 19c's
+ MOMENTUM_LEADER_MIN: 0.65 change. See ~/.claude/scheduled-tasks/session-22-momentum-leader-min-revalidation/SKILL.md]
+```
+
+**Recommended order before May 2:** 21 → 23 → 24. After May 2's analysis lands, evaluate whether 25/26/27 are still the right priorities or whether the data has surfaced new tier-1 needs that supersede them.
+
+**Framing principle (from the user):** failure in paper mode is not failure — it's the price of the data being collected. The point of Sessions 21+ is to make the data more complete, more readable, and more queryable so that May 2 / May 18 (and every subsequent checkpoint) produces actionable findings. We're not optimizing for P&L this phase. We're optimizing for the analytical depth that future P&L decisions will draw on.
+
+---
+
+### ☐ Session 21 — live_watcher skip_reason instrumentation (Apr 27+, planned, urgent)
+
+**Problem.** `bot/state/live_journal.json` records every `scan_found` event for every game live_watcher discovers, but does NOT record WHY a `scan_found` failed to become a `bet`. Session 18 found 56–91% of `scan_found` events have no matching `bet` across all sports — UFC at 56% (best), wta_challenger at 91% (worst). We're filtering hundreds of potential bets per week and have zero causal data on what's filtering them. **This is the single biggest blind spot for live_momentum optimization.** Forward-only (can't recover historical events), so every day before shipping is data we won't have on May 2.
+
+**Plan.**
+- Read `bot/live_watcher.py:scan_live_matches` to find the per-match decision path. Each match goes through several gates (`MOMENTUM_DISABLED_SPORTS`, `MOMENTUM_LEADER_MIN`, `low_volume`, `not_today`, `no_leader`, `no_vol_growth_idle`, `bad_event_shape`, etc. — see existing `LIVE_SCAN_TELEMETRY: drops={...}` log line for the full set).
+- Add a `skip_reason` field to the `scan_found` event recorded in `live_journal.json`. Schema: enum from the existing telemetry drop keys; null when the match passes all gates and a watcher gets spawned.
+- Wire `skip_reason` capture at every gate in `scan_live_matches`. Mirror the Session 6 `decisions.log_decision` pattern — single string per gate, recorded BEFORE the `continue`/return.
+- Update `tools/journal_analysis.py` to read the new field and produce a per-(sport, skip_reason) breakdown table. Replaces the existing "watch-but-no-enter funnel" with attributable causes.
+- Tests: extend `tests/test_live_watcher.py` with cases asserting each gate writes the correct `skip_reason`. Mock the journal-write site, drive each gate's input, assert the recorded reason.
+
+**Out of scope.**
+- Backfilling historical `scan_found` events (impossible; data wasn't captured).
+- Acting on the findings — that's Session 23+ scope when CFs are in place.
+- Touching `live_watcher`'s actual gate logic; this session adds observability ONLY.
+
+**Verify.**
+1. `tail bot/state/live_journal.json | python3 -c "import sys, json; [print(json.loads(l).get('skip_reason')) for l in sys.stdin if 'scan_found' in l]"` — every new `scan_found` either has a populated `skip_reason` or `null` (passed all gates).
+2. `python3 tools/journal_analysis.py` after 24h shows the watch-but-no-enter funnel broken down by skip_reason. UFC's 56% should be attributable; if the dominant reason is `no_leader`, that's a candidate for `MOMENTUM_LEADER_MIN` per-sport tuning at the next checkpoint.
+3. Bot restart required after deploy (live_watcher.py change).
+
+---
+
+### ☐ Session 22 — MOMENTUM_LEADER_MIN re-validation (May 18, auto-scheduled)
+
+**Status: routine scheduled, will fire once May 18 at 9:07 AM ET.**
+
+Stored as `~/.claude/scheduled-tasks/session-22-momentum-leader-min-revalidation/SKILL.md`. Re-runs the Session 19c parameter sweep on the by-then-larger paper trade sample to validate or revert the `MOMENTUM_LEADER_MIN: 0.70 → 0.65` change shipped Apr 27 in commit 212c335.
+
+The brief covers three outcomes (CONFIRM / REVERT / INCONCLUSIVE) with explicit decision criteria. See the SKILL.md file for full content. The +50¢ Outcome A threshold from Session 19c is the standard; max single-trade contribution must be < 50% of total delta to avoid repeating the CLE outlier dominance.
+
+No human action needed before May 18 — the routine fires automatically and commits its decision.
+
+---
+
+### ☐ Session 23 — live_momentum counterfactuals (Apr 27+, planned, May 2-blocking)
+
+**Problem.** Vig_stack rejected opportunities have CF records (Session 8 stratified sampling — every gate fires gets ≥1 CF that settles into clv.json with status `counterfactual_settled`). Live_momentum has nothing equivalent. Session 18 surfaced 56–91% watch-but-no-enter rates; Session 21 will tell us WHY each match was skipped; **this session creates the OUTCOME data for those skipped matches so we can answer "would taking that bet have been profitable?"** Without this, the May 18 LM=0.65 re-validation can only score the trades we DID take — it can't tell us whether 0.55 / 0.60 would have been better, or whether per-sport floors should differ.
+
+**Plan.**
+- Mirror Session 8's stratified-sampling pattern, adapted for tick-replay strategies:
+  - For every `scan_found` event recorded in `live_journal.json` that didn't become a `bet`, capture: ticker, ts, sport, skip_reason (Session 21 dependency), entry-side price at scan time, opponent-side price.
+  - Stratified selection: top-K rejected matches per (sport, skip_reason) per day get a CF record written to `bot/state/clv.json` with `status="counterfactual_open"`, `opp_type="live_momentum"`, `trade_id=f"CF-LM-{ts}-{ticker}"`.
+  - K capped at 5 per (sport, skip_reason) per day to keep CF growth bounded.
+- New `bot/clv.py:record_live_momentum_counterfactual_skip(scan_found_event, skip_reason)` — mirrors `record_counterfactual_skip` but for tick-style strategies. Idempotent on `(ts, ticker)`.
+- Settlement path: `check_clv_settlements` already polls every CF record and updates `closing_yes_price`. Live_momentum CFs will settle the same way, no new poller needed.
+- Reading: `tools/cohort_report.py` and `tools/calibration_report.py` already filter by `opp_type` — live_momentum CFs will appear in both. Verify by inspection that the reports don't break on the new opp_type.
+- Optional: `tools/tick_backtest.py` (Session 19b) gains a `--include-cfs` flag that includes live_momentum CFs in the parity sample. Defer if scope-heavy.
+- Tests: extend `tests/test_clv.py` with stratified-CF cases for live_momentum mirroring Session 8's TestStratifiedCFSampling. Property: every (sport, skip_reason) combo with ≥1 reject in the day's window gets ≥1 CF; CFs settle to `counterfactual_settled`.
+
+**Prereqs.** Session 21 must ship first (CFs need `skip_reason` for the stratification key). Session 21 + 23 ship in sequence, both before May 2 if possible.
+
+**Out of scope.**
+- Backfilling historical scan_founds (per Session 21, forward-only).
+- Acting on CF outcomes (that's the May 18 re-validation routine + future sessions).
+- Per-sport TickStrategy variants based on CF data (Session 22+ if data warrants).
+
+**Verify.**
+1. After 24h post-deploy: `python3 -c "import json; clv=json.load(open('bot/state/clv.json')); cf=[r for r in clv if r.get('opp_type')=='live_momentum' and r.get('status','').startswith('counterfactual')]; print(f'live_momentum CFs: {len(cf)}'); from collections import Counter; print(Counter((r.get('regime',{}).get('sport_phase'), r.get('skipped_by_gate')) for r in cf))"` — should show CFs distributed across (sport_phase, skip_reason) pairs.
+2. After 7 days: `python3 tools/cohort_report.py --regime-by sport_phase` includes live_momentum rows. Mis-tuned `MOMENTUM_LEADER_MIN`-style gates surface concretely.
+3. `wc -l bot/state/clv.json` — file growth bounded; not blowing past Session 8's ≤900/day idle / ≤13k/day active envelope.
+4. Bot restart required after deploy.
+
+---
+
+### ☐ Session 24 — Weekly digest tool (Apr 27+, planned, May 2-blocking for sustainability)
+
+**Problem.** May 2's retuning analysis currently requires running 5–7 separate report tools (cohort, excursion, calibration, universe, journal_analysis, possibly tick_backtest) and mentally synthesizing across them. That's expensive in Tyler's time and easy to skip. **Without a single "what changed this week" view, the analysis ritual won't be sustainable** — it'll happen once at May 2, maybe again at May 18, and then stop. The whole point of the instrumentation arc is that this becomes a routine cadence, not a one-time event.
+
+**Plan.**
+- New `tools/weekly_digest.py` (gitignored, local-only). Runs each existing analysis tool (programmatic entry points where they exist; subprocess where not), captures their markdown output, and assembles into one report.
+- Sections:
+  1. **P&L summary**: total + per-strategy + per-sport, this week vs last week (Δ in cents)
+  2. **Cohort report**: top 5 mis-tuned-gate candidates (≥50% reject rate AND positive mean CLV on rejects)
+  3. **Excursion report**: per-strategy median MFE-vs-exit gap; flag any strategy with median gap > 5¢
+  4. **Calibration report**: Brier score per strategy; flag scores > 0.18
+  5. **Journal analysis**: exit-reason distribution shifts week-over-week, watch-but-no-enter funnel changes (post-Session-21 will be richer)
+  6. **Universe report**: ignored families with >$100/day volume + spread >5¢
+  7. **CF coverage**: per-(opp_type, sport, skip_reason) settled CF counts, growth vs prior week
+  8. **Bot health**: partial_snapshots %, tracker_cadence median, decision rate, error count
+- Optional `--regime-by sport_phase|time_of_day|day_of_week` flag passed through to component reports.
+- Output: ONE markdown file to stdout; ALSO written to `bot/state/weekly_digest_YYYY-MM-DD.md` for archival.
+- Tests in `tests/test_weekly_digest.py` covering: programmatic invocation of each component, graceful handling when a component report errors (continue, mark that section as skipped, don't fail the whole digest), markdown structure.
+
+**Prereqs.** None required. Can ship before or after Session 23, but post-Session-23 is more useful (the digest's CF-coverage section is more meaningful with live_momentum CFs).
+
+**Out of scope.**
+- New analysis logic — this is purely an aggregator over existing tools.
+- Sending the digest to Telegram (that's Session 25's job).
+- Auto-running the digest on a schedule (Session 25 will add that).
+
+**Verify.**
+1. `python3 tools/weekly_digest.py` produces one cohesive markdown report in <60s with all 8 sections populated.
+2. `python3 tools/weekly_digest.py --regime-by sport_phase` produces the same report with regime-sliced sub-sections where applicable.
+3. Each section is independently readable — if you skip the rest and just read section 3, you get a coherent excursion finding.
+4. If one component report errors (e.g., calibration_report has too few samples), the digest reports "[section unavailable: <reason>]" and continues. Doesn't crash.
+
+---
+
+### ☐ Session 25 — Telegram findings push (Apr 27+, planned, post-May 2)
+
+**Problem.** Session 24's weekly digest produces a markdown report, but Tyler still has to remember to run it. **Findings sit unread by default.** The bot already has Telegram integration (every trade decision goes through `bot/notifier.py`); the same pipeline can push a once-a-day finding summary. Without this, the analysis tools become high-quality artifacts that nobody reads.
+
+**Plan.**
+- Add a daily Telegram digest job to `bot/scheduler.py`, fires at midnight ET (mirrors existing nightly summary cadence).
+- The job calls `tools/weekly_digest.py --headlines-only` (new flag — returns just the findings section, not the full report; ~10-15 lines of markdown max).
+- Send via `bot/notifier.py:send_telegram_message`, formatted as a Telegram message (terse, bulleted, emoji sparingly per CLAUDE.md style rules).
+- Body shape:
+  ```
+  📊 Weekly Findings — 2026-MM-DD
+  
+  • vig_stack low_liquidity: 47% reject rate, +8¢ mean CLV → mis-tuned
+  • live_momentum NBA: median MFE 18¢ vs exit 12¢ → +6¢ exit gap
+  • UFC skip_reason: 87% no_leader → consider MOMENTUM_LEADER_MIN[ufc] = 0.60
+  • CF coverage: live_momentum +132 settled this week
+  
+  Full report: bot/state/weekly_digest_2026-MM-DD.md
+  ```
+- Add CLI flag `tools/weekly_digest.py --send-telegram` for manual invocation.
+- Tests in `tests/test_scheduler.py` extension: scheduled job fires once per day, bails gracefully if `weekly_digest.py` errors (don't spam Tyler with broken digests).
+
+**Prereqs.** Session 24 must ship first (digest tool is what we're pushing).
+
+**Out of scope.**
+- Push notifications for individual findings (per-event alerts) — this is digest-only.
+- Two-way Telegram interaction (commands to drill into a finding) — existing Telegram interface unchanged.
+
+**Verify.**
+1. After deploy: midnight ET fires, Tyler receives a Telegram message with the headline findings.
+2. Manual: `python3 tools/weekly_digest.py --send-telegram` produces a Telegram delivery within 30s.
+3. If the digest fails (component errors or no data), the scheduled job logs and skips — does NOT send a broken/empty message.
+4. Bot restart required (scheduler change).
+
+---
+
+### ☐ Session 26 — Data health check (Apr 27+, planned, post-May 2)
+
+**Problem.** Session 19a discovered that the `bot/live_watcher.py:2225` peak-tracking bug had been silently broken for the bot's entire history. **What else is silently broken right now?** We don't know. Each instrumentation tool was built with implicit assumptions about what valid data looks like, but no automated check verifies those assumptions hold over time. If a writer regresses (drops a field, stops firing, drifts toward null), the regression sits silent until the next major analysis surfaces it weeks later.
+
+**Plan.**
+- New `tools/data_health.py` that runs a series of invariant checks across every collection point:
+  - **decisions.jsonl**: rate (rows/hr) within historical band, no field drifting toward null (regime, extra, gates), distribution of decision values reasonable
+  - **predictions.jsonl**: rate, settlement coverage > 50% on records >7 days old
+  - **clv.json**: status distribution healthy, MFE/MAE coverage on settled records >70%, regime tagged 100%
+  - **universe.jsonl**: snapshot rate, partial_snapshots_today / total_snapshots_today < 30%, MVE filter still excluding KXMVE*
+  - **tracker_cadence.jsonl**: median ms_since_last_call ≤ 35s for `_position_check_loop`
+  - **live_ticks.jsonl**: rate during live games, schema includes bid/opp_bid (post-Apr-23 schema)
+  - **positions.json**: regime tagged 100%, ticks_observed populated post-Session-17 fix
+  - **bot.lock**: mtime within last 60s
+  - **bot_state.last_heartbeat**: age < 60s
+- Add scheduled invocation in `bot/scheduler.py` — runs daily at 09:30 ET (after rotations land), logs results to `bot/state/data_health.log`.
+- Output: per-check PASS/WARN/FAIL with the actual numbers. If any check FAILs, send a Telegram alert (re-using Session 25's pipeline if available).
+- Tests in `tests/test_data_health.py`: hand-craft each failure mode (rate too low, field missing, etc.), assert the check correctly identifies it.
+
+**Prereqs.** Session 25 (Telegram push pipeline) for the alerting path. If 25 isn't shipped yet, log to file only.
+
+**Out of scope.**
+- Auto-fixing detected issues (this tool reports; humans fix).
+- Historical data quality (only checks current/recent state).
+- Comparing data across longer time windows (week-over-week is Session 24's job).
+
+**Verify.**
+1. `python3 tools/data_health.py` produces a per-check PASS/WARN/FAIL table.
+2. After 24h of scheduled invocation: `bot/state/data_health.log` shows daily entries.
+3. Manually break one writer (e.g., truncate decisions.jsonl), run the check, confirm it FAILs that check and sends an alert (if Telegram pipeline available).
+4. Tests: each failure mode produces the expected check status.
+
+---
+
+### ☐ Session 27 — Findings registry (Apr 27+, planned, post-May 2)
+
+**Problem.** Every session's findings live in commit messages and CLAUDE.md prose. **There is no queryable structure** that answers "what have we learned, and what did we do about it?" When May 2's retuning analysis lands, its findings will go into a commit message and a CLAUDE.md update — but in 6 months, retracing what was learned requires reading the entire commit log + CLAUDE.md. The narrative is documented; the data isn't.
+
+**Plan.**
+- New `bot/state/findings.json` with structured records, schema:
+  ```json
+  {
+    "id": "session-18-finding-1",
+    "session": 18,
+    "ts": "2026-04-26T...",
+    "title": "TRAILING_STOP and DOLLAR_STOP fire 0% across all sports",
+    "severity": "high|medium|low",
+    "evidence": "n=95 paired bet→exit cycles, ...",
+    "candidate_action": "lower LIVE_PROFIT_TARGET OR remove paths as dead code",
+    "action_taken": "investigated in Session 19a-peakfix; root cause was peak-tracking bug at live_watcher.py:2225, not config",
+    "action_outcome": "fix shipped 2026-04-26, +14¢/trade conservative impact",
+    "status": "resolved|pending|deferred"
+  }
+  ```
+- Small writer: `bot/findings.py:record_finding(...)` — appends to findings.json atomically.
+- Convention: each session that surfaces a finding calls `record_finding(...)` at the end. Future sessions that resolve a finding update its `action_taken` + `action_outcome` + `status`.
+- One-shot backfill: manually populate findings.json with the existing CLAUDE.md narrative findings (Sessions 17, 18, 18.5, 19a-peakfix, 19c). ~10 records total. Local script `tools/backfill_findings.py` (gitignored).
+- Reader: `tools/findings_query.py` — simple CLI to filter by severity/status/session and produce markdown.
+- Optional: `tools/weekly_digest.py` (Session 24) gains a "open findings" section reading from findings.json.
+
+**Prereqs.** None blocking, but most useful after Sessions 21-26 have generated 5-10 new findings worth recording.
+
+**Out of scope.**
+- Migrating existing CLAUDE.md narrative to findings.json wholesale (the prose narrative stays; findings.json is the structured complement).
+- Cross-finding analytics ("which severity-high findings stayed open longest?") — defer until finding count > 50.
+
+**Verify.**
+1. After backfill: `python3 tools/findings_query.py --status pending` lists open findings; `--severity high` lists 2-3 known-high items (peak bug, single-trade-dominance caveat, etc.).
+2. After Session 21 ships: a new finding is recorded automatically via `record_finding(...)`.
+3. Schema is forward-compatible — adding a new optional field doesn't break existing readers.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
