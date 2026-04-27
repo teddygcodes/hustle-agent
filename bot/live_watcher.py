@@ -2221,8 +2221,15 @@ class LiveGameWatcher:
             gain_cents = current_value - entry_price
             gain_pct = gain_cents / entry_price if entry_price > 0 else 0
 
-            # Track high-water mark
-            prev_peak = self._peak_values.get(ticker, current_value)
+            # Track high-water mark.
+            # Fix Apr 26 (Session 19a-peakfix): default was current_value, which made
+            # `current_value > prev_peak` always False on first observation; peak_values
+            # was never written, and the TRAILING_STOP read at line 2258 also defaulted
+            # to current_value, so drop_from_peak was always 0. setdefault both reads
+            # AND writes on first observation; the line 2258 .get() default becomes a
+            # no-op once the key exists. See commit 1e5daec for back-tester
+            # quantification (+558¢ over 20 trades on the wide-window sweep).
+            prev_peak = self._peak_values.setdefault(ticker, entry_price)
             if current_value > prev_peak:
                 self._peak_values[ticker] = current_value
                 prev_peak = current_value

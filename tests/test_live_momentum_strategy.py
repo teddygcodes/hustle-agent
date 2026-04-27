@@ -185,26 +185,28 @@ def test_near_settle_actually_exits_with_near_settle_reason():
     assert sells[0]["reason"].startswith("NEAR-SETTLE:"), sells[0]["reason"]
 
 
-def test_trailing_stop_does_NOT_exit_due_to_production_peak_tracking_bug():
-    """Production peak_values[ticker] is never written on the first call
-    because `prev_peak = peak_values.get(ticker, current_value)` defaults
-    to current_value, then the strict `>` comparison fails. Result:
-    drop_from_peak is always 0, TRAILING_STOP never fires.
-
-    This scenario documents the bug. Session 19a preserves it faithfully
-    per behavior-preservation discipline. Fixing the bug is a separate
-    follow-up tracked in the commit message and CLAUDE.md."""
+def test_trailing_stop_fires_after_peak_tracking_fix():
+    """Locks the Session 19a-peakfix one-line fix at
+    bot/strategies/live_momentum.py:267 (and its production twin at
+    bot/live_watcher.py:2225). Pre-fix, peak_values[ticker] was never
+    written on the first call because `.get(ticker, current_value)`
+    defaulted to current_value, making the strict `>` comparison False.
+    Post-fix, `setdefault(ticker, entry_price)` initializes the peak to
+    the entry price on the first observation, so drop_from_peak is
+    computed correctly and TRAILING_STOP fires when conditions are met."""
     fixture = _load_fixture("trailing_stop")
     actions = fixture["expected"]["actions"]
     sells = [a for a in actions if a["type"] == "Sell"]
-    assert len(sells) == 0, (
-        "TRAILING_STOP unexpectedly fired — the production peak-tracking "
-        "bug is fixed? If so, update this test and the regenerator's "
-        "trailing_stop docstring. Current Sell actions: " + str(sells)
+    assert len(sells) == 1, (
+        "TRAILING_STOP should fire exactly once now that the peak-tracking "
+        "fix is in place. If this fails with len(sells)==0, the fix at "
+        "bot/strategies/live_momentum.py:267 regressed. Sell actions: "
+        + str(sells)
     )
-    # Position stayed open
+    assert sells[0]["reason"].startswith("TRAILING STOP:"), sells[0]["reason"]
+    # Position closed at the trailing-stop tick.
     final_state = fixture["expected"]["states"][-1]
-    assert final_state["bets_placed_count"] == 1
+    assert final_state["bets_placed_count"] == 0
 
 
 def test_no_exit_position_stays_open():

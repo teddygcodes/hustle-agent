@@ -327,3 +327,92 @@ def test_log_decision_dampened_close_ts_does_not_overwrite_explicit(tmp_path, mo
 
     rec = json.loads(f.read_text().splitlines()[0])
     assert rec["extra"]["close_ts"] == "EXPLICIT-IN-EXTRA"
+
+
+# ---------------------------------------------------------------------------
+# Session 19a-peakfix: TRAILING_STOP fires after the peak-tracking fix
+# ---------------------------------------------------------------------------
+
+def test_check_exit_trailing_stop_fires_after_peak_fix(monkeypatch):
+    """Lock for the Session 19a-peakfix one-line fix at bot/live_watcher.py:2225.
+
+    Pre-fix, _peak_values.get(ticker, current_value) defaulted to current_value,
+    so the strict `if current_value > prev_peak` was always False on the first
+    observation and _peak_values[ticker] was never written. The TRAILING_STOP
+    read at line 2258 then ALSO defaulted to current_value, so drop_from_peak
+    was always 0 and TRAILING_STOP could not fire.
+
+    The fix uses setdefault(ticker, entry_price), which both reads AND writes
+    on the first observation. This test feeds two ticks: a peak, then a drop
+    large enough to trigger TRAILING_STOP, and asserts the exit fires.
+
+    On pre-fix code, this test FAILS (no exit). On post-fix code it PASSES.
+    """
+    import asyncio
+    import json
+    from collections import deque
+    from bot.live_watcher import LiveGameWatcher
+
+    ticker = "KXNBAGAME-26APR26TEST-LAL"
+    entry_price = 50  # cents per contract
+
+    watcher = LiveGameWatcher.__new__(LiveGameWatcher)
+    watcher.mode = "momentum"
+    watcher.sport = "nba"  # NBA profile: take_profit=12, trail_stop=4
+    watcher.ticker = ticker
+    watcher._opponent_ticker = None
+    watcher._game_ctx = None  # avoids exit_record snapshot lookup
+    watcher._last_espn_data = None
+    watcher._price_history = deque([])
+    watcher._trailing_active = {}
+    watcher._peak_values = {}
+    watcher._match_title = "test match"
+    watcher.query = "test"
+    watcher.bets_placed = [{
+        "ticker": ticker,
+        "side": "yes",
+        "price_cents": entry_price,
+        "contracts": 5,
+        "order_id": "test-order-1",
+        "entered_at": 0,
+    }]
+    watcher.exits = []
+
+    # Tick 1: yes_bid=58 → current_value=58, gain=8 (under NBA TP=12, no exit).
+    # Establishes the peak.
+    market_t1 = {"yes_bid": 58, "yes_ask": 59}
+
+    # Tick 2: yes_bid=53 → drop_from_peak = 58 - 53 = 5 ≥ trail_stop=4
+    # AND gain_cents = 53 - 50 = 3 > 0 → TRAILING_STOP fires.
+    market_t2 = {"yes_bid": 53, "yes_ask": 54}
+
+    # Patch the paper-exit side effects (writes to paper_trades.json + positions.json
+    # via state_io). _check_exit appends to self.exits regardless, so the assertion
+    # works either way — but mocking keeps the test hermetic.
+    monkeypatch.setattr("bot.config.PAPER_MODE", True)
+    monkeypatch.setattr("bot.executor._paper_record_exit", lambda *a, **kw: None)
+    monkeypatch.setattr("bot.state_io.load_json", lambda *a, **kw: [])
+    monkeypatch.setattr("bot.state_io.save_json", lambda *a, **kw: None)
+
+    # Tick 1: peak should be set to current_value=58 (setdefault writes 50 first,
+    # then the if-branch updates to 58 because 58 > 50).
+    asyncio.run(watcher._check_exit(market_t1, edge=0.0, relative_edge=0.0))
+    assert watcher._peak_values.get(ticker) == 58, (
+        f"peak_values[ticker] should be 58 after first tick "
+        f"(setdefault wrote {entry_price}, if-branch updated to 58); "
+        f"got {watcher._peak_values}"
+    )
+    assert len(watcher.exits) == 0, (
+        f"no exit should fire on tick 1 (gain=8 < TP=12, no drop yet); "
+        f"got {watcher.exits}"
+    )
+
+    # Tick 2: drop=5 from peak=58 to current=53, gain=3, NBA trail_stop=4 → fires.
+    asyncio.run(watcher._check_exit(market_t2, edge=0.0, relative_edge=0.0))
+    assert len(watcher.exits) == 1, (
+        f"TRAILING_STOP should fire on tick 2 (drop=5 ≥ trail_stop=4, gain=3 > 0); "
+        f"got {watcher.exits}"
+    )
+    assert "TRAILING STOP" in watcher.exits[0]["reason"], (
+        f"exit reason should be TRAILING STOP; got {watcher.exits[0]['reason']!r}"
+    )

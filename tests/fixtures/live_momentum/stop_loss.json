@@ -452,13 +452,17 @@
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 72
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 72
+        }
       },
       {
         "bets_placed_count": 0,

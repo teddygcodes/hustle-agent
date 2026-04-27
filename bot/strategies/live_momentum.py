@@ -263,8 +263,13 @@ class LiveMomentumStrategy:
 
             gain_cents = current_value - entry_price
 
-            # Peak tracking (high-water mark)
-            prev_peak = d["peak_values"].get(ticker, current_value)
+            # Peak tracking (high-water mark).
+            # Fix Apr 26 (Session 19a-peakfix): mirrors bot/live_watcher.py:2225 fix
+            # so the back-tester's port↔production parity stays at 8/8. The port
+            # faithfully preserved the peak-tracking bug per Session 19a's
+            # behavior-preservation discipline; now that production is fixed, the
+            # port matches.
+            prev_peak = d["peak_values"].setdefault(ticker, entry_price)
             if current_value > prev_peak:
                 d["peak_values"][ticker] = current_value
                 prev_peak = current_value

@@ -515,8 +515,12 @@
         "reason": ""
       },
       {
-        "type": "Hold",
-        "reason": ""
+        "type": "Sell",
+        "side": "yes",
+        "qty": 20,
+        "reason": "TRAILING STOP: peaked at 80\u00a2, dropped 6\u00a2 (entry 72\u00a2 \u2192 74\u00a2, locking +2\u00a2)",
+        "ticker": "KXATPMATCH-TEST",
+        "exit_price": 74
       }
     ],
     "log_calls": [
@@ -584,42 +588,54 @@
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 73
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 76
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 78
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 80
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 80
+        }
       },
       {
         "bets_placed_count": 1,
         "entry_count": 1,
         "cooldown_remaining": 0,
-        "peak_values": {}
+        "peak_values": {
+          "KXATPMATCH-TEST": 80
+        }
       },
       {
-        "bets_placed_count": 1,
+        "bets_placed_count": 0,
         "entry_count": 1,
-        "cooldown_remaining": 0,
+        "cooldown_remaining": 5,
         "peak_values": {}
       }
     ]
