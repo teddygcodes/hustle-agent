@@ -817,7 +817,17 @@ class LiveMomentumStrategy:
                 "dqs_score": buy_dqs,
                 "game_state": {
                     "score_diff": gc.score_diff if gc else None,
-                    "period": (gc._snapshots[-1].get("period")
+                    # NOTE: production live_watcher.py:1684 uses
+                    # `_snapshots[-1].get("period")` which raises
+                    # AttributeError on ScoreSnapshot dataclasses.
+                    # Production silently swallows via the outer
+                    # try/except at live_watcher.py:498. The port has no
+                    # such wrapper, so we use attribute access directly
+                    # (semantic intent is identical — capture `period`).
+                    # This is a port-correctness fix per the Session 19a
+                    # Option-1 acknowledgment; affects only telemetry,
+                    # not entry/exit decisions or P&L.
+                    "period": (gc._snapshots[-1].period
                                if gc and gc._snapshots else None),
                     "completion": round(gc.game_completion_pct, 3) if gc else None,
                     "wp": round(gc.win_probability, 3) if gc else None,

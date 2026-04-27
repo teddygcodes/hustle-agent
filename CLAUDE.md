@@ -1158,7 +1158,35 @@ Lazy-imported `CONVICTION_*` constants (10 total at `bot/live_watcher.py:1290-12
 
 **Class is NOT wired into production.** `bot/main.py`, `bot/live_watcher.py`, `bot/scanner.py`, `bot/executor.py` import nothing from `bot.strategies.live_momentum`. Bot did not need restart for 19a. Live wiring deferred to a separate decision after 19c ships.
 
-**Session 19 still ☐.** 19b (offline tick replay back-tester) and 19c (parameter sweep with train/test split) remain owed.
+**✗ Sub-session 19b complete (Apr 26) — back-tester delivered, parity validation FAILED, 19c BLOCKED.** Built [tools/tick_backtest.py](hustle-agent/tools/tick_backtest.py) (gitignored, local-only): row→Tick adapter, `replay_game`, `parity_check`, `back_test`, CLI with `--fix-peak-tracking-bug` bonus mode. Tests: [tests/test_tick_backtest.py](hustle-agent/tests/test_tick_backtest.py) — 10 unit tests, all pass. The back-tester itself is correct; the parity check it ran against the 19a port is what failed.
+
+Parity result: **0/9 within 1¢ tolerance** (10 paper trades selected, 1 skipped for tick coverage gap). Root causes by trade:
+
+| Failure pattern | Count | Tickers (example) | Likely root cause |
+|---|---|---|---|
+| Port emits exit at slightly different price | 3 | NHL UTA (+18¢), UFC JASSIL (+86¢), NHL HOULAL (-342¢) | Subtle exit-trigger timing or current_value computation drift between port and `_check_exit` |
+| Port enters but never exits in window | 2 | NHL PITSTL (-320→0), NHL LACOL (-360→0) | Tick coverage cuts off before exit conditions trigger, OR exit gate logic differs |
+| Port over-trades (more round-trips than paper) | 2 | NBA ATLNYK (+254¢), IPL CSKGT (+202¢) | Re-entry cooldown / `_max_entries` may differ; OR production stopped watching while port keeps trading |
+| Tick coverage gap (last_tick < production resolved_at) | 2 | NBA MINDEN, IPL SRHRR | Production's tick logging stopped before market settled — wide-window approach has no ticks past production's exit |
+
+Two findings beyond the parity failure:
+
+1. **Three port bugs surfaced during the run, none from the planned manual review:**
+   - `bot/strategies/live_momentum.py:820` — `gc._snapshots[-1].get("period")` raises `AttributeError` on `ScoreSnapshot` dataclasses. Production has the same bug at [bot/live_watcher.py:1684](hustle-agent/bot/live_watcher.py:1684) and [:2422](hustle-agent/bot/live_watcher.py:2422), silently swallowed by the outer `try/except` at [bot/live_watcher.py:498](hustle-agent/bot/live_watcher.py:498). Fixed in the port by switching to attribute access (`.period`); affects only telemetry payload, not entry/exit decisions. Production live_watcher is also broken — the bug is dormant in production because the swallow means `bets_placed` is never populated when ESPN data is fed AND period is non-None, which is rarer than expected (game_state is None or has period: null in 116/116 bet events in `live_journal.json`).
+   - **Schema drift in `live_ticks.jsonl`:** older archives (≤2026-04-24) lack the `bid` / `opp_bid` fields; only `price` / `opp_price` present. The `_row_to_tick` adapter handles this gracefully (yes_bid → None, no_ask → None), but the strategy's `current_value` falls back to yes_ask in this case, drifting from production's true bid-based exit price.
+   - **`MOMENTUM_DISABLED_SPORTS` was added Apr 20 in commit `b1f08ff`** — gates entry for `{atp, atp_challenger, wta, wta_challenger}`. 28/64 settled live_momentum trades are in disabled sports (made BEFORE the gate existed). The back-tester now filters these from the parity sample with a stderr warning; only NHL / NBA / UFC / IPL remain eligible (36 trades).
+
+2. **Bonus `--fix-peak-tracking-bug` mode delta on 9 non-disabled trades: -240¢** (+1958¢ bugged → +1718¢ fixed). Per the user-spec matrix, this hits the "delta < -20¢" case: **fixed peak tracking triggers premature trailing exits**. Production's bug is masking a problem; the one-line fix at [bot/live_watcher.py:2225](hustle-agent/bot/live_watcher.py:2225) would COST P&L on this sample, not save it. The fix should not ship without retuning trail width — revisit during 19c parameter sweep, NOT as a hot follow-up.
+
+**19c gating decision: NO-GO.** The 0/9 parity outcome means the 19a port's behavior diverges materially from production. Per the Option-1 acknowledgment in commit `46c4978` ("If 19b shows any divergence > 1¢ on the 10 paper trades, the manual spec review missed something"), the manual review missed multiple things. **Do not proceed to 19c until a 19a follow-up audits the port for the four divergence patterns above.**
+
+**Recommended next sub-session — 19a-followup (~2-4 hours):**
+- Diagnose the "port emits exit at slightly different price" pattern by adding action-trace dumps (`--debug-ticker` flag). Compare side-by-side with `bot/state/live_journal.json` exit events.
+- Diagnose the "port over-trades" pattern — check whether `_max_entries`, `MOMENTUM_REENTRY_COOLDOWN`, or `cooldown_remaining` decrement differs between port and production.
+- Decide what to do about historical trades whose tick logging predates the current `live_ticks.jsonl` schema (no `bid` field). Options: extract from raw market dicts where available, or restrict the parity sample to post-Apr-23 trades only.
+- Revisit `MOMENTUM_DISABLED_SPORTS` exclusion: should disabled-sport trades be back-testable with a "bypass-gate" mode for 19c sport-variant exploration?
+
+**Sub-sessions 19a (DONE) and 19b (PARTIAL) — Session 19 still ☐.** 19c remains owed AND blocked on 19a-followup.
 
 **Sub-session 19b — Offline tick replay back-tester (~3-4 hours).**
 - New `tools/tick_backtest.py` (local-only, gitignored).
