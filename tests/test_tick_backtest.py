@@ -694,3 +694,175 @@ class TestMinEntryDateFilter:
         # The conservative default cutoff is documented as 2026-04-23 — the
         # date past which `bid`/`opp_bid` reliably appear in archives.
         assert tb.DEFAULT_MIN_ENTRY_DATE == "2026-04-23"
+
+
+# === Sub-session 19c additions: parameter sweep with train/test split =======
+
+
+def _trade(ticker: str, ts: str, pnl: float = 0.0) -> dict:
+    """Cheap paper-trade builder for sweep tests."""
+    return {
+        "id": f"P-{ticker}-{ts[:10]}",
+        "ticker": ticker,
+        "type": "live_momentum",
+        "status": "won",
+        "side": "yes",
+        "entry_price": 0.50,
+        "contracts": 10,
+        "exit_price": 0.60,
+        "pnl": pnl,
+        "timestamp": ts,
+        "resolved_at": ts.replace("T00", "T01"),
+    }
+
+
+class TestSplitTrainTest:
+    def test_70_30_split_by_date_order(self):
+        # Hand-craft 10 paper trades sorted ascending; split should be 7/3 with
+        # the earliest 7 in train and last 3 in test.
+        trades = [
+            _trade(f"X-{i}", f"2026-04-{20+i:02d}T00:00:00Z") for i in range(10)
+        ]
+        train, test = tb.split_train_test(trades, train_pct=0.70)
+        assert len(train) == 7
+        assert len(test) == 3
+        assert [t["ticker"] for t in train] == [f"X-{i}" for i in range(7)]
+        assert [t["ticker"] for t in test] == [f"X-{i}" for i in range(7, 10)]
+
+    def test_empty_input_returns_empty_pair(self):
+        assert tb.split_train_test([]) == ([], [])
+
+    def test_invalid_pct_raises(self):
+        with pytest.raises(ValueError):
+            tb.split_train_test([{"timestamp": "x"}], train_pct=1.5)
+
+
+class TestSweepGrid:
+    def test_runs_all_variants_x_all_unique_tickers(self, monkeypatch):
+        # Sweep grid of N variants × M unique tickers should produce N×M
+        # _run_variant→back_test→_replay_paper_trade calls. Stub the replay
+        # to count invocations and return a constant P&L.
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXUFCFIGHT-B", "2026-04-23T01:00:00Z"),
+        ]
+        call_count = {"n": 0}
+
+        def fake_replay(strategy, trade, **kw):
+            call_count["n"] += 1
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=50, exit_reason="TAKE_PROFIT",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        grid = [(0.65, 4), (0.70, 6), (0.75, 8)]
+        results = [tb._run_variant(lm, ts, paper) for (lm, ts) in grid]
+        assert len(results) == 3
+        # 3 variants × 2 unique tickers = 6 replays.
+        assert call_count["n"] == 6
+        for v in results:
+            assert v.n_replays == 2
+            assert v.total_pnl_cents == 100  # 2 × 50¢
+            assert v.n_winning_replays == 2
+            assert v.win_rate == 1.0
+
+
+class TestPerSportAggregation:
+    def test_three_buckets_for_two_nba_one_ufc(self):
+        per_replay = [
+            tb.ReplayResult(ticker="KXNBAGAME-26APR23-NYK", actions=[],
+                            round_trips=[], realized_pnl_cents=120,
+                            exit_reason="TAKE_PROFIT"),
+            tb.ReplayResult(ticker="KXNBAGAME-26APR23-DEN", actions=[],
+                            round_trips=[], realized_pnl_cents=-50,
+                            exit_reason="STOP_LOSS"),
+            tb.ReplayResult(ticker="KXUFCFIGHT-26APR23-X", actions=[],
+                            round_trips=[], realized_pnl_cents=200,
+                            exit_reason="TAKE_PROFIT"),
+        ]
+        buckets = tb._aggregate_per_sport(per_replay)
+        # Sorted alphabetically by sport: KXNBAGAME, KXUFCFIGHT
+        assert len(buckets) == 2
+        nba = next(b for b in buckets if b.sport == "KXNBAGAME")
+        ufc = next(b for b in buckets if b.sport == "KXUFCFIGHT")
+        assert nba.n_replays == 2
+        assert nba.total_pnl_cents == 70  # 120 + (-50)
+        assert ufc.n_replays == 1
+        assert ufc.total_pnl_cents == 200
+
+
+class TestRegimeSlicing:
+    def test_per_bucket_sum(self, monkeypatch):
+        # Stub bot.regime.tag to return deterministic regime keys keyed off
+        # ticker so we can assert per-bucket totals without depending on the
+        # ET clock.
+        per_replay = [
+            tb.ReplayResult(ticker="A", actions=[], round_trips=[],
+                            realized_pnl_cents=100, exit_reason="OK"),
+            tb.ReplayResult(ticker="B", actions=[], round_trips=[],
+                            realized_pnl_cents=200, exit_reason="OK"),
+            tb.ReplayResult(ticker="C", actions=[], round_trips=[],
+                            realized_pnl_cents=-50, exit_reason="OK"),
+        ]
+        paper = [
+            _trade("A", "2026-04-23T00:00:00Z"),
+            _trade("B", "2026-04-23T01:00:00Z"),
+            _trade("C", "2026-04-24T00:00:00Z"),
+        ]
+        # A, B share bucket "evening"; C is in "morning" — assert sums match.
+        bucket_map = {"A": "evening", "B": "evening", "C": "morning"}
+
+        def fake_tag(ts, ticker, market_state=None):
+            return {"time_of_day": bucket_map[ticker]}
+
+        import bot.regime
+        monkeypatch.setattr(bot.regime, "tag", fake_tag)
+
+        buckets = tb._aggregate_per_regime(per_replay, paper, "time_of_day")
+        # Sorted by key: evening, morning
+        keys = [b.key for b in buckets]
+        assert keys == ["evening", "morning"]
+        evening = next(b for b in buckets if b.key == "evening")
+        morning = next(b for b in buckets if b.key == "morning")
+        assert evening.n_replays == 2
+        assert evening.total_pnl_cents == 300  # 100 + 200
+        assert morning.n_replays == 1
+        assert morning.total_pnl_cents == -50
+
+
+class TestSweepDeterminism:
+    def test_same_inputs_produce_same_totals(self, monkeypatch):
+        # Two run_sweep invocations with the same paper trades + grid must
+        # produce byte-equal training_total_cents lists. Stubs replay with a
+        # ticker-keyed deterministic P&L so the test exercises sweep wiring,
+        # not strategy behavior.
+        pnl_by_ticker = {"X-A": 80, "X-B": -30, "X-C": 120}
+
+        def fake_replay(strategy, trade, **kw):
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=pnl_by_ticker[trade["ticker"]],
+                exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        train = [
+            _trade("X-A", "2026-04-23T00:00:00Z"),
+            _trade("X-B", "2026-04-23T01:00:00Z"),
+        ]
+        test = [_trade("X-C", "2026-04-26T00:00:00Z")]
+        grid = [(0.65, 4), (0.70, 6)]
+
+        r1 = tb.run_sweep(grid, train, test, slippage_cents=2)
+        r2 = tb.run_sweep(grid, train, test, slippage_cents=2)
+        totals1 = [v.total_pnl_cents for v in r1.training]
+        totals2 = [v.total_pnl_cents for v in r2.training]
+        assert totals1 == totals2
+        # Both runs see the same back_test output (50¢ per train ticker pair):
+        # 80 + (-30) = 50¢ per variant × 2 variants.
+        assert all(t == 50 for t in totals1)
+        # Test top-3 should be both variants (only 2 in grid), each scoring 120¢.
+        assert all(v.total_pnl_cents == 120 for v in r1.test_top3)

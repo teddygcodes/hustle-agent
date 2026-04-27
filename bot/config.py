@@ -67,25 +67,34 @@ LIVE_NEAR_SETTLE_CENTS   = 93   # exit if price >= 93¢ (match almost over, lock
 LINE_MOVEMENT_THRESHOLD = 0.05 # 5pp move = significant
 
 # Momentum mode (WATCH on 1v1 matches — tennis, UFC, etc.)
-MOMENTUM_LEADER_MIN      = 0.70  # v7b (Apr 20, post-S2 revert): was briefly raised
-                                 # to 0.75 in Session 2 to "skip the [75-80c) dead
-                                 # zone." Wrong: MIN is a FLOOR (is_leader = prob >=
-                                 # MIN, live_watcher.py:863), so 0.75 ADMITS [75-80c)
-                                 # while surrendering the positive [70-75c) bucket.
-                                 # Reverted to 0.70 — highest EV of the three options:
-                                 #   0.70 floor: [70-75) + [75-80) + [80-85) = +$14.50
-                                 #   0.75 floor: [75-80) + [80-85)            = +$5.20 (shipped — worse)
-                                 #   0.80 floor: [80-85)                       = +$8.40
-                                 # Proper fix (TODO): add an explicit [75-80c) exclusion
-                                 # in the is_leader check at live_watcher.py:863, 873, 2622,
-                                 # 2624. That captures both positive buckets for ~+$17.70.
+MOMENTUM_LEADER_MIN      = 0.65  # Session 19c (Apr 27, shipped): lowered 0.70 → 0.65
+                                 # based on the tick-replay sweep on n=22 post-Apr-23
+                                 # paper trades (15 train / 7 test).
+                                 #   Train Σ P&L vs baseline (LM=0.70): +408¢
+                                 #   Test  Σ P&L vs baseline (LM=0.70): +488¢ on n=6 test
+                                 # Sign agreement holds; clear monotonic axis (LM=0.75
+                                 # was -488¢ on train). TRAIL_STOP axis showed no signal
+                                 # within any LM cluster (within-tier spread ±18¢) — kept
+                                 # MOMENTUM_DQS_TRAIL_STOP=6 unchanged. CAVEAT: the test
+                                 # delta is dominated by ONE trade flip (KXNBAGAME-26APR26-CLE:
+                                 # -424¢ → +94¢, +518¢ swing) — effect is fragile. Revisit
+                                 # with a larger sample in Session 22+.
+                                 # See CLAUDE.md Session 19c block for the full sweep table.
+                                 #
+                                 # Prior history (kept for context):
+                                 # v7b (Apr 20, post-S2 revert): 0.75 → 0.70 reverted — MIN is
+                                 # a FLOOR (is_leader = prob >= MIN, live_watcher.py:933),
+                                 # so 0.75 ADMITS [75-80c) while surrendering [70-75c).
+                                 # Apr 20 post-rebuild entry-bucket breakdown:
+                                 #   [70-75c): +$9.30  (positive)
+                                 #   [75-80c): -$3.20  across 9 trades (dead zone)
+                                 #   [80-85c): +$8.40  (positive)
                                  # Apr 14 audit (v6 reason, 43 trades):
                                  #   <70c: 23 trades, -$67.77 (-$2.95/trade, 22% WR)
                                  #   ≥70c: 20 trades, +$15.50 (+$0.78/trade, 55% WR)
-                                 # Apr 20 post-rebuild entry-bucket breakdown:
-                                 #   [70-75c): +$9.30  (positive — re-enabled by revert)
-                                 #   [75-80c): -$3.20  across 9 trades (dead zone, still entered)
-                                 #   [80-85c): +$8.40  (positive)
+                                 # The Session 19c sweep extends the floor down by 5pp; the
+                                 # newly-admitted [65-70c) bucket carries the +408/+488¢
+                                 # delta on the post-Apr-23 sample.
 MOMENTUM_MAX_LOSS_DOLLARS = 5.00  # HARD CAP: exit if unrealized loss exceeds $5
                                   # Data: 7 trades lost >$10, totaling -$127. Capping at $5
                                   # would have turned -$104 total into +$2.84.

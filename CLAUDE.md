@@ -903,7 +903,7 @@ Session 18: live_journal.json analysis tool    (small-medium — net new tool)
             ↓
 [May 2: full retuning report runs]
             ↓
-Session 19: Tick-replay back-tester (READY as of Apr 26 — prereqs closed by Sessions 16+17+18+18.5; 2-3 sub-sessions following the 13a/b/c pattern: TickStrategy contract → tick replay infra → param sweep with train/test split. 18.5 sharpened the design with concrete constraints — see Session 19 block for details)
+Session 19: Tick-replay back-tester (☑ shipped Apr 27 — 19a TickStrategy port + 19a-followup parity restoration + 19a-peakfix production bug fix + 19b back-tester + 19c parameter sweep; 19c shipped MOMENTUM_LEADER_MIN 0.70 → 0.65 with +488¢ test-set delta on n=6 trades, KEPT MOMENTUM_DQS_TRAIL_STOP=6 — TRAIL_STOP axis flat across grid)
             ↓
 Session 20: Live microstructure verification (DEFERRED — prereq: PAPER_MODE=False decision)
 ```
@@ -1091,7 +1091,7 @@ No bug in update_positions itself (Outcome C ruled out). Not structurally meanin
 
 ---
 
-### ☐ Session 19 — Tick-replay back-tester for live_momentum (Apr 26+, planned, READY — 2-3 sub-sessions)
+### ☑ Session 19 — Tick-replay back-tester for live_momentum (Apr 26–27, complete — 3 sub-sessions shipped)
 
 **Problem.** Live_momentum is our only profitable strategy (+$12.30, 62% WR over 39 trades). Tick data has been accumulating in `live_ticks-*.jsonl.gz` archives since Session 5 (Apr 23). The natural next move is to back-test the swing-trading strategy across parameter sweeps. **Apr 26 update: original framing had four "prereq" gates; Sessions 16-18 + 18.5 closed three of them and sharpened the fourth into concrete design constraints. Status flipped DEFERRED → READY.**
 
@@ -1268,7 +1268,45 @@ python3 tools/tick_backtest.py --debug-ticker KXIPLGAME-26APR26CSKGT-GT
 ```
 Expected: 53 tests pass; 4/4 (or 8/8) PASS / 0 FAIL with coverage gaps named; +0–+558¢ peak-fix delta depending on sample size; --debug-ticker emits per-tick trace.
 
-**Sub-sessions 19a (DONE), 19a-followup (DONE), 19b (PARTIAL, parity re-validated) — Session 19 still ☐.** 19c READY (parameter sweep) pending the followup commits being reviewed.
+**Sub-sessions 19a (DONE), 19a-followup (DONE), 19b (PARTIAL, parity re-validated), 19c (DONE 2026-04-27) — Session 19 ☑.**
+
+---
+
+**☑ Sub-session 19c — Parameter sweep with train/test split (Apr 27, shipped Outcome A).** 2D grid (`MOMENTUM_LEADER_MIN ∈ [0.65, 0.70, 0.75]` × `MOMENTUM_DQS_TRAIL_STOP ∈ [4, 5, 6, 7, 8]`) = 15 variants over n=22 post-Apr-23 settled live_momentum paper trades, 70/30 train/test split by entry timestamp, 2¢/round-trip slippage pessimism, top-3 training variants validated on test set. Pre-flight grep re-verified both knobs LIVE (LEADER_MIN reads at [bot/live_watcher.py:933,943,2807,2809](hustle-agent/bot/live_watcher.py:933); DQS_TRAIL_STOP at [:2267](hustle-agent/bot/live_watcher.py:2267)). 35/35 tests pass post-extension (5 new sweep cases + 3 split helper sub-tests added to [tests/test_tick_backtest.py](hustle-agent/tests/test_tick_backtest.py): `TestSplitTrainTest`, `TestSweepGrid`, `TestPerSportAggregation`, `TestRegimeSlicing`, `TestSweepDeterminism`).
+
+**Sweep result (`tools/tick_backtest.py --sweep`).** Train N=15 (Apr 23–25), Test N=7 (Apr 26):
+
+| Variant cluster | Train Σ¢ range | Best train Σ¢ | Test Σ¢ (top 3) |
+|---|---|---|---|
+| LM=0.65 (TS=4..8) | +524 to +542 | +542 (TS=4) | +456 (all 3 tied) |
+| LM=0.70 (TS=4..8, **baseline**) | +134 to +152 | +152 (TS=4) | **−32** (TS=6 baseline) |
+| LM=0.75 (TS=4..8) | −488 to −470 | −470 (TS=4) | not validated |
+
+**Decision number: test Σ P&L delta vs baseline = +488¢ (best LM=0.65 TS=4 → +456¢ vs baseline LM=0.70 TS=6 → −32¢).** Sign agreement holds (train delta +408¢, test delta +488¢, both positive). Per spec ("Outcome A: test Σ P&L delta > +50¢ AND validation P&L sign matches training") this clears the threshold.
+
+**Honest caveats — the win is fragile:**
+1. **Single-trade dominance.** The +488¢ test delta is dominated by ONE trade (KXNBAGAME-26APR26CLETOR-CLE: baseline STOP-LOSS at 64¢ for −424¢ → LM=0.65 TAKE PROFIT at 81¢ for +94¢, a +518¢ swing). Other 5 test trades net −30¢ across the variant change. With n=6 effective replays, a single outlier carrying the headline number is the structural reality of this sample size.
+2. **TRAIL_STOP axis showed no signal.** Within-cluster spread is ±18¢ across all 5 trail values for every LM tier. The exit-only sweep null result from Session 18.5 replicated cleanly. Kept `MOMENTUM_DQS_TRAIL_STOP=6` unchanged — moving an axis we don't have evidence for would just add noise to future retunings.
+3. **LEADER_MIN axis is monotonic and large** (LM=0.65: +524¢ → LM=0.70: +134¢ → LM=0.75: −488¢ on training). Lower threshold = strategy waits for cheaper entries (CLE entered at 66¢ vs baseline 74¢; STE at 65¢ vs 72¢). The mechanism is plausible — it's not "let in more bad trades", it's "wait for better prices on the trades we already take" since `n_replays=13` is the same across all variants (replay count is unique tickers, not entries).
+4. **Regime slicing has wafer-thin cells.** Sport phase is `_none` for 4/6 (UFC/IPL outside the hardcoded date table); time-of-day spans only morning/afternoon/evening; n≤4 per bucket means regime conclusions need a Session 22+ revisit with a larger sample.
+
+**What shipped.**
+- [bot/config.py:70](hustle-agent/bot/config.py:70) — `MOMENTUM_LEADER_MIN: 0.70 → 0.65`. Inline comment carries the sweep numbers + the single-trade-dominance caveat. `MOMENTUM_DQS_TRAIL_STOP=6` unchanged.
+- [tools/tick_backtest.py](hustle-agent/tools/tick_backtest.py) — sweep mode added: `SWEEP_GRID_PRIMARY` constant, `split_train_test`, `_run_variant`, `run_sweep`, `_aggregate_per_sport`, `_aggregate_per_regime`, `render_sweep_report`, `_run_sweep_cli`, plus `--sweep` CLI flag. The renderer always includes the production baseline row in the test-validation table (so future sweeps don't need a separate manual baseline run).
+- [tests/test_tick_backtest.py](hustle-agent/tests/test_tick_backtest.py) — 7 new test cases (5 classes; `TestSplitTrainTest` has 3 sub-tests). 28 → 35 tests; all pass.
+- Bot restarted ~00:22 EDT on PID 53966; lock fresh; heartbeat 31s; reconciled 174 positions; Telegram online; no new errors.
+
+**REGRESSION NOTE — Session 19c shipped MOMENTUM_LEADER_MIN=0.65 (was 0.70).** Back-tested on n=6 effective test trades (n=22 total post-Apr-23), projected delta = +488¢ vs baseline (paper P&L). Effect dominated by one trade (CLE flip); fragile until larger-sample re-validation. Trail-stop axis showed no signal — kept TS=6. Re-evaluate by mid-May 2026 once `paper_trades.json` carries ≥40 post-Apr-27 settled trades; Session 22+ candidate to also resweep with the new live data and consider per-sport TickStrategy variants (UFC test result was −234¢ at LM=0.65 vs −132¢ at baseline — UFC may need a higher LEADER_MIN floor than court-sports).
+
+**Verify (post-restart).**
+1. `python3 -m pytest tests/test_tick_backtest.py -v` — 35/35 pass.
+2. `python3 tools/tick_backtest.py --sweep` — markdown report includes baseline row in test validation table.
+3. `python3 -c "from bot.config import MOMENTUM_LEADER_MIN; print(MOMENTUM_LEADER_MIN)"` — prints `0.65`.
+4. `stat -f "%Sm" bot/state/bot.lock` — fresh.
+5. `tail -30 bot/logs/bot.log` — first scan post-restart clean.
+6. Within ~24h after merge, spot-check `decisions.jsonl` for new live_momentum entries in the [65–70c) prob bucket (`grep` decisions where `gates.is_leader=True` and `gates.player_prob` is in [0.65, 0.70)) — that's the newly-admitted bucket and the source of the swept delta.
+
+**Out of scope (explicit).** Wiring `LiveMomentumStrategy` into live `bot/live_watcher.py` (still untouched; 19c only changed a config constant, not the production code path). Per-sport TickStrategy variants (Session 22+; the UFC test divergence flagged above is the trigger). Resweeping the secondary 1D axes (`LIVE_TAKE_PROFIT_CENTS`, `MOMENTUM_DIP_BUY`) — primary sweep was the 19c deliverable, and 18.5 already established that exit-only sweeps don't move the needle on this sample.
 
 **Sub-session 19b — Offline tick replay back-tester (~3-4 hours).**
 - New `tools/tick_backtest.py` (local-only, gitignored).
