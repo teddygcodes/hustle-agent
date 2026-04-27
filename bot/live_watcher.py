@@ -45,6 +45,10 @@ from bot.config import (
     PAPER_MODE,
 )
 import bot.odds_scraper as _odds
+from bot.clv import (
+    record_live_momentum_counterfactual_skip as _record_lm_cf,
+    _should_emit_live_momentum_cf,
+)
 from collections import deque
 
 logger = logging.getLogger("glint.live_watcher")
@@ -114,6 +118,45 @@ def _journal_record_scan(
     if event_ticker is not None:
         entry["event_ticker"] = event_ticker
     _journal_append(entry)
+
+
+def _maybe_emit_live_momentum_cf(
+    *,
+    ticker: str,
+    sport: str | None,
+    skip_reason: str,
+    side: str,
+    entry_price_cents: int,
+    opponent_ticker: str | None = None,
+    measured_value: float | None = None,
+    threshold_value: float | None = None,
+    market_state: dict | None = None,
+) -> None:
+    """Session 23: stratified per-(sport, skip_reason)-per-UTC-day CF emission
+    for the 4 tunable scan gates (no_leader / low_volume / no_vol_growth_*).
+    Cap of 5/day (sport, skip_reason). Never raises."""
+    try:
+        if not ticker or entry_price_cents is None or entry_price_cents <= 0:
+            return
+        now = datetime.now(timezone.utc)
+        if not _should_emit_live_momentum_cf(
+            sport=sport, skip_reason=skip_reason, now=now,
+        ):
+            return
+        _record_lm_cf(
+            ticker=ticker,
+            sport=sport,
+            skip_reason=skip_reason,
+            side=side,
+            entry_price_cents=entry_price_cents,
+            opponent_ticker=opponent_ticker,
+            measured_value=measured_value,
+            threshold_value=threshold_value,
+            market_state=market_state,
+            scan_event_ts=now,
+        )
+    except Exception:
+        logger.exception("live_momentum CF emission failed for %s", ticker)
 
 
 def get_daily_recap(date_str: str | None = None) -> str:
@@ -2852,6 +2895,20 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     volume=total_vol,
                     event_ticker=event_tk,
                 )
+                # Session 23: CF for low_volume — leader-side bet semantics.
+                _higher = side_a if price_a >= price_b else side_b
+                _lower = side_b if _higher is side_a else side_a
+                _maybe_emit_live_momentum_cf(
+                    ticker=_higher.get("ticker") or event_tk,
+                    sport=sport,
+                    skip_reason="low_volume",
+                    side="yes",
+                    entry_price_cents=max(price_a, price_b),
+                    opponent_ticker=_lower.get("ticker"),
+                    measured_value=float(total_vol),
+                    threshold_value=float(MIN_VOLUME_LIVE),
+                    market_state=_higher,
+                )
                 continue
 
             # Must be today's match (ticker date = today) — skip pre-fight/upcoming
@@ -2878,6 +2935,7 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 # Pick the higher-priced side for the journal record so the
                 # ticker reflects whichever was closer to being the leader.
                 higher_side = side_a if price_a >= price_b else side_b
+                lower_side = side_b if higher_side is side_a else side_a
                 _journal_record_scan(
                     ticker=higher_side.get("ticker", "") or event_tk,
                     sport=sport,
@@ -2885,6 +2943,21 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=max(price_a, price_b),
                     volume=total_vol,
                     event_ticker=event_tk,
+                )
+                # Session 23: CF for no_leader. measured_value is the
+                # higher-priced side's prob (cents); threshold is the floor
+                # MOMENTUM_LEADER_MIN * 100. Closer-to-threshold = more
+                # informative for tuning.
+                _maybe_emit_live_momentum_cf(
+                    ticker=higher_side.get("ticker") or event_tk,
+                    sport=sport,
+                    skip_reason="no_leader",
+                    side="yes",
+                    entry_price_cents=max(price_a, price_b),
+                    opponent_ticker=lower_side.get("ticker"),
+                    measured_value=float(max(price_a, price_b)),
+                    threshold_value=float(MOMENTUM_LEADER_MIN * 100),
+                    market_state=higher_side,
                 )
                 continue
 
@@ -3013,6 +3086,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 volume=current_vol,
                 event_ticker=c.get("event_ticker"),
             )
+            # Session 23: CF for first-seen idle. Leader bet by candidate
+            # construction. Threshold is implicit 0 (no prior baseline).
+            _maybe_emit_live_momentum_cf(
+                ticker=c["ticker"],
+                sport=c["sport"],
+                skip_reason="no_vol_growth_first_seen",
+                side="yes",
+                entry_price_cents=c["price"],
+                opponent_ticker=c.get("opponent_ticker"),
+                measured_value=float(current_vol),
+                threshold_value=0.0,
+            )
             continue
 
         vol_growth = current_vol - prev_vol
@@ -3031,6 +3116,19 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 price=c["price"],
                 volume=current_vol,
                 event_ticker=c.get("event_ticker"),
+            )
+            # Session 23: CF for idle. measured_value is the observed growth;
+            # threshold is the 500-volume floor. Closer-to-threshold (i.e.
+            # vol_growth approaching 500) = candidate for floor adjustment.
+            _maybe_emit_live_momentum_cf(
+                ticker=c["ticker"],
+                sport=c["sport"],
+                skip_reason="no_vol_growth_idle",
+                side="yes",
+                entry_price_cents=c["price"],
+                opponent_ticker=c.get("opponent_ticker"),
+                measured_value=float(vol_growth),
+                threshold_value=500.0,
             )
             continue
 

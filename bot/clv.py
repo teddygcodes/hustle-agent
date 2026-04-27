@@ -186,6 +186,188 @@ def record_counterfactual_skip(opp: dict, gate: str, scan_id: str) -> None:
         logger.exception("calibration record_prediction failed (non-fatal CF)")
 
 
+# ---------------------------------------------------------------------------
+# Session 23 (Apr 27+): live_momentum counterfactuals
+# ---------------------------------------------------------------------------
+# Mirrors record_counterfactual_skip's vig_stack pattern, adapted for the
+# tick-replay live_watcher path. Stratification key is (sport, skip_reason)
+# rather than (opp_type, skip_reason) because opp_type is always
+# "live_momentum" here.
+#
+# TUNABLE allowlist below excludes skip_reasons that aren't actionable for
+# threshold tuning:
+#   - not_today: structural — Kalshi lists future-dated markets ahead of
+#     events (Session 21-followup confirmed Apr 27, IPL/UFC dominate).
+#     Filtering them is correct; CFs would flood clv.json with
+#     unactionable rows.
+#   - bad_event_shape, unknown_name: data integrity, not strategy.
+#   - settled, already_watching, recently_watched: concurrency / lifecycle,
+#     not strategy.
+#   - capacity_capped: rare; defer.
+#   - disabled_sport: fires series-level BEFORE markets are fetched, so no
+#     ticker / side / entry_price exists at the gate site. A CF here would
+#     not flow through check_clv_settlements (no market to poll). Revisiting
+#     MOMENTUM_DISABLED_SPORTS is best done via an offline universe-table
+#     walk in a future session, NOT a per-scan CF.
+
+LIVE_MOMENTUM_TUNABLE_SKIP_REASONS = frozenset({
+    "no_leader",
+    "low_volume",
+    "no_vol_growth_idle",
+    "no_vol_growth_first_seen",
+})
+
+# Per (sport, skip_reason) per UTC day. Bucket-fill: emit while under cap,
+# drop once full. Replacement-on-better-proximity is a v2 follow-up if the
+# 24h post-deploy distribution skews far from threshold.
+LIVE_MOMENTUM_CF_DAILY_CAP = 5
+
+
+def _today_start_utc(now: datetime) -> datetime:
+    return now.astimezone(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+
+
+def _should_emit_live_momentum_cf(
+    *,
+    sport: str | None,
+    skip_reason: str,
+    now: datetime,
+    per_day_cap: int = LIVE_MOMENTUM_CF_DAILY_CAP,
+) -> bool:
+    """Return True if a new live_momentum CF for (sport, skip_reason) is under
+    today's per-day cap. Reads clv.json once per call; counts CFs whose
+    recorded_at falls in [today_start_utc, now). Never raises."""
+    if skip_reason not in LIVE_MOMENTUM_TUNABLE_SKIP_REASONS:
+        return False
+    try:
+        records = _load()
+    except Exception:
+        logger.exception("clv._should_emit_live_momentum_cf: _load failed")
+        return False
+    today_start = _today_start_utc(now)
+    count = 0
+    for r in records:
+        if r.get("opp_type") != "live_momentum":
+            continue
+        status = r.get("status", "")
+        if not status.startswith("counterfactual"):
+            continue
+        if r.get("skipped_by_gate") != skip_reason:
+            continue
+        if r.get("sport") != sport:
+            continue
+        recorded_at = r.get("recorded_at")
+        if not recorded_at:
+            continue
+        try:
+            ts = datetime.fromisoformat(recorded_at)
+        except (TypeError, ValueError):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts >= today_start:
+            count += 1
+            if count >= per_day_cap:
+                return False
+    return count < per_day_cap
+
+
+def record_live_momentum_counterfactual_skip(
+    *,
+    ticker: str,
+    sport: str | None,
+    skip_reason: str,
+    side: str,
+    entry_price_cents: int,
+    opponent_ticker: str | None = None,
+    measured_value: float | None = None,
+    threshold_value: float | None = None,
+    market_state: dict | None = None,
+    scan_event_ts: datetime | None = None,
+) -> None:
+    """Record a live_momentum CF row for a watch-but-no-enter scan event.
+
+    Mirrors record_counterfactual_skip:
+    - Idempotent on trade_id = f"CF-LM-{compact_ts}-{ticker}"
+    - Atomic-write via _save (tmp + rename)
+    - Regime-tagged at write time
+    - Never raises; caller wraps loosely too
+
+    Caller is expected to pre-filter on LIVE_MOMENTUM_TUNABLE_SKIP_REASONS via
+    _should_emit_live_momentum_cf. We re-check defensively so direct callers
+    (tests, future callers) can't bypass the allowlist.
+    """
+    try:
+        if skip_reason not in LIVE_MOMENTUM_TUNABLE_SKIP_REASONS:
+            logger.debug(
+                "live_momentum CF skipped: skip_reason=%s not tunable", skip_reason,
+            )
+            return
+        try:
+            entry_int = int(entry_price_cents) if entry_price_cents is not None else None
+        except (TypeError, ValueError):
+            entry_int = None
+        if entry_int is None or entry_int <= 0:
+            logger.debug("live_momentum CF skipped: %s missing usable entry price", ticker)
+            return
+        if not ticker:
+            return
+
+        ts = scan_event_ts or datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        ts_compact = ts.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        trade_id = f"CF-LM-{ts_compact}-{ticker}"
+
+        records = _load()
+        if any(r.get("trade_id") == trade_id for r in records):
+            return
+
+        side_norm = str(side or "yes").lower()
+        recorded_at = datetime.now(timezone.utc).isoformat()
+        record = {
+            "ticker": ticker,
+            "opp_type": "live_momentum",
+            "sport": sport,
+            "side": side_norm,
+            "entry_price_cents": entry_int,
+            "opponent_ticker": opponent_ticker,
+            "scan_event_ts": ts.isoformat(),
+            "measured_value": measured_value,
+            "threshold_value": threshold_value,
+            "contracts": 0,
+            "trade_id": trade_id,
+            "paper": True,
+            "recorded_at": recorded_at,
+            "status": "counterfactual_open",
+            "skipped_by_gate": skip_reason,
+            "closing_yes_price": None,
+            "clv_cents": None,
+            "clv_relative": None,
+            "settled_at": None,
+        }
+        try:
+            record["regime"] = regime_tag(
+                ts=ts,
+                ticker=ticker,
+                market_state=market_state,
+            )
+        except Exception:
+            logger.exception(
+                "clv.record_live_momentum_counterfactual_skip: regime_tag failed for %s",
+                ticker,
+            )
+        records.append(record)
+        _save(records)
+    except Exception:
+        logger.exception(
+            "clv.record_live_momentum_counterfactual_skip failed for ticker=%s",
+            ticker,
+        )
+
+
 def record_clv_entry(
     ticker: str,
     opp_type: str,

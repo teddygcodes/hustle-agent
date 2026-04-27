@@ -670,3 +670,159 @@ class TestSettlementMfeExtension:
         assert rec["mfe_cents"] == 30
         # No change → mfe_at NOT advanced to settled_at
         assert rec["mfe_at"] == original_mfe_at
+
+
+# ---------------------------------------------------------------------------
+# Session 23 (Apr 27+) — live_momentum counterfactuals
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone, timedelta  # noqa: E402
+
+
+def _lm_kwargs(**overrides) -> dict:
+    """Default kwargs for record_live_momentum_counterfactual_skip."""
+    base = {
+        "ticker": "KXATPMATCH-26APR27ALCSIN-ALC",
+        "sport": "atp",
+        "skip_reason": "no_leader",
+        "side": "yes",
+        "entry_price_cents": 60,
+        "opponent_ticker": "KXATPMATCH-26APR27ALCSIN-SIN",
+        "measured_value": 60.0,
+        "threshold_value": 65.0,
+        "scan_event_ts": datetime(2026, 4, 27, 18, 30, 21, tzinfo=timezone.utc),
+    }
+    base.update(overrides)
+    return base
+
+
+class TestLiveMomentumCounterfactual:
+    """Mirrors TestStratifiedCFSampling for the live_watcher tick-replay path."""
+
+    def test_record_writes_expected_schema(self, tmp_clv_file):
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs())
+        recs = _read(tmp_clv_file)
+        assert len(recs) == 1
+        r = recs[0]
+        assert r["opp_type"] == "live_momentum"
+        assert r["status"] == "counterfactual_open"
+        assert r["paper"] is True
+        assert r["contracts"] == 0
+        assert r["sport"] == "atp"
+        assert r["side"] == "yes"
+        assert r["entry_price_cents"] == 60
+        assert r["opponent_ticker"] == "KXATPMATCH-26APR27ALCSIN-SIN"
+        assert r["skipped_by_gate"] == "no_leader"
+        assert r["measured_value"] == 60.0
+        assert r["threshold_value"] == 65.0
+        assert r["closing_yes_price"] is None
+        assert r["clv_cents"] is None
+        assert r["trade_id"] == "CF-LM-20260427T183021Z-KXATPMATCH-26APR27ALCSIN-ALC"
+        # Regime tagged at write time (Session 14 discipline; 6 writers + this = 7).
+        assert "regime" in r
+        assert set(r["regime"].keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        }
+
+    def test_idempotent_on_repeat_call(self, tmp_clv_file):
+        # Same (scan_event_ts, ticker) -> one record.
+        for _ in range(3):
+            clv.record_live_momentum_counterfactual_skip(**_lm_kwargs())
+        assert len(_read(tmp_clv_file)) == 1
+
+    def test_skips_invalid_skip_reason(self, tmp_clv_file):
+        # Defensive allowlist — caller bug shouldn't pollute clv.json with
+        # unactionable rows (not_today is structural per Session 21-followup).
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(skip_reason="not_today"))
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(skip_reason="bad_event_shape"))
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(skip_reason="disabled_sport"))
+        assert _read(tmp_clv_file) == []
+
+    def test_skips_zero_or_negative_entry_price(self, tmp_clv_file):
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(entry_price_cents=0))
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(entry_price_cents=-5))
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(entry_price_cents=None))
+        assert _read(tmp_clv_file) == []
+
+    def test_per_day_cap_enforced_per_sport_skip_reason(self, tmp_clv_file):
+        # 10 candidates for (ufc, no_leader) on the same UTC day → only 5
+        # written. Then (nba, no_leader) goes through (cross-sport isolation).
+        # Then (ufc, low_volume) goes through (cross-skip_reason isolation).
+        base = datetime(2026, 4, 27, 12, 0, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            ts = base + timedelta(minutes=i)
+            ok = clv._should_emit_live_momentum_cf(
+                sport="ufc", skip_reason="no_leader", now=ts,
+            )
+            if ok:
+                clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+                    ticker=f"KXUFC-{i}",
+                    sport="ufc",
+                    skip_reason="no_leader",
+                    scan_event_ts=ts,
+                ))
+        ufc_no_leader = [r for r in _read(tmp_clv_file)
+                         if r["sport"] == "ufc" and r["skipped_by_gate"] == "no_leader"]
+        assert len(ufc_no_leader) == 5
+
+        # Cross-sport: (nba, no_leader) is its own bucket.
+        ts_nba = base + timedelta(hours=1)
+        assert clv._should_emit_live_momentum_cf(
+            sport="nba", skip_reason="no_leader", now=ts_nba,
+        ) is True
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+            ticker="KXNBA-1", sport="nba", skip_reason="no_leader", scan_event_ts=ts_nba,
+        ))
+        # Cross-skip_reason: (ufc, low_volume) is its own bucket.
+        ts_ufc_lv = base + timedelta(hours=2)
+        assert clv._should_emit_live_momentum_cf(
+            sport="ufc", skip_reason="low_volume", now=ts_ufc_lv,
+        ) is True
+
+    def test_per_day_cap_resets_at_utc_midnight(self, tmp_clv_file):
+        # Fill the cap on day 1; day 2 (UTC midnight rollover) gets a fresh cap.
+        day1 = datetime(2026, 4, 27, 23, 0, 0, tzinfo=timezone.utc)
+        for i in range(5):
+            clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+                ticker=f"KXUFC-D1-{i}",
+                sport="ufc",
+                skip_reason="no_leader",
+                scan_event_ts=day1 + timedelta(minutes=i),
+            ))
+        day2 = datetime(2026, 4, 28, 0, 30, 0, tzinfo=timezone.utc)
+        assert clv._should_emit_live_momentum_cf(
+            sport="ufc", skip_reason="no_leader", now=day2,
+        ) is True
+
+    def test_settlement_flips_status_and_fills_fields(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # Live_momentum CF flows through check_clv_settlements unchanged
+        # (opp_type-agnostic poller). YES @60, settles YES (closing=100 → clv=40).
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs())
+        tmp_positions_file.write_text(json.dumps([]))
+        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+            settled_now = clv.check_clv_settlements()
+        # CF settlements are NOT in the return list (Telegram noise filter).
+        assert settled_now == []
+        rec = _read(tmp_clv_file)[0]
+        assert rec["status"] == "counterfactual_settled"
+        assert rec["closing_yes_price"] == 100
+        assert rec["clv_cents"] == 40.0
+        # MFE extension skipped for CFs (Session 16 gates on `not is_cf`).
+        assert rec.get("mfe_cents") is None
+
+    def test_record_works_when_market_state_missing_close_ts(self, tmp_clv_file):
+        # no_vol_growth_idle hooks pass market_state=None — regime tag still
+        # populates the 4-axis dict but event_horizon_hr stays None.
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+            skip_reason="no_vol_growth_idle",
+            measured_value=320.0,
+            threshold_value=500.0,
+            market_state=None,
+        ))
+        rec = _read(tmp_clv_file)[0]
+        assert rec["regime"]["event_horizon_hr"] is None
+        # Other 3 regime axes still derived from scan_event_ts + ticker.
+        assert rec["regime"]["day_of_week"] is not None
+        assert rec["regime"]["time_of_day"] is not None
