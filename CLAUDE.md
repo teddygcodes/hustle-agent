@@ -1374,7 +1374,7 @@ Tier 1 (May 2-blocking — must ship first):
   Session 23: live_momentum counterfactuals             (~3-4h, mirrors Session 8/9 pattern)
 
 Tier 2 (sustainability — make analysis cycles cheap):
-  Session 24: Weekly digest tool                        (~2h, aggregator)
+  Session 24: Weekly digest tool                        (☑ shipped Apr 28)
   Session 25: Telegram findings push                    (~1-2h, scheduler integration)
 
 Tier 3 (defense-in-depth — catch silent regressions):
@@ -1473,7 +1473,7 @@ No human action needed before May 18 — the routine fires automatically and com
 
 ---
 
-### ☐ Session 24 — Weekly digest tool (Apr 27+, planned, May 2-blocking for sustainability)
+### ☑ Session 24 — Weekly digest tool (Apr 28, shipped)
 
 **Problem.** May 2's retuning analysis currently requires running 5–7 separate report tools (cohort, excursion, calibration, universe, journal_analysis, possibly tick_backtest) and mentally synthesizing across them. That's expensive in Tyler's time and easy to skip. **Without a single "what changed this week" view, the analysis ritual won't be sustainable** — it'll happen once at May 2, maybe again at May 18, and then stop. The whole point of the instrumentation arc is that this becomes a routine cadence, not a one-time event.
 
