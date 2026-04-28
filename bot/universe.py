@@ -70,7 +70,27 @@ _PAGE_LIMIT = 200
 # partial under 90s). 180s = ~70% headroom over that observed value, with
 # room for the new transient-retry loop below to spend a few extra seconds
 # recovering from connection resets / read timeouts without bailing.
-_SNAPSHOT_DEADLINE_SEC = 180
+#
+# Session 28-followup (Apr 28 ~50min post-restart): 180s wasn't enough.
+# Direct measurement of the first post-Session-28 scan: 423 pages reached
+# in 180s (clean linear scaling vs the pre-fix 221-page median — exactly
+# 2× pages for 2× deadline, confirming the retry mechanism is functioning
+# but the cursor walk legitimately needs more time). The transient-retry
+# loop below did not fire on this scan (no connection-reset/timeout in
+# its window) — so this followup is purely an Outcome A bump, not a
+# retry-token fix. 0.43s/page is the steady-state rate; 300s buys ~700
+# pages of cursor reach, vs ~423 at 180s. Stays comfortably under the
+# IDLE scan_interval (1800s) and PREGAME (600s); during LIVE (120s)
+# the snapshot already exceeded the scan_interval and that's accepted
+# (the live_watcher loop is independent of snapshot_universe and trades
+# on its own ticker list — Session 12's design).
+#
+# If even 300s shows partial=True consistently after this restart, that's
+# the signal for Outcome D: Kalshi has more open markets than we can
+# enumerate inside any reasonable deadline, and the right move is a
+# per-series-paginated rewrite (Session 28-2 territory) — not yet another
+# bump of this constant.
+_SNAPSHOT_DEADLINE_SEC = 300
 
 # Session 28: bounded retry inside the cursor walk for transient network
 # errors (connection reset, read timeout, 429-exhausted). Apr 28 logs

@@ -1646,6 +1646,28 @@ No human action needed before May 18 — the routine fires automatically and com
 
 **Follow-up watch (no session opened).** If at the May 12 spot-check the partial rate has crept back above 50%, open Session 28-followup. Likely paths there: (a) Kalshi load grew further → bump deadline again, or (b) a new error class appears that the transient-token list doesn't catch → extend `_TRANSIENT_ERROR_TOKENS`. Don't pre-engineer.
 
+#### ☑ Session 28-followup — Outcome A: deadline still too short (Apr 28, ~50min after Session 28 restart, shipped)
+
+The Session 28 fix restored cursor reach but didn't restore the partial rate. ~50min post-restart, the first measurable post-fix scan was still partial. Direct measurement disambiguated:
+
+| | pages reached | rate | failure mode |
+|---|---|---|---|
+| pre-Session-28 (90s deadline, Apr 28 18:55 UTC) | 221 | 0.41 s/page | clean deadline hit |
+| post-Session-28 (180s deadline, Apr 28 23:13 UTC) | **423** | **0.43 s/page** | clean deadline hit |
+
+**Cursor reach exactly doubled with the deadline (2.0× pages for 2.0× time).** Linear scaling tells us the cursor walk is making clean progress at ~0.43 s/page steady state. The transient-retry loop introduced in Session 28 did NOT fire on the post-restart scan (no connection-reset/timeout in its window) — so no token-list problem was hidden. This is unambiguous Outcome A: 180s simply isn't enough for current Kalshi load.
+
+**Shipped.** `bot/universe.py:_SNAPSHOT_DEADLINE_SEC` 180 → 300. Constant docstring extended with this followup's evidence. No code path changed. Existing 17 tests still pass.
+
+**Sizing rationale.** 300s × 1/(0.43 s/page) = ~700 pages of cursor reach, vs ~423 at 180s. Stays under SCAN_INTERVAL_PREGAME (600s) with margin and far under SCAN_INTERVAL_IDLE (1800s). LIVE (120s) is already exceeded but accepted — `live_watcher` runs an independent loop not blocked on `snapshot_universe`.
+
+**Verify (live).**
+- `python3 -m pytest tests/test_universe.py -v` — 17/17 PASSED.
+- Bot restarted under launchd at 19:27:49 ET (kickstart -k + kill stale 83931 → fresh PID 1765). Clean startup; live ticks resumed immediately.
+- 30–60min post-restart re-measurement pending — partial rate target <50% in first hour, <30% by tomorrow.
+
+**If 300s still produces 100% partial after this restart**, that's Outcome D (Kalshi has more open markets than we can enumerate inside any reasonable deadline). The right move at that point is a per-series-paginated rewrite (Session 28-2 territory) or accepting Kalshi-induced partials as the new normal — NOT yet another bump of this constant. The docstring captures this guardrail so future-Claude doesn't fall into the deadline-bump death spiral.
+
 ---
 
 ### Session 28 — original spec (preserved for reference)
