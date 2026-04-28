@@ -57,10 +57,50 @@ _PAGE_LIMIT = 200
 # expansions (KXMVE* tickers, ~95%) we filter out below. Even with the filter
 # we still have to PAGINATE through MVE pages to reach non-MVE markets —
 # under load (live_watcher polling) each page can spend 30-40s on 429 retries.
-# 90s gives us ~300 pages = 60K market peek; we capture what we can, mark
-# rows `partial: true`, let the next scan try again. Best-effort: this never
-# gates trading.
-_SNAPSHOT_DEADLINE_SEC = 90
+#
+# Session 28 (Apr 28): bumped 90 → 180. The Apr 25 → Apr 28 partial-rate
+# climb (18% → 100% over 3 days, sustained at 100% across all 72 archived
+# scans Apr 26–28) was driven by two compounding factors:
+#   1. agent.kalshi_client._kalshi_get retries 429s with 2s/3s/5s backoff;
+#      a single dry-run measured ~19 such retries = ~38s of pure sleep eaten
+#      from the 90s budget.
+#   2. Cursor walks were reaching 199–234 pages × ~0.4s/page = ~80–95s
+#      before the deadline fired, with no headroom for the 429 backoff.
+# Concurrent dry-run completed in 106.5s with 1076 rows captured (still
+# partial under 90s). 180s = ~70% headroom over that observed value, with
+# room for the new transient-retry loop below to spend a few extra seconds
+# recovering from connection resets / read timeouts without bailing.
+_SNAPSHOT_DEADLINE_SEC = 180
+
+# Session 28: bounded retry inside the cursor walk for transient network
+# errors (connection reset, read timeout, 429-exhausted). Apr 28 logs
+# showed 22 connection-reset and 5 read-timeout events on a single day,
+# each one aborting the entire cursor walk via the bare `except` and
+# losing all subsequent pages. agent.kalshi_client.get_markets wraps its
+# own exceptions into {"error": "Kalshi API error: ..."} dicts, so a
+# transient at the SDK layer surfaces here as an error dict, not an
+# exception. We retry the same cursor on either surface, with retry
+# sleeps counting against the wall-clock deadline (no budget extension).
+_CURSOR_RETRY_MAX = 3
+_CURSOR_RETRY_SLEEPS = (0.5, 1.0, 2.0)  # used for attempts 1, 2, 3
+_TRANSIENT_ERROR_TOKENS = (
+    "connection reset",
+    "timed out",
+    "timeout",
+    "rate limit",
+    "temporarily unavailable",
+    "broken pipe",
+)
+
+
+def _is_transient_kalshi_error(err: object) -> bool:
+    """Return True if the kalshi error dict's message looks recoverable.
+    Matches against substrings in _TRANSIENT_ERROR_TOKENS (case-insensitive).
+    Unknown errors return False — we don't retry blind."""
+    if not isinstance(err, str):
+        err = str(err)
+    low = err.lower()
+    return any(tok in low for tok in _TRANSIENT_ERROR_TOKENS)
 
 # Skip Multi-Variate Event collections — these are combinatorial parlay
 # products Kalshi creates in bulk (60K+ at any time). Counting them here
@@ -203,11 +243,31 @@ def snapshot_universe(scan_id: str) -> int:
                 partial = True
                 break
 
+            # Session 28: bounded retry on transient kalshi errors. The
+            # production failure mode is agent.kalshi_client.get_markets
+            # returning {"error": "Kalshi API error: [Errno 54] Connection
+            # reset by peer"} — never an exception (the SDK wrapper catches
+            # everything). So retry lives on the error-dict path only;
+            # actual exceptions (ImportError, programmer bugs) still bail
+            # immediately as before.
+            kwargs = {"status": "open", "limit": _PAGE_LIMIT}
+            if cursor:
+                kwargs["cursor"] = cursor
             try:
-                kwargs = {"status": "open", "limit": _PAGE_LIMIT}
-                if cursor:
-                    kwargs["cursor"] = cursor
                 result = get_markets(**kwargs)
+                for attempt in range(_CURSOR_RETRY_MAX):
+                    if not (isinstance(result, dict) and "error" in result):
+                        break
+                    err = result.get("error")
+                    if not _is_transient_kalshi_error(err):
+                        break
+                    sleep_s = _CURSOR_RETRY_SLEEPS[attempt]
+                    _logger.info(
+                        "universe.snapshot_universe: transient kalshi error at page %d (scan_id=%s, attempt %d/%d) — retrying in %.1fs: %s",
+                        pages, scan_id, attempt + 1, _CURSOR_RETRY_MAX, sleep_s, err,
+                    )
+                    _time.sleep(sleep_s)
+                    result = get_markets(**kwargs)
             except Exception:
                 _logger.warning(
                     "universe.snapshot_universe: cursor pagination failed at page %d (scan_id=%s) — flushing partial",

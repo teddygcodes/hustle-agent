@@ -1616,7 +1616,39 @@ No human action needed before May 18 — the routine fires automatically and com
 
 ---
 
-### ☐ Session 28 — partial_snapshots tuning (Apr 28+, planned, May 2-blocking)
+### ☑ Session 28 — partial_snapshots tuning (Apr 28, shipped)
+
+**Decision: Outcome C — mixed root cause.** Discovery-first investigation distinguished two independent failure modes:
+
+1. **Deadline too tight (60% of cause).** 38 deadline-hit warnings on Apr 28 alone where the cursor walk was making clean progress through 199–234 pages × ~0.4s/page = 80–95s before the 90s deadline fired with no headroom. A live dry-run (concurrent with the running bot) completed in 106.5s with 1076 rows captured, all stamped `partial: true` from the deadline.
+2. **No transient-error retry (40% of cause).** 22 "Connection reset by peer" + 5 "read operation timed out" events on Apr 28. `agent/kalshi_client.py:get_markets` wraps its own exceptions into `{"error": "Kalshi API error: ..."}` dicts, so the bare `except Exception` in the cursor walk never saw them — but the immediately-following `if "error" in result` did, and would bail on the first occurrence, losing all subsequent pages.
+
+**Outcome B (rate-limiting at the universe.py layer) was ruled out:** the dry-run revealed `agent/kalshi_client.py:_kalshi_get` ALREADY retries 429s with 2s/3s/5s backoff (logging to stdout, not bot.log — which is why my initial log grep missed them). The 429s were eating ~38s of the 90s budget per scan via that backoff, but they weren't causing direct partial flags. The fix needed to be at universe.py for connection-reset/timeout errors that bypass `_kalshi_get`'s 429-only retry, AND a deadline bump so the budget doesn't get dominated by 429-induced sleeps.
+
+**Outcome D (one-day spike) was ruled out:** archive trend showed 100% partial across all 72 archived scans Apr 26–28 (23/23 + 27/27 + 22/22). Sustained 3-day degradation, not transient.
+
+**Shipped.**
+- `bot/universe.py:_SNAPSHOT_DEADLINE_SEC` bumped 90 → 180. Constant docstring updated with the Apr 28 evidence (dry-run timing + 429-backoff arithmetic) so future-Claude knows why.
+- `bot/universe.py:snapshot_universe` cursor walk: bounded retry loop on transient kalshi error dicts. Detects transient via substring match on `_TRANSIENT_ERROR_TOKENS = ("connection reset", "timed out", "timeout", "rate limit", "temporarily unavailable", "broken pipe")`. Up to 3 retries with 0.5s/1s/2s backoff. Non-transient errors (auth failure, schema mismatch) still bail on first observation. Exception path unchanged — still bails immediately, since `get_markets` swallows everything internally.
+- `tests/test_universe.py` — 3 new tests in TestPartialCursor: transient retry succeeds, transient retry exhausted bails partial, non-transient error dict bails without retry. All 17 tests in the file pass.
+
+**Verify (live).**
+- `python3 -m pytest tests/test_universe.py -v` — 17/17 passed.
+- Pre-fix: partial rate `15/21 (71%)` at digest re-render; archive Apr 26–28 = 72/72 (100%).
+- Bot restarted under launchd at 19:09:58 ET (kickstart -k + kill stale 66992 leaving fresh 83931). Log shows normal startup, Telegram connected, position reconcile clean (197 positions / 20 pending), no errors.
+- **1–2h post-restart check pending** — `partial_snapshots_today / total_snapshots_today` should drop below 30%. May 12 spot-check routine (already scheduled) will confirm the fix held.
+
+**Out of scope (per spec — and held).**
+- No architecture refactor of snapshot_universe.
+- No token bucket / rate-limit accounting in kalshi_client.py.
+- No change to the partial-rate WARN threshold.
+- No change to the MVE prefix filter or shadow-fetch design.
+
+**Follow-up watch (no session opened).** If at the May 12 spot-check the partial rate has crept back above 50%, open Session 28-followup. Likely paths there: (a) Kalshi load grew further → bump deadline again, or (b) a new error class appears that the transient-token list doesn't catch → extend `_TRANSIENT_ERROR_TOKENS`. Don't pre-engineer.
+
+---
+
+### Session 28 — original spec (preserved for reference)
 
 **Problem (surfaced by Apr 28 weekly_digest from Session 24).** `bot_state.json:partial_snapshots_today: 13/13 (100%)`. Apr 25 baseline was 18%. **5x degradation in 3 days.** Session 15.5 set the WARN threshold at 10% — we're now an order of magnitude over.
 

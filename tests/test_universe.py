@@ -272,6 +272,77 @@ class TestPartialCursor:
         assert len(recs) == 2
         assert all(r.get("partial") is True for r in recs)
 
+    # Session 28: transient-error retry on the error-dict path.
+
+    def test_transient_error_dict_retries_then_succeeds(self, tmp_universe_file, monkeypatch):
+        """A transient kalshi error dict (Connection reset / timed out) on the
+        FIRST call followed by a healthy second call should produce a complete
+        (non-partial) snapshot. The retry loop swallows the recoverable blip."""
+        # Neutralize sleep so the test stays fast.
+        monkeypatch.setattr(universe._time, "sleep", lambda *a, **kw: None)
+        call_state = {"i": 0}
+
+        def stub(**kwargs):
+            i = call_state["i"]
+            call_state["i"] += 1
+            if i == 0:
+                return {"error": "Kalshi API error: [Errno 54] Connection reset by peer"}
+            return {
+                "markets": [_market("KXTEMP-T1"), _market("KXTEMP-T2")],
+                "cursor": None,
+            }
+
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+        n = universe.snapshot_universe("S1")
+        assert n == 2
+        # Retried at least once.
+        assert call_state["i"] >= 2
+
+        universe.flush_universe("S1")
+        recs = _read_records(tmp_universe_file)
+        assert len(recs) == 2
+        assert not any(r.get("partial") for r in recs)
+
+    def test_transient_error_dict_retries_exhausted_marks_partial(self, tmp_universe_file, monkeypatch):
+        """Persistent transient errors burn through retries, then the cursor
+        walk bails partial. Cursor-walk calls = 1 + _CURSOR_RETRY_MAX. (Pass 2
+        shadow fetches still run but they're scoped per series_ticker — we
+        only count cursor-walk calls here.)"""
+        monkeypatch.setattr(universe._time, "sleep", lambda *a, **kw: None)
+        cursor_calls = {"n": 0}
+
+        def stub(**kwargs):
+            if "series_ticker" not in kwargs:
+                cursor_calls["n"] += 1
+            return {"error": "Kalshi API error: read operation timed out"}
+
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+        n = universe.snapshot_universe("S1")
+        # Cursor walk captured nothing; Pass 2 shadow-fetches also fail with
+        # the transient error (no retry there), so the buffer stays empty.
+        assert n == 0
+        assert cursor_calls["n"] == 1 + universe._CURSOR_RETRY_MAX
+
+        # Empty buffer flushes 0 rows.
+        universe.flush_universe("S1")
+        recs = _read_records(tmp_universe_file)
+        assert len(recs) == 0
+
+    def test_non_transient_error_dict_bails_without_retry(self, tmp_universe_file, monkeypatch):
+        """Non-transient errors (e.g. auth failure) should bail on first
+        observation of the cursor walk — no retries, no extra latency."""
+        monkeypatch.setattr(universe._time, "sleep", lambda *a, **kw: None)
+        cursor_calls = {"n": 0}
+
+        def stub(**kwargs):
+            if "series_ticker" not in kwargs:
+                cursor_calls["n"] += 1
+            return {"error": "Kalshi API error: invalid api key"}
+
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+        universe.snapshot_universe("S1")
+        assert cursor_calls["n"] == 1  # no retry — bailed immediately
+
 
 class TestNeverRaises:
     """The trade path must never blow up because of universe-log failure."""
