@@ -1664,9 +1664,24 @@ The Session 28 fix restored cursor reach but didn't restore the partial rate. ~5
 **Verify (live).**
 - `python3 -m pytest tests/test_universe.py -v` — 17/17 PASSED.
 - Bot restarted under launchd at 19:27:49 ET (kickstart -k + kill stale 83931 → fresh PID 1765). Clean startup; live ticks resumed immediately.
-- 30–60min post-restart re-measurement pending — partial rate target <50% in first hour, <30% by tomorrow.
+- **First post-restart scan completed Apr 28 23:33:02 UTC: `pages=802 cursor_rows=632 active_added=712 total=1344 PARTIAL` — clean 300s deadline hit at 0.37 s/page steady state.**
 
-**If 300s still produces 100% partial after this restart**, that's Outcome D (Kalshi has more open markets than we can enumerate inside any reasonable deadline). The right move at that point is a per-series-paginated rewrite (Session 28-2 territory) or accepting Kalshi-induced partials as the new normal — NOT yet another bump of this constant. The docstring captures this guardrail so future-Claude doesn't fall into the deadline-bump death spiral.
+**Verification finding — Outcome D in effect.** Cursor reach scaled exactly with deadline as the linear model predicts (90→180→300s = 221→423→**802** pages). Cursor_rows (the unique non-MVE markets surfaced by the global walk) grew 87→477→**632**, materially reducing the cohort-report bias. **But the binary partial flag still latches**, because no deadline value within the bot's scan-cycle budget exhausts Kalshi's open-markets cursor under current load.
+
+This matches the guardrail comment shipped in this followup: "If 300s ALSO produces 100% partial, that's Outcome D and the right move is a per-series-paginated rewrite — NOT yet another bump of this constant." Confirmed. **Do not bump again.**
+
+**What this means for cohort_report (May 2-blocking concern from Session 28).** The bias is materially reduced even though the partial flag is still True: 802 pages vs the original 221 means the cursor enumerated ~3.6× as many markets before bailing. The `scanned_by` attribution from this followup forward is far more representative of "what's in Kalshi" than pre-Session-28 data. Whether that's "complete enough" for the May 2 retuning analysis is a judgment call to make against the actual cohort_report output — not against the binary partial flag.
+
+---
+
+#### Watch list — Session 28-2 candidate (per-series-paginated universe rewrite)
+
+The deadline-bump approach has hit its ceiling. To restore `partial=False` at scale, the cursor walk would need to NOT be a single global cursor — instead paginate per `series_ticker` (or per a curated prefix list) and merge. This is a snapshot_universe architecture change, deferred from Session 28's spec ("out of scope: refactoring snapshot_universe architecture"). Open Session 28-2 if/when:
+- The cohort_report's May 2 output looks materially biased despite the 802-page reach (run it; check the universe coverage section)
+- Or the Session 15.5 partial-rate WARN fires another order-of-magnitude regression
+- Or Kalshi grows further and 300s no longer reaches even 800 pages
+
+Until one of those triggers, accept that partial=True is the new normal under current Kalshi load — re-frame the bot-health digest section to surface cursor_rows / pages as the better quality signal rather than binary partial counters. (Filed as a doc-only item; no code change yet.)
 
 ---
 
