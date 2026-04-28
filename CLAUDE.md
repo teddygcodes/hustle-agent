@@ -1616,6 +1616,54 @@ No human action needed before May 18 — the routine fires automatically and com
 
 ---
 
+### ☐ Session 28 — partial_snapshots tuning (Apr 28+, planned, May 2-blocking)
+
+**Problem (surfaced by Apr 28 weekly_digest from Session 24).** `bot_state.json:partial_snapshots_today: 13/13 (100%)`. Apr 25 baseline was 18%. **5x degradation in 3 days.** Session 15.5 set the WARN threshold at 10% — we're now an order of magnitude over.
+
+This is materially important because: `tools/cohort_report.py` consumes `bot/state/universe.jsonl`'s `scanned_by` attribution to surface mis-tuned gates. **If 100% of universe snapshots are partial, the attribution data is biased toward whatever markets the cursor managed to enumerate before hitting `_SNAPSHOT_DEADLINE_SEC=90`** — usually early-alphabetical or whatever ordering Kalshi returns. Cohort findings on May 2 would reflect "what we managed to scan" not "what we'd have scanned with a complete enumeration." That asymmetric bias is exactly the kind of silent corruption Session 15.5's metering was supposed to surface — and now we have the warning, we should act on it before May 2.
+
+**Two candidate root causes (investigation must distinguish):**
+1. **Kalshi rate-limiting harder than before.** Their API may be applying tighter throttling. Pages timeout / hit 429 more often, cursor walk hits the 90s deadline before completion. Outside our control beyond adapting deadlines / backoff.
+2. **The 90s `_SNAPSHOT_DEADLINE_SEC` is too tight for current Kalshi load.** This was tuned at Session 12 (Apr 25) when MVE parlay expansions were ~95% of cursor pages. If Kalshi added new market families since (e.g., new sports series, more political markets), the cursor walk legitimately needs more time.
+
+**Plan.**
+- Read `bot/universe.py:snapshot_universe` to refresh on the two-pass design (cursor pagination + per-active-series shadow).
+- Run a one-shot dry-run test: `python3 -c "from bot import universe; import time; t=time.time(); universe.snapshot_universe('TEST_DRY_RUN_2026-04-28'); universe.flush_universe('TEST_DRY_RUN_2026-04-28'); print(f'completed in {time.time()-t:.1f}s')"`. Note: this writes to production universe.jsonl with scan_id=`TEST_DRY_RUN_*`, so prefix is critical for later filtering.
+- Sample the actual cursor walk: how many pages enumerated? What % are MVE? Was the deadline hit?
+- Cross-check: tail bot/logs/bot.log for "snapshot_universe deadline hit" messages over last 7 days. Trend graph (rough: count per day).
+- Compare: was today (Apr 28) special (e.g., Kalshi having issues) or systematic?
+- Decide based on evidence:
+  - **If deadline is the root cause:** bump `_SNAPSHOT_DEADLINE_SEC` from 90 to 120 or 180 (whichever is needed). Document the new value with the evidence in the constant's comment.
+  - **If Kalshi rate-limiting is the cause:** add backoff + retry on 429 in the cursor walk. Accept that some snapshots may genuinely be partial during high-throttle periods.
+  - **If the cursor walk has a bug (less likely):** fix the bug.
+
+**Out of scope.**
+- Refactoring snapshot_universe architecture beyond the deadline tweak / backoff add.
+- Solving Kalshi API capacity constraints (not our system).
+- Changing the partial-rate WARN threshold (10% is fine; we want the WARN to fire).
+- Changing the MVE filter (separate question).
+
+**Verify.**
+1. Within 24h post-fix: `bot_state.json:partial_snapshots_today / total_snapshots_today` ratio drops from 100% to <30%.
+2. Universe row count per snapshot stays in 1500-3000 range (didn't sacrifice coverage by speeding things up artificially).
+3. No new errors in `bot/logs/bot.log`.
+4. The May 12 spot-check routine (Session 24-followup) confirms the fix held.
+
+**Bot restart required (touches `bot/universe.py`).**
+
+---
+
+### Watch list (no session yet, just track)
+
+**tracker_cadence drift — Apr 28 surfaced 32,156ms median vs Session 17's 32s target.** 156ms over budget is trivial in absolute terms but it's drift in the wrong direction (Session 17 shipped at ~31,300ms post-restart). Three candidate causes (likely interrelated):
+- More open positions per `update_positions` call iteration
+- Kalshi API latency growing per call (possibly related to Session 28's rate-limiting question)
+- Event-loop contention with concurrent `_position_check_loop` / `_heartbeat_loop` / `_main_loop` / `_live_scan_loop`
+
+**Decision: monitor only, no session yet.** The May 12 spot-check routine will re-measure and surface if the drift continues (33s next week, 35s the week after). If it crosses 35s median or 60s p95, open a session. If it self-resolves or stays within 32-33s, leave it alone.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
