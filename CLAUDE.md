@@ -1733,6 +1733,57 @@ This is materially important because: `tools/cohort_report.py` consumes `bot/sta
 
 ---
 
+### ☐ Session 29 — Live journal write regression (Apr 28+, planned, May 2-blocking)
+
+**Problem (surfaced manually Apr 28 ~7:48 PM ET).** `bot/state/live_journal.json` mtime is `Apr 27 16:14:01 ET`. Most recent event timestamp inside the file is `2026-04-27T20:14:01 UTC`. Current time is `~Apr 28 23:48 UTC`. **Gap: 27.5+ hours of zero events written.** All 4 event types (`scan_found`, `bet`, `exit`, `session_end`) stopped at the same timestamp — this is a write-path failure, not a Session-21-specific regression.
+
+**What's still working (key separation):**
+- Live scanner IS scanning. `LIVE_SCAN_TELEMETRY` log line fires every 2 minutes (`seen=83 capacity=2 already_watching=3`).
+- Active watchers are running (3 concurrent per the telemetry).
+- Bets, exits, position state are all updating in `positions.json`, `paper_trades.json`, `clv.json`.
+- Session 23 live_momentum CFs accumulated 235 records (10×/day rate) in the failure window — CF emission path is independent of journal writes.
+
+**What's broken:**
+- `journal_analysis.py` (Session 18) is reading stale data
+- Tomorrow's morning routine's journal section will be ~30+ hours stale
+- `weekly_digest.py`'s journal section is broken
+- watch-but-no-enter funnel for May 2 retuning analysis is missing the most recent ~30 hours
+- Session 21's per-skip-reason capture is silently failing post-Apr-27-20:14
+
+**Hypothesis (not yet verified).** Most likely candidate: Session 23 (Apr 27 ~02:11 ET, commit 7febc46) modified `bot/live_watcher.py` adding 4 new `_maybe_emit_live_momentum_cf` sites. The Session 21 `_journal_record_scan` helper sits adjacent to those sites at the per-match decision points. Possible mechanisms:
+1. A try/except in the Session 23 edit accidentally swallows the journal write
+2. A control-flow change (return/continue) bypasses the journal write site
+3. The journal write site ITSELF threw an exception and `_journal_record_scan` (or its caller) was rewritten with too-broad exception handling
+4. A different Session 23 edit (less likely): import ordering, module-state collision
+
+The 20:14 UTC stop time is suspiciously specific — that's when something either deployed or when a runtime condition changed. Bot was restarted multiple times since (Session 23 deploy, Session 28 deploy at 19:09 ET Apr 28, Session 28-followup deploy at 19:30+ ET Apr 28). The stop time PREDATES all three later restarts.
+
+Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 UTC? Maybe there was a startup-only writes-then-stops pattern. Or Apr 27 16:14 ET = Apr 27 20:14 UTC matches exactly — that's a single timestamp moment. Investigation will tell.
+
+**Plan.**
+1. **Phase 1 — investigate.** Read `bot/live_watcher.py:scan_live_matches` and the `_journal_record_scan` helper. Identify the exact write call chain. Trace it for any recent edits in commits 7febc46 (Session 23) and onwards. Use `git log -p bot/live_watcher.py --since=2026-04-27` to see all edits in window.
+2. **Phase 2 — confirm root cause.** Either reproduce locally or read the code carefully enough to identify which edit broke the path. Don't ship a fix without identifying the exact line/commit.
+3. **Phase 3 — targeted fix.** One-line or small-block restoration of the journal write path. Add a regression test in `tests/test_live_watcher.py` that asserts `_journal_record_scan` actually writes (mock the file open, drive a scan, assert the mock was called).
+4. **Phase 4 — verify post-restart.** Within 10 min of bot restart, `tail bot/state/live_journal.json` shows new events. All 4 event types resume.
+
+**Out of scope.**
+- Backfilling the 27.5h gap (impossible — data wasn't captured).
+- Refactoring `live_watcher.py` beyond the targeted fix.
+- Changing the journal schema.
+- Acting on the missing journal data (Session 18 / 23 / 28 / 25 etc. — all unaffected by the historical gap once writes resume).
+
+**Verify (acceptance criteria).**
+1. Root cause identified by line/commit reference.
+2. Fix shipped + bot restarted.
+3. Within 10-15 min post-restart: `stat bot/state/live_journal.json` shows current mtime; tail shows new events with current timestamps.
+4. All 4 event types resume (verify with `python3 -c "..."` Counter on events with timestamp > restart_ts).
+5. Regression test added that would have failed before the fix.
+6. Mark Session 29 ☑ in CLAUDE.md.
+
+**Severity / urgency.** Tier 1, May 2-blocking. Bot's actual TRADING is unaffected; observability for the live_momentum-side analysis is degraded. Ship before May 2 so the retuning analysis has clean recent journal data. ~30-60 minute investigation + small fix + restart.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
