@@ -1731,6 +1731,8 @@ This is materially important because: `tools/cohort_report.py` consumes `bot/sta
 
 **Decision: monitor only, no session yet.** The May 12 spot-check routine will re-measure and surface if the drift continues (33s next week, 35s the week after). If it crosses 35s median or 60s p95, open a session. If it self-resolves or stays within 32-33s, leave it alone.
 
+**Watcher restart loses `bets_placed` instance state — Session 29-followup finding (Apr 28).** When the bot restarts mid-position, the new watcher's `bets_placed` (instance attribute initialized to `[]` at [bot/live_watcher.py:439](bot/live_watcher.py:439)) doesn't reload existing positions from `positions.json`. When the leg eventually settles, both the settlement-detection path at [bot/live_watcher.py:994](bot/live_watcher.py:994) and `_check_exit` at [bot/live_watcher.py:2301](bot/live_watcher.py:2301) iterate over an empty list and skip the leg — so no `exit` event is journaled. `bot/tracker.py` and `bot/executor.py` correctly mark `status=resolved` in `positions.json`, but `live_journal.json` loses the exit. Approximate leak rate: ≤1 exit event per (restart-mid-position) event. Concrete example: PHIBOS leg opened at `2026-04-29T00:31:51 UTC`, bot restart at `00:37:40 UTC`, settled at `01:44:16 UTC` — `session_end` journaled correctly at `01:45:42 UTC` but no `exit` event was journaled. Fix would be ~10 lines in the watcher's `start()` to seed `bets_placed` from `positions.json` filtered by ticker. Decision: monitor only — would only open a session if the leak crosses ~5 events/week (track via `journal_analysis.py` exit-vs-position-resolution mismatch metric, if surfaced later).
+
 ---
 
 ### ☑ Session 29 — Live journal write regression (Apr 28, shipped)
@@ -1809,7 +1811,23 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
-### ☐ Session 29-followup — bet/exit/session_end journal write regression (Apr 28+, planned, May 2-blocking)
+### ☑ Session 29-followup — bet/exit/session_end journal write regression (Apr 28, shipped: investigation, no fix needed)
+
+**Outcome.** Investigation found no write-path regression. Session 29's `_journal_append` fix is healthy for all 4 event types. Direct evidence: a `session_end` event for `KXNBAGAME-26APR28PHIBOS-BOS` fired at `2026-04-29T01:45:42.786129+00:00` mid-investigation, when the PHIBOS NBA game settled and the watcher's `_format_session_summary` ran. All four event types (`scan_found`, `bet`, `exit`, `session_end`) share `_journal_append` directly with no caller-level try/except wrapping; no separate writer exists; `bot/executor.py` does not touch `live_journal.json`. The reported "regression" was a measurement artifact of (a) sparse live_momentum events in a 1-hour observation window plus (b) a separate, pre-existing watcher-restart-state-loss issue (see watch list below) that strands `exit` events when the bot restarts mid-position.
+
+**No code change to `bot/live_watcher.py`.** Per spec discipline ("NO refactoring beyond restoring the journal write path"), nothing was refactored or "fixed" because there was no broken path to fix.
+
+**Verification gap closed (the actual deliverable).** Session 29's only regression test exercised `scan_found` and `exit` through `_journal_append` while reasoning about the corruption-recovery branch. The wrong hypothesis that bet/exit/session_end were on a separate broken writer was allowed to form because no test pinned the per-event-type contract. Four explicit regression tests in `tests/test_live_watcher.py` now exercise `_journal_append` with the production payload shape for each event type:
+- `test_journal_append_writes_scan_found_event` — exercises `_journal_record_scan` (live_watcher.py:97-137)
+- `test_journal_append_writes_bet_event` — exercises the live_watcher.py:1804-1819 shape, plus an in-test follow-up `exit` write to verify `_journal_append` is healthy across consecutive calls
+- `test_journal_append_writes_exit_event` — exercises live_watcher.py:2545-2560 (also covers the live_watcher.py:1010 settlement-detection exit path which uses the identical call shape)
+- `test_journal_append_writes_session_end_event` — exercises live_watcher.py:2748-2760, the path PHIBOS just exercised in production
+
+**Restart not needed.** Bot PID 19048 is on Session 29's fixed code; further live_momentum events continue to journal correctly as they fire.
+
+**Pre-investigation block (kept below for paper trail of the wrong hypothesis):**
+
+### Original write-up — bet/exit/session_end journal write regression (Apr 28+, planned, May 2-blocking)
 
 **Problem (surfaced by manual data-accumulation audit Apr 28 ~9:00 PM ET).** Session 29 fixed `_journal_append`'s JSONDecodeError-forever bug and restored `scan_found` writes. The verification confirmed scan_found resumed (88 events in 2 seconds post-restart) and ASSUMED all 4 event types resumed because they share `_journal_append`. **The assumption was wrong.** Direct audit shows:
 

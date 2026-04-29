@@ -467,6 +467,191 @@ def test_journal_append_recovers_from_trailing_bracket_corruption(tmp_path, monk
 
 
 # ---------------------------------------------------------------------------
+# Session 29-followup: per-event-type _journal_append regression tests.
+#
+# Verification gap closed: Session 29's only regression test exercised
+# scan_found and exit through _journal_append. The investigation that lived
+# in CLAUDE.md's Session 29-followup block assumed (incorrectly) that
+# bet/exit/session_end had a separate broken writer; the real story was that
+# all four event types share _journal_append and the path was healthy after
+# Session 29. These four tests pin that contract: every event type the live
+# watcher emits goes through _journal_append with the production payload
+# shape, so any future write-path regression (or accidental introduction of
+# a sibling writer) is caught here, not after a 28-hour observability gap.
+# ---------------------------------------------------------------------------
+
+
+def test_journal_append_writes_scan_found_event(tmp_path, monkeypatch):
+    """scan_found goes through _journal_record_scan (live_watcher.py:97), which
+    builds the entry and calls _journal_append (live_watcher.py:137)."""
+    import json
+    from bot import live_watcher
+
+    journal = tmp_path / "live_journal.json"
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", journal)
+
+    live_watcher._journal_record_scan(
+        ticker="KXNBAGAME-26APR28PHIBOS-BOS",
+        sport="nba",
+        skip_reason=None,
+        match="Philadelphia at Boston",
+        price=87,
+        volume=12345,
+        event_ticker="KXNBAGAME-26APR28PHIBOS",
+    )
+
+    data = json.loads(journal.read_text())
+    assert isinstance(data, list)
+    assert len(data) == 1
+    e = data[0]
+    assert e["event"] == "scan_found"
+    assert e["ticker"] == "KXNBAGAME-26APR28PHIBOS-BOS"
+    assert e["sport"] == "nba"
+    assert e["skip_reason"] is None
+    assert e["price"] == 87
+    assert e["volume"] == 12345
+    assert "timestamp" in e
+
+
+def test_journal_append_writes_bet_event(tmp_path, monkeypatch):
+    """bet shape from live_watcher.py:1804-1819 — emitted by _auto_bet_momentum
+    after a successful execute_trade."""
+    import json
+    from bot import live_watcher
+
+    journal = tmp_path / "live_journal.json"
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", journal)
+
+    live_watcher._journal_append({
+        "event": "bet",
+        "match": "Philadelphia at Boston",
+        "ticker": "KXNBAGAME-26APR28PHIBOS-BOS",
+        "side": "yes",
+        "contracts": 16,
+        "price_cents": 87,
+        "reason": "leader at 87c, dipped 4c from recent 91c",
+        "mode": "dip",
+        "entry_number": 1,
+        "size_multiplier": 1.0,
+        "sport": "nba",
+        "filled": 16,
+        "game_state": {"score_diff": 11, "period": "Q3"},
+        "instincts": [],
+    })
+
+    data = json.loads(journal.read_text())
+    assert len(data) == 1
+    e = data[0]
+    assert e["event"] == "bet"
+    assert e["ticker"] == "KXNBAGAME-26APR28PHIBOS-BOS"
+    assert e["side"] == "yes"
+    assert e["contracts"] == 16
+    assert e["price_cents"] == 87
+    assert e["mode"] == "dip"
+    assert "timestamp" in e
+
+    # Subsequent write of a different event type must append cleanly to the
+    # same file — defends against a future regression where _journal_append
+    # only works on first call.
+    live_watcher._journal_append({
+        "event": "exit",
+        "ticker": "KXNBAGAME-26APR28PHIBOS-BOS",
+        "side": "yes",
+        "reason": "TAKE PROFIT",
+        "pnl": 1.92,
+    })
+    data2 = json.loads(journal.read_text())
+    assert len(data2) == 2
+    assert data2[1]["event"] == "exit"
+
+
+def test_journal_append_writes_exit_event(tmp_path, monkeypatch):
+    """exit shape from live_watcher.py:2545-2560 — emitted by _check_exit's
+    smart-exit logic. Also covers the live_watcher.py:1010 settlement-detection
+    exit, which uses the same _journal_append call shape."""
+    import json
+    from bot import live_watcher
+
+    journal = tmp_path / "live_journal.json"
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", journal)
+
+    live_watcher._journal_append({
+        "event": "exit",
+        "match": "Philadelphia at Boston",
+        "ticker": "KXNBAGAME-26APR28PHIBOS-BOS",
+        "side": "yes",
+        "sport": "nba",
+        "reason": "TRAILING STOP: peaked at 92c, dropped 6c",
+        "pnl": 0.80,
+        "entry_price": 87,
+        "exit_value": 86,
+        "peak_value": 92,
+        "hold_seconds": 480,
+        "mode": "dip",
+        "game_state_at_entry": {"score_diff": 11, "period": "Q3"},
+        "game_state_at_exit": {"score_diff": 5, "period": "Q4"},
+    })
+
+    data = json.loads(journal.read_text())
+    assert len(data) == 1
+    e = data[0]
+    assert e["event"] == "exit"
+    assert e["ticker"] == "KXNBAGAME-26APR28PHIBOS-BOS"
+    assert e["reason"].startswith("TRAILING STOP")
+    assert e["pnl"] == 0.80
+    assert e["entry_price"] == 87
+    assert e["peak_value"] == 92
+    assert e["hold_seconds"] == 480
+    assert "timestamp" in e
+
+
+def test_journal_append_writes_session_end_event(tmp_path, monkeypatch):
+    """session_end shape from live_watcher.py:2748-2760 — emitted by
+    _format_session_summary when the watcher's start() loop exits.
+
+    This is the event type whose firing in production at
+    2026-04-29T01:45:42 UTC (PHIBOS settlement) provided the direct evidence
+    that Session 29's _journal_append fix was healthy for all event types."""
+    import json
+    from bot import live_watcher
+
+    journal = tmp_path / "live_journal.json"
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", journal)
+
+    live_watcher._journal_append({
+        "event": "session_end",
+        "match": "Philadelphia at Boston",
+        "ticker": "KXNBAGAME-26APR28PHIBOS-BOS",
+        "mode": "momentum",
+        "duration_min": 73.0,
+        "ticks": 438,
+        "bets_placed": 1,
+        "exits": 1,
+        "total_pnl": -13.92,
+        "price_history": [91, 90, 87, 85, 72, 24, 1],
+        "tick_telem": {
+            "ticks": 438,
+            "no_leader": 50,
+            "dqs_fail": 12,
+            "execute_failed": {"ALREADY_HOLD_OPEN_POSITION_IN_KXNBAGAME-26APR28P": 14},
+        },
+    })
+
+    data = json.loads(journal.read_text())
+    assert len(data) == 1
+    e = data[0]
+    assert e["event"] == "session_end"
+    assert e["ticker"] == "KXNBAGAME-26APR28PHIBOS-BOS"
+    assert e["mode"] == "momentum"
+    assert e["duration_min"] == 73.0
+    assert e["bets_placed"] == 1
+    assert e["exits"] == 1
+    assert e["total_pnl"] == -13.92
+    assert e["tick_telem"]["ticks"] == 438
+    assert "timestamp" in e
+
+
+# ---------------------------------------------------------------------------
 # Session 21: scan_live_matches skip_reason instrumentation
 # ---------------------------------------------------------------------------
 
