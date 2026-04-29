@@ -1199,6 +1199,11 @@ class LiveGameWatcher:
         buy_dip = 0
         buy_dqs = 0.0
         dqs_breakdown = {}
+        # Session 33: observation-only DQS log capture. Distinct from buy_dqs
+        # (which is a 3-state sentinel: 0.0 default / 1.0 N/A scalp / real-DQS).
+        # dqs_for_log is set ONLY when compute_dip_quality() actually runs;
+        # stays None for non-evaluated ticks and variance-quality scalp paths.
+        dqs_for_log: float | None = None
 
         skip_dqs = sport_profile.get("skip_dqs", False)
 
@@ -1253,6 +1258,7 @@ class LiveGameWatcher:
                             sport=self.sport or "",
                             espn_data=espn_data or None,
                         )
+                        dqs_for_log = dqs  # Session 33: log real DQS (pass or reject)
                         if dqs >= MOMENTUM_DQS_THRESHOLD:
                             buy_ticker = self.ticker
                             buy_market = market
@@ -1352,6 +1358,7 @@ class LiveGameWatcher:
                             sport=self.sport or "",
                             espn_data=espn_data or None,
                         )
+                        dqs_for_log = dqs  # Session 33: log real DQS (pass or reject)
                         if dqs >= MOMENTUM_DQS_THRESHOLD:
                             buy_ticker = self._opponent_ticker
                             buy_market = opp_market
@@ -1601,6 +1608,10 @@ class LiveGameWatcher:
             "instinct_mod": tick_instincts.situational_modifier if tick_instincts.flags else None,
             "avoid_entry": tick_instincts.should_avoid_entry,
             "volatility": tick_instincts.volatility_regime,
+            # Session 33: Dip Quality Score from compute_dip_quality(); null
+            # when not evaluated this tick (no dip eligible, scalp-mode sport,
+            # or entry blocked upstream).
+            "dqs": round(dqs_for_log, 3) if dqs_for_log is not None else None,
             # Conviction check
             "conviction_eligible": bool(
                 gc and len(gc._snapshots) >= 12

@@ -652,6 +652,275 @@ def test_journal_append_writes_session_end_event(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 33: persist DQS to live_ticks.jsonl rows
+# ---------------------------------------------------------------------------
+# These tests drive _tick_momentum end-to-end with all I/O mocked. The harness
+# uses LiveGameWatcher.__new__() (bypass init) + monkeypatch on the module-level
+# _log_tick to capture the tick payload dict.
+#
+# Goal: verify that the new "dqs" field appears in the captured tick row with
+# the correct value across four scenarios:
+#   1. Computed real DQS  → captured tick row has dqs=<float in [0,1]>
+#   2. No entry evaluation → captured tick row has dqs=None
+#   3. Variance-quality scalp path (tennis/UFC) → captured tick row has dqs=None
+#   4. Behavior preservation: _auto_bet_momentum receives the unmodified buy_dqs
+
+
+def _build_momentum_watcher(*, sport, ticker, price_history, yes_ask,
+                             entry_count=0, cooldown=0, bets_placed=None,
+                             status_msg_id=None,
+                             opp_yes_ask=30, opp_history=None):
+    """Bypass-init a LiveGameWatcher with the minimum state for _tick_momentum.
+
+    All instance methods that perform I/O are stubbed; the test wires its own
+    mocks via the returned watcher reference.
+
+    Note on opponent: _tick_momentum's "match settled" check treats
+    opp_yes_ask <= 3 as settled. Tests need a non-settled opponent
+    (default 30¢) to reach the entry-evaluation block.
+    """
+    from collections import Counter, deque
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.live_watcher import LiveGameWatcher
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = ticker
+    w._opponent_ticker = ticker.replace("LAL", "OPP") + "-OPP"
+    w.sport = sport
+    w._match_title = "test match"
+    w.query = "test"
+    w._price_history = deque(price_history)
+    w._opp_price_history = deque(opp_history or [opp_yes_ask, opp_yes_ask, opp_yes_ask])
+    w._game_ctx = None
+    w._last_espn_data = None
+    w._espn_tick_counter = 0
+    w._gone_ticks = 0
+    w._cooldown_remaining = cooldown
+    w._entry_count = entry_count
+    w.bets_placed = bets_placed if bets_placed is not None else []
+    w.exits = []
+    w._tick_telem = Counter()
+    w._started_at = time.time() - 60
+    w._last_decision = (None, None)
+    w._peak_values = {}
+    w._trailing_active = {}
+    w.status_msg_id = status_msg_id
+    w.notifier = MagicMock()
+    w.notifier.edit_message_by_id = AsyncMock()
+    w.balance = 500.0
+    w.active = True
+    w.mode = "momentum"
+
+    # I/O methods — stubs so we don't hit Kalshi/ESPN
+    market = {
+        "ticker": ticker,
+        "yes_ask": yes_ask,
+        "yes_bid": yes_ask - 1,
+        "close_ts": "2026-04-30T23:00:00Z",
+    }
+    opp_market = {
+        "ticker": w._opponent_ticker,
+        "yes_ask": opp_yes_ask,
+        "yes_bid": max(0, opp_yes_ask - 1),
+        "close_ts": "2026-04-30T23:00:00Z",
+    }
+    w._fetch_kalshi_market = MagicMock(return_value=market)
+    w._fetch_opponent_market = MagicMock(return_value=opp_market)
+    w._fetch_espn_score = MagicMock(return_value=None)
+    w._check_exit = AsyncMock()  # bets_placed empty → never invoked anyway
+    w._auto_bet_momentum = AsyncMock()
+    w._log_decision_dampened = MagicMock()  # decoupled — Session-7 dampener tests cover its own behavior
+
+    return w
+
+
+def test_tick_record_includes_dqs_field_when_computed(monkeypatch):
+    """Session 33: when compute_dip_quality runs, its score lands on the tick row.
+
+    Drive a primary-side dip-eligible tick with mocked compute_dip_quality
+    returning 0.42. Assert _log_tick captured a payload with dqs=0.42, even
+    though 0.42 is below MOMENTUM_DQS_THRESHOLD (so no entry fires).
+    """
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+
+    # Build watcher: NBA profile (no skip_dqs), price history shows a 5¢ dip
+    # (recent_high=70, current=65 → dip=5, in [4,8] window).
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26APR30TEST-LAL",
+        price_history=[70, 70, 69, 70, 70],
+        yes_ask=65,
+    )
+
+    captured: list[dict] = []
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: captured.append(dict(d)))
+
+    # DQS = 0.42 → BELOW MOMENTUM_DQS_THRESHOLD (0.40) PASSES; bump to 0.32 to
+    # ensure NO entry fires while DQS still gets logged.
+    monkeypatch.setattr(
+        game_context, "compute_dip_quality",
+        lambda **kwargs: (0.32, {"score": 0.32, "stage": 0.5, "total": 0.32}),
+    )
+
+    asyncio.run(w._tick_momentum())
+
+    assert len(captured) == 1, f"expected exactly one tick row, got {len(captured)}"
+    rec = captured[0]
+    assert "dqs" in rec, "tick row missing dqs key"
+    assert rec["dqs"] == 0.32, f"expected dqs=0.32, got {rec['dqs']!r}"
+    assert isinstance(rec["dqs"], float)
+    assert 0.0 <= rec["dqs"] <= 1.0
+    # Confirm no entry fired (DQS below threshold)
+    w._auto_bet_momentum.assert_not_called()
+
+
+def test_dqs_null_when_not_computed(monkeypatch):
+    """Session 33: when compute_dip_quality is not called, tick row has dqs=None.
+
+    Drive a tick where yes_ask is at the recent_high (no dip), so the
+    dip-eligibility check fails and compute_dip_quality is never invoked.
+    Assert dqs is explicitly None — NOT 0, NOT missing key.
+    """
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+
+    # No dip: yes_ask=70 == recent_high=70 → dip_cents=0 < min_dip
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26APR30TEST-NO-DIP",
+        price_history=[70, 70, 70, 70, 70],
+        yes_ask=70,
+    )
+
+    captured: list[dict] = []
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: captured.append(dict(d)))
+
+    # Sentinel: if compute_dip_quality is called, the test should fail loudly
+    # rather than accidentally setting dqs_for_log.
+    def _should_not_be_called(**kwargs):
+        raise AssertionError("compute_dip_quality should not be called when no dip eligible")
+    monkeypatch.setattr(game_context, "compute_dip_quality", _should_not_be_called)
+
+    asyncio.run(w._tick_momentum())
+
+    assert len(captured) == 1
+    rec = captured[0]
+    assert "dqs" in rec, "tick row missing dqs key — must be present (with null value), not absent"
+    assert rec["dqs"] is None, f"expected dqs=None, got {rec['dqs']!r}"
+
+
+def test_dqs_null_in_variance_quality_scalp_path(monkeypatch):
+    """Session 33: tennis/UFC scalp path sets buy_dqs=1.0 (N/A sentinel) but
+    dqs_for_log stays None — the tick row reflects 'DQS was not measured'.
+
+    Drive an atp tick with skip_dqs sport profile, dip eligible, and the
+    variance_quality_gate passing. Assert tick row dqs is None.
+    """
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+    from bot.config import SPORT_PROFILES
+
+    # Tennis profile: skip_dqs=True, variance_quality_gate=True (per config.py)
+    # Confirm the profile we're using: pick one with skip_dqs=True.
+    sport_with_skip = None
+    for sport, profile in SPORT_PROFILES.items():
+        if profile.get("skip_dqs"):
+            sport_with_skip = sport
+            break
+    assert sport_with_skip, "no skip_dqs sport profile found in SPORT_PROFILES"
+
+    profile = SPORT_PROFILES[sport_with_skip]
+    min_dip_for_sport = profile.get("min_dip", 4)
+
+    # Build price history with a dip large enough to be eligible. atp profile
+    # has min_dip=5, so use a 6c dip (recent_high=70, current=64).
+    dip = max(min_dip_for_sport + 1, 6)
+    history = [70] * 12  # plenty of ticks for variance gate
+    w = _build_momentum_watcher(
+        sport=sport_with_skip,
+        ticker=f"KX{sport_with_skip.upper()}-26APR30TEST",
+        price_history=history,
+        yes_ask=70 - dip,
+    )
+
+    captured: list[dict] = []
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: captured.append(dict(d)))
+
+    # Sentinel: compute_dip_quality must NOT be called in scalp path
+    def _should_not_be_called(**kwargs):
+        raise AssertionError("compute_dip_quality should not be called in skip_dqs scalp path")
+    monkeypatch.setattr(game_context, "compute_dip_quality", _should_not_be_called)
+
+    # MOMENTUM_DISABLED_SPORTS may include the chosen sport (atp/atp_challenger
+    # /wta/wta_challenger were disabled Apr 20). Force can_enter through by
+    # patching the disabled-sports set to empty for this test.
+    monkeypatch.setattr(live_watcher, "MOMENTUM_DISABLED_SPORTS", set())
+
+    asyncio.run(w._tick_momentum())
+
+    assert len(captured) == 1
+    rec = captured[0]
+    assert "dqs" in rec
+    assert rec["dqs"] is None, (
+        f"expected dqs=None in scalp path (buy_dqs=1.0 is internal sentinel, "
+        f"NOT the logged value), got {rec['dqs']!r}"
+    )
+
+
+def test_dqs_does_not_change_entry_decision(monkeypatch):
+    """Session 33 behavior preservation: the new dqs_for_log capture does NOT
+    alter buy_dqs / dqs_breakdown / the value passed to _auto_bet_momentum.
+
+    Drive a tick where compute_dip_quality returns 0.85 (well above
+    MOMENTUM_DQS_THRESHOLD=0.40). Assert _auto_bet_momentum is called with
+    dqs_score=0.85 — i.e., the production-path buy_dqs is set to the real
+    DQS, byte-identical to pre-Session-33 behavior. The dqs_for_log capture
+    is a side-channel that does NOT bleed into entry-decision state.
+    """
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+
+    # Build NBA tick with eligible 5¢ dip
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26APR30TEST-CONVICTION",
+        price_history=[70, 70, 69, 70, 70, 70],
+        yes_ask=65,
+    )
+
+    captured: list[dict] = []
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: captured.append(dict(d)))
+
+    # DQS WELL above threshold (0.40) → entry should fire
+    monkeypatch.setattr(
+        game_context, "compute_dip_quality",
+        lambda **kwargs: (0.85, {"score": 1.0, "total": 0.85, "marker": "real-breakdown"}),
+    )
+
+    asyncio.run(w._tick_momentum())
+
+    # The non-negotiable assertion: _auto_bet_momentum got the REAL DQS as
+    # dqs_score, not 0.0 (default), not 1.0 (scalp sentinel), not None.
+    w._auto_bet_momentum.assert_called_once()
+    call_kwargs = w._auto_bet_momentum.call_args.kwargs
+    assert call_kwargs.get("dqs_score") == 0.85, (
+        f"dqs_score passed to _auto_bet_momentum should be the real DQS (0.85); "
+        f"got {call_kwargs.get('dqs_score')!r}. This means the Session 33 change "
+        f"contaminated buy_dqs — production-behavior preservation broken."
+    )
+
+    # And the tick row carries the same value
+    assert len(captured) == 1
+    assert captured[0]["dqs"] == 0.85
+
+
+# ---------------------------------------------------------------------------
 # Session 21: scan_live_matches skip_reason instrumentation
 # ---------------------------------------------------------------------------
 
