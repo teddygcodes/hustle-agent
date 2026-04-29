@@ -483,6 +483,193 @@ class TestLeakageProperty:
                 )
 
 
+class TestCfWithoutTicks:
+    """Session 30-followup-2: CFs lacking tick context still emit a row.
+
+    Live_momentum CFs come from match-level pre-watcher gates (no_leader,
+    low_volume, no_vol_growth_*), so live_ticks.jsonl has nothing for the
+    ticker. Pre-fix the dataset dropped these at find_decision_tick is None.
+    Post-fix they appear with null decision-time features and populated
+    identity / regime / outcome columns.
+    """
+
+    def _cf(self, ticker: str, *, status: str, ts: datetime, gate: str = "no_leader",
+            entry: int = 70, side: str = "yes", sport: str = "atp_challenger",
+            closing: int | None = None, market_result: str | None = None,
+            clv_cents: float | None = None, clv_relative: float | None = None,
+            trade_id: str | None = None) -> dict:
+        rec = {
+            "ticker": ticker,
+            "opp_type": "live_momentum",
+            "status": status,
+            "trade_id": trade_id or f"CF-LM-{ts.strftime('%Y%m%dT%H%M%SZ')}-{ticker}",
+            "scan_event_ts": _iso(ts),
+            "recorded_at": _iso(ts + timedelta(milliseconds=10)),
+            "entry_price_cents": entry,
+            "side": side,
+            "sport": sport,
+            "skipped_by_gate": gate,
+            "regime": {
+                "time_of_day": "afternoon",
+                "day_of_week": "Tue",
+                "sport_phase": None,
+                "event_horizon_hr": "<2h",
+            },
+        }
+        if status == "counterfactual_settled":
+            rec["closing_yes_price"] = closing
+            rec["market_result"] = market_result
+            rec["clv_cents"] = clv_cents
+            rec["clv_relative"] = clv_relative
+        return rec
+
+    def test_cf_with_no_ticks_and_no_journal_emits_row(self, tmp_paths):
+        """The 33-ticker case: CF exists in clv but no journal scan_found, no ticks.
+        Pre-fix: dataset has 0 rows. Post-fix: 1 row from the clv sweep.
+        """
+        ticker = "KXATPCHALLENGERMATCH-26APR27HSUNOG-HSU"
+        cf = self._cf(ticker, status="counterfactual_open", ts=T0, gate="no_leader",
+                      entry=72, side="yes", sport="atp_challenger")
+        _write_jsonl(tmp_paths["ticks"], [])
+        _write_journal(tmp_paths["journal"], [])
+        _write_clv(tmp_paths["clv"], [cf])
+
+        rows = _run_pipeline(tmp_paths)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["ticker"] == ticker
+        assert r["accept"] is False
+        assert r["skip_reason"] == "no_leader"
+        assert r["sport"] == "atp_challenger"
+        assert r["leader_side"] == "yes"
+        assert r["leader_price"] == 72
+        # Decision-time features all null
+        for f in ("wp", "wp_edge", "momentum", "lead_trend", "dip", "dqs",
+                  "period", "score_diff", "completion", "elapsed", "volatility",
+                  "leader", "opp_leader", "recent_high", "opp_recent_high",
+                  "spread_cents"):
+            assert r[f] is None, f"{f} should be None for CF without ticks"
+        # Forward returns / MFE / MAE all null (no subsequent ticks)
+        assert r["fwd_return_30s_cents"] is None
+        assert r["fwd_return_60s_cents"] is None
+        assert r["fwd_return_120s_cents"] is None
+        assert r["mfe_in_120s_window_cents"] is None
+        assert r["mae_in_120s_window_cents"] is None
+        # Outcome columns null because CF is still open
+        assert r["outcome_clv_cents"] is None
+        assert r["outcome_settlement"] is None
+
+    def test_cf_with_journal_but_no_ticks_emits_row(self, tmp_paths):
+        """The 103-ticker case: journal scan_found exists with the tunable
+        skip_reason, but no ticks for the ticker. Pre-fix: dropped by
+        find_decision_tick is None. Post-fix: emitted via the no-tick fallback.
+        """
+        ticker = "KXATPCHALLENGERMATCH-A"
+        cf = self._cf(ticker, status="counterfactual_settled", ts=T0,
+                      gate="low_volume", entry=68, side="yes",
+                      sport="atp_challenger",
+                      closing=100, market_result="yes", clv_cents=32, clv_relative=0.47)
+        _write_jsonl(tmp_paths["ticks"], [])
+        _write_journal(tmp_paths["journal"], [
+            _scan_found(ticker, T0, skip_reason="low_volume", sport="atp_challenger"),
+        ])
+        _write_clv(tmp_paths["clv"], [cf])
+
+        rows = _run_pipeline(tmp_paths)
+        # Exactly one row — both paths see the same CF; dedup on trade_id
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["ticker"] == ticker
+        assert r["accept"] is False
+        assert r["skip_reason"] == "low_volume"
+        assert r["leader_price"] == 68
+        # Outcome columns from settled CF
+        assert r["outcome_clv_cents"] == 32
+        assert r["outcome_target_yes_price_cents"] == 100.0
+        assert r["outcome_settlement"] == "yes_won"
+        # Decision-time features still null (no ticks)
+        assert r["wp"] is None
+        assert r["dip"] is None
+
+    def test_cf_with_journal_and_ticks_does_not_double_emit(self, tmp_paths):
+        """When the journal-driven path successfully emits a tick-rich row AND
+        the CF matches, the post-loop CF sweep must not emit a duplicate.
+        """
+        ticker = "KXNBAGAME-COVERED"
+        ticks = [
+            _tick(ticker, T0 - timedelta(seconds=2), price=70, bid=69),
+            _tick(ticker, T0 + timedelta(seconds=125), price=72, bid=71),
+        ]
+        cf = self._cf(ticker, status="counterfactual_settled", ts=T0,
+                      gate="low_volume", entry=70, side="yes", sport="nba",
+                      closing=80, market_result="yes", clv_cents=10, clv_relative=0.143)
+        _write_jsonl(tmp_paths["ticks"], ticks)
+        _write_journal(tmp_paths["journal"], [
+            _scan_found(ticker, T0, skip_reason="low_volume"),
+        ])
+        _write_clv(tmp_paths["clv"], [cf])
+
+        rows = _run_pipeline(tmp_paths)
+        assert len(rows) == 1
+        r = rows[0]
+        # Tick-rich row: decision-time features populated from the tick
+        assert r["wp"] == 0.6
+        assert r["leader_price"] == 70
+        # Outcome from CF
+        assert r["outcome_clv_cents"] == 10
+
+    def test_settled_cf_yields_target_yes_price_and_settlement_label(self, tmp_paths):
+        ticker = "KXWTACHALLENGERMATCH-A"
+        cf = self._cf(ticker, status="counterfactual_settled", ts=T0,
+                      gate="no_vol_growth_idle", entry=65, side="no",
+                      sport="wta_challenger",
+                      closing=0, market_result="no", clv_cents=35, clv_relative=0.538)
+        _write_jsonl(tmp_paths["ticks"], [])
+        _write_journal(tmp_paths["journal"], [])
+        _write_clv(tmp_paths["clv"], [cf])
+
+        rows = _run_pipeline(tmp_paths)
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["outcome_target_yes_price_cents"] == 0.0
+        assert r["outcome_settlement"] == "no_won"
+        assert r["outcome_clv_cents"] == 35
+        assert r["leader_side"] == "no"
+
+    def test_cf_only_sweep_excludes_real_settled_records(self, tmp_paths):
+        """The post-loop sweep must only emit `counterfactual_*` records, not
+        `settled` real trades (those are joined via the journal accept path).
+        """
+        ticker_real = "KXNBAGAME-REAL"
+        ticker_cf = "KXATPCHALLENGERMATCH-CF"
+        # Real trade record (status='settled') with no journal coverage
+        real = {
+            "ticker": ticker_real,
+            "opp_type": "live_momentum",
+            "status": "settled",
+            "trade_id": "T-REAL-1",
+            "scan_event_ts": _iso(T0),
+            "recorded_at": _iso(T0),
+            "entry_price_cents": 70,
+            "side": "yes",
+            "sport": "nba",
+            "closing_yes_price": 100,
+            "market_result": "yes",
+            "clv_cents": 30,
+            "clv_relative": 0.43,
+        }
+        cf = self._cf(ticker_cf, status="counterfactual_open", ts=T0, gate="no_leader",
+                      entry=70, side="yes", sport="atp_challenger")
+        _write_jsonl(tmp_paths["ticks"], [])
+        _write_journal(tmp_paths["journal"], [])
+        _write_clv(tmp_paths["clv"], [real, cf])
+
+        rows = _run_pipeline(tmp_paths)
+        # Only the CF row; the real settled record is not emitted (no journal bet event)
+        assert len(rows) == 1
+        assert rows[0]["ticker"] == ticker_cf
+
+
 class TestClvJoin:
     """Bonus: clv joins for accept and reject correctly."""
 

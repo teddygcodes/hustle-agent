@@ -1917,6 +1917,20 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 **May 2 retune candidates surfaced:** UFC entry gates, leader_price=80-90 band (cluster of negative-EV decisions), challenger-circuit favorability boost.
 
+**Re-authored 2026-04-29 after Session 30-followup-2 fixed the dataset 84%-missing-CFs bug.** Dataset went 89 rows → 413 rows (challenger 19 → 134). Most new rows are CF-only (no tick context), so feature-bucket metrics (`dip`, `wp_edge`, `dqs`) didn't gain n on `fwd_return_120s` averages. Identity-bucket metrics (`sport`, `leader_price`) DID gain n on the CLV outcome columns once settled CFs joined. Per-finding update:
+
+- **`sport=ufc`** — fwd_120s: CONFIRMED at n=5/10 (effective fwd-n unchanged; delta -4.33¢ unchanged). Settled CF CLV: -16.60¢ avg on n=5 settled CFs (+CLV 60%). Direction holds; n still thin. Action signal: still a real candidate for tightening UFC entry gates.
+- **`sport=atp_challenger`** — fwd_120s: CONFIRMED at n=6/66 (delta +1.53¢ unchanged on the same 6 fwd observations). Settled CF CLV: **+4.97¢ avg on n=29 settled CFs**, +CLV 76%. Outcome-side signal STRENGTHENS at the larger n. Pre-existing watch-list trigger from Session 30-followup (≥30 settled with ≥5 leader-loss) is closer but still not met (29 settled, 22/29 +CLV → only 7 leader-losses; need ≥5 leader-loss settlements that also pass survivorship checks).
+- **`sport=wta_challenger`** — fwd_120s: CONFIRMED at n=13/68 (delta +1.10¢ unchanged on the same 13 fwd observations). Settled CF CLV: **-5.54¢ avg on n=41 settled CFs**, +CLV 68%. **Direction FLIPS on the CLV-outcome lens** — fwd-return proxy and settled CLV disagree at the larger n. Confidence: medium. Likely no longer a "favorability" signal once outcome-actual is the metric. Holds the original Session 30-followup verdict that this should NOT be acted on yet.
+- **`dip=6-8`** — UNCHANGED at n=6 (CF-only rows have null dip; no new fwd-n). Finding stands at the same thin sample. No new signal post-fix.
+- **`leader_price=60-70`** — fwd_120s: CONFIRMED at n=12/125 (delta +1.03¢ unchanged on the same 12 fwd observations). +CLV rate at the full n=125 drops to 62.3% (was 100% at n=12 — selection-biased). Settlement-bucket reads worse at the larger n; "100% +CLV" was an artifact of the small fwd-eligible subset.
+- **NEW finding: `leader_price>=90`** (n=28 total, n=1 fwd_120s, +4.87¢): suspicious-but-thin on fwd_120s; settled CLV at the band is **-38.59¢ avg** (52.9% +CLV). Direction is consistent with "premium-priced leaders are dangerous" — opposite of the fwd-return signal. Treat the +4.87 fwd-delta as noise; the CLV-outcome lens dominates.
+- **NEW finding: `sport=ipl`** (n=35 total, n=3 fwd_120s, +1.87¢ vs baseline): too thin on fwd; settled CLV is **-23.13¢ avg** (40% +CLV) — also negative on outcome. Discount the fwd-return signal.
+
+**Net read for May 2 retuning.** Of Session 30's six original findings, only **atp_challenger** strengthens under the corrected dataset; **wta_challenger flips** on the CLV lens; **leader_price 60-70** gains n but loses its "100% +CLV" framing; the rest are unchanged at the same effective n. Two new findings (>=90 leader, IPL CLV) emerge negative. The general pattern: when the CLV-outcome metric (now well-populated by settled CFs) disagrees with the fwd_120s metric (still thin), trust the CLV metric — it's the closer-to-realized-P&L proxy.
+
+**Caveats kept from Session 30:** DQS bucket still empty; `dip` / `wp_edge` / `spread_cents` feature buckets still rely on tick-rich rows (n unchanged). Game-phase still mostly Unknown for tennis/UFC/IPL.
+
 **Problem.** Live_momentum is the only profitable strategy (+$12.30 / 39 trades / 62% WR). Sample size is thin and the existing tools (`cohort_report`, `journal_analysis`, `excursion_report`) are descriptive — they tell you what happened, not what's predictive. To find an edge faster, we need a unified per-tick decision dataset that joins live_ticks + live_journal + clv into one tabular surface, plus bucket analysis across multiple dimensions (sport, leader_price, dip, wp_edge, dqs, game phase, spread). The dataset opens up ad-hoc analytical questions current tools can't answer; the bucket reports surface dimensional interactions (sport × leader_price, dip × dqs) that aren't in any existing tool.
 
 **Why ship now, not after May 2.** This is data-extraction work, not analysis-evidence-dependent work. The bot is already collecting the inputs (live_ticks.jsonl, live_journal.json, clv.json). Building the dataset/buckets tonight gives us 5 days of using the tool BEFORE May 2 retuning, which makes May 2's analysis richer. Waiting until May 3 buys us nothing on the data side.
@@ -2019,7 +2033,43 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
-### ☐ Session 30-followup-2 — dataset 84%-missing-CFs investigation (Apr 29+, planned, May 2-blocking, urgent)
+### ☑ Session 30-followup-2 — dataset 84%-missing-CFs fix (Apr 29, shipped, ~30min investigation + small fix)
+
+**Root cause (confirmed by tracing one specific CF).** [tools/live_momentum_dataset.py:520-522](tools/live_momentum_dataset.py:520) (the `find_decision_tick is None` drop). `build_decision_rows` iterated `candidate_decisions(journal)` only, then required a tick within `DECISION_TICK_LOOKBACK_SECS=60s` for every candidate — dropping anything without one. **All 340 LM CFs in `clv.json` are emitted from match-level pre-watcher gates** in [bot/clv.py:213](bot/clv.py:213) (`LIVE_MOMENTUM_TUNABLE_SKIP_REASONS = {no_leader, low_volume, no_vol_growth_idle, no_vol_growth_first_seen}`). All four fire inside `scan_live_matches` BEFORE a watcher is spawned for that ticker — so `live_ticks.jsonl` has nothing for the ticker, `find_decision_tick` returns None, the row is dropped.
+
+Walked target CF `KXATPCHALLENGERMATCH-26APR27HSUNOG-HSU` recorded 2026-04-28T00:34:59 (gate `no_leader`, sport `atp_challenger`, entry 56¢): pre-fix not in dataset (no journal scan_found AND no ticks). Post-fix: appears with `accept=False`, `leader_price=56`, `skip_reason=no_leader`, `sport=atp_challenger`, decision-time features null, outcome columns null (still `counterfactual_open`).
+
+**What shipped.**
+- [tools/live_momentum_dataset.py](tools/live_momentum_dataset.py) — added `_cf_only_row(cf, horizon_secs)` helper that constructs the null-feature row from CF identity + regime + outcome columns (mirroring the existing tick-rich row dict shape). Modified `build_decision_rows` to (a) track `claimed_cf_ids` set, (b) when `find_decision_tick is None` for a reject candidate, attempt `join_clv` and emit a CF-only fallback if it matches, (c) after the journal loop, sweep all unclaimed counterfactual CFs from clv and emit one row each. Forward-return / MFE/MAE columns are honestly None for CF-only rows because no subsequent ticks exist.
+- [tests/test_live_momentum_dataset.py](tests/test_live_momentum_dataset.py) — added `class TestCfWithoutTicks` (5 cases): CF without journal nor ticks emits row; CF with journal but no ticks emits row via no-tick fallback; CF with journal AND ticks does NOT double-emit (dedupe via trade_id); settled CF yields target_yes_price + settlement_label; CF-only sweep excludes real `settled` records (status filter is precise). Verified each new case FAILS pre-fix and PASSES post-fix.
+- NO changes to `bot/clv.py`, `bot/live_watcher.py`, or any production code.
+
+**Coverage post-fix.** Dataset rows: **89 → 413** (4.6×). Challenger rows: **19 → 134** (7.0×). Reject/CF ratio: 80/340 = 23.5% → 404/340 = 118.8% (the >100% number is journal-driven tunable rejects whose ticker had ticks but no CF emission, plus the no-tick fallback rows; both legitimate). Target ≥75% met.
+
+**Honest limitation surfaced by the fix.** Most new rows are CF-only with null decision-time features (`wp`, `dip`, `dqs`, `momentum`, etc.). Identity columns (`sport`, `leader_price`, `skip_reason`, `regime`, `outcome_*`) ARE populated. So:
+- Identity-bucket metrics (`sport`-binned CLV, `leader_price`-binned settlement rate) gain real n via settled CFs.
+- Feature-bucket metrics (`dip`-binned fwd_120s, `wp_edge`-binned MFE) DO NOT gain n on numeric-feature averages because those columns are null for CF-only rows. The `fwd_return_120s` average for a sport bucket is computed only over rows where fwd_120s is populated — same effective fwd-n as Session 30 for tick-rich rows.
+- The bucket report's `n` column counts ALL rows in the bucket; the `avg fwd_120s` is computed only over rows with the column populated. Reading the report requires distinguishing the two.
+
+The Session 30 ☑ block above is re-authored against the corrected dataset with per-finding annotations on whether the metric used was tick-feature-dependent (effective n unchanged) or identity-keyed (effective n grew).
+
+**Tests.** 19/19 in `tests/test_live_momentum_dataset.py` pass post-fix. The leakage property test still passes (CF-only rows have all decision-time features = None, trivially leakage-free).
+
+**Verify.** `python3 -m pytest tests/test_live_momentum_dataset.py -v` → 19 pass. `python3 tools/live_momentum_dataset.py --days 7 && wc -l bot/state/research/live_momentum_dataset.csv` → 414 lines (413 rows + header).
+
+**Bot restart NOT required** (read-only tools).
+
+**Out of scope (held from spec).**
+- Touching `bot/clv.py` settlement poller (verified working at 55-58% settle rate).
+- Touching `bot/live_watcher.py`.
+- Adding new instrumentation.
+- Re-investigating UFC or any other Session 30 finding beyond regenerating the bucket report.
+- Re-enabling any disabled sport.
+- Backfilling the Apr 27 journal corruption window (Session 29 closed that lid; impossible).
+
+---
+
+### Original write-up — Session 30-followup-2 dataset 84%-missing-CFs investigation (preserved for paper trail)
 
 **Problem (surfaced Apr 29 ~22:30 ET).** During Session 30-followup, the implementing chat reported "5/19 challenger CFs settled" based on the Session 30 dataset. Direct audit of `clv.json` shows the SOURCE has **119 challenger CFs**, not 19. The dataset is missing **84% of challenger CFs** (100 records).
 
