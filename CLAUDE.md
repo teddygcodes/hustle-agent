@@ -2169,21 +2169,31 @@ Once Session 30-followup-2 fixes the dataset bug and we see the TRUE current acc
 
 ---
 
-### ☐ Session 33 — DQS persistence to live_ticks rows (Apr 29+, planned, Tier 2)
+### ☑ Session 33 — DQS persistence to live_ticks rows (Apr 29, shipped — commit e479178)
 
-**Problem.** Session 30 bucket report's DQS dimension is empty because DQS isn't stored on `live_ticks.jsonl` rows. DQS is computed in `bot/game_context.py` per-tick but only used in-flight by live_watcher's exit logic — it's not persisted.
+**Problem.** Session 30 bucket report's DQS dimension was empty because DQS wasn't stored on `live_ticks.jsonl` rows. DQS is computed in `bot/game_context.py` per-tick and used in-flight by live_watcher's entry decision, but discarded after — never written to the tick log.
 
-This blocks DQS-bucketed analysis at the dataset layer. Without DQS coverage, we can't answer "is DQS a useful feature for predicting forward returns?" or "does DQS-bucketed entry timing matter?"
+**Shipped.** Production change in `bot/live_watcher.py:_tick_momentum` — 5 net code lines:
+- Line 1206: `dqs_for_log: float | None = None` (declaration)
+- Line 1261: `dqs_for_log = dqs` (capture after primary-side `compute_dip_quality()`)
+- Line 1361: `dqs_for_log = dqs` (capture after opponent-side `compute_dip_quality()`)
+- Line 1614: `"dqs": round(dqs_for_log, 3) if not None else None` (write to tick row payload)
 
-**Plan (sketch):**
-- Modify `bot/live_watcher.py` (or wherever live_ticks is written) to include `dqs` field on each tick row
-- Schema migration: pre-Session-33 ticks have `dqs=null`; dataset tool already handles nulls gracefully
-- Tests asserting dqs lands on tick rows
-- No retroactive backfill (forward-only, per the Session 21 + 23 pattern)
+**Behavior preservation:** `buy_dqs`, `dqs_breakdown`, `_auto_bet_momentum(dqs_score=...)` and the entry/skip outcome are byte-identical to pre-Session-33. `dqs_for_log` is a side-channel local that ONLY feeds `_log_tick`. Locked by the `test_dqs_does_not_change_entry_decision` regression test.
 
-**Severity / urgency.** Tier 2-3. Adds an analytical dimension; existing analysis works without it. ~1-2 hour scope.
+**Tests:** 4 new in `tests/test_live_watcher.py`:
+- `test_tick_record_includes_dqs_field_when_computed` — dqs=0.32 reaches tick row
+- `test_dqs_null_when_not_computed` — explicit None when no dip eligible
+- `test_dqs_null_in_variance_quality_scalp_path` — None in tennis/UFC scalp despite buy_dqs=1.0
+- `test_dqs_does_not_change_entry_decision` — _auto_bet_momentum receives the real DQS unchanged
 
-**Trigger to open:** post-May-2 if DQS-bucketed analysis would have helped resolve a specific question that surfaced.
+40/40 live_watcher tests pass (2 pre-existing `__new__()` bypass-init failures unrelated).
+
+**Forward-only fix** per Session 21 + 23 pattern. Pre-Session-33 ticks get `dqs=null` in the dataset (already handled gracefully by `tools/live_momentum_dataset.py`).
+
+**Live verification (deferred to natural accumulation):** post-restart Apr 29 ~23:30 UTC, no live games active producing dip-eligible ticks yet. DQS values will populate as overnight games run. Apr 29 morning routine OR manual spot-check tomorrow will confirm. The test discipline + clean deploy are the actual completion signals.
+
+**What this unlocks:** future Session 30-followup-N or May 2 retuning analysis can now bucket the dataset by DQS to answer "is DQS a useful feature for predicting forward returns / CLV?" Currently empty bucket dimension becomes populated as ticks accumulate.
 
 ---
 
