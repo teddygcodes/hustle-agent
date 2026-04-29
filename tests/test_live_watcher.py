@@ -423,6 +423,50 @@ def test_check_exit_trailing_stop_fires_after_peak_fix(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 29: _journal_append recovers from trailing-bracket corruption
+# ---------------------------------------------------------------------------
+
+def test_journal_append_recovers_from_trailing_bracket_corruption(tmp_path, monkeypatch):
+    """Session 29 regression: live_journal.json silently stopped being written
+    for ~28 hours when its file ended with `]\\n]`. The strict json.loads()
+    in _journal_append raised JSONDecodeError; the broad `except Exception`
+    silently absorbed it; every subsequent write was a no-op forever.
+
+    Verify recovery: a corrupted file (valid JSON array + trailing `]`) must
+    be re-parsed via raw_decode, the new entry appended, and the file rewritten
+    cleanly so subsequent writes succeed normally.
+
+    On pre-fix code this test FAILS (file stays at 1 event). On post-fix code
+    it PASSES (file ends with both events as a clean array)."""
+    import json
+    from bot import live_watcher
+
+    journal = tmp_path / "live_journal.json"
+    # Same shape observed in production at 2026-04-27T20:14:01 UTC: a valid
+    # JSON array followed by an extra `]`.
+    journal.write_text('[\n  {"event": "old", "ticker": "T1"}\n]\n]')
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", journal)
+
+    live_watcher._journal_append({"event": "scan_found", "ticker": "T2"})
+
+    # File is valid JSON now and contains BOTH the historical and the new event.
+    data = json.loads(journal.read_text())
+    assert isinstance(data, list)
+    assert len(data) == 2
+    assert data[0]["event"] == "old"
+    assert data[0]["ticker"] == "T1"
+    assert data[1]["event"] == "scan_found"
+    assert data[1]["ticker"] == "T2"
+    assert "timestamp" in data[1]
+
+    # And a follow-up write on the now-clean file appends without recovery.
+    live_watcher._journal_append({"event": "exit", "ticker": "T2"})
+    data2 = json.loads(journal.read_text())
+    assert len(data2) == 3
+    assert data2[2]["event"] == "exit"
+
+
+# ---------------------------------------------------------------------------
 # Session 21: scan_live_matches skip_reason instrumentation
 # ---------------------------------------------------------------------------
 

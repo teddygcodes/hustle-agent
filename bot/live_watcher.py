@@ -67,10 +67,27 @@ LIVE_JOURNAL_FILE = _STATE_DIR / "live_journal.json"
 
 
 def _journal_append(entry: dict):
-    """Append an entry to the live watcher journal (thread-safe-ish)."""
+    """Append an entry to the live watcher journal (thread-safe-ish).
+
+    Session 29 (Apr 28 2026): if the file has trailing-corruption (e.g.
+    `]\\n]` from an interrupted/raced write — observed Apr 27 2026), use
+    raw_decode to recover the leading valid array instead of letting
+    JSONDecodeError silently kill all future writes.
+    """
     entry["timestamp"] = datetime.now(timezone.utc).isoformat()
     try:
-        data = json.loads(LIVE_JOURNAL_FILE.read_text()) if LIVE_JOURNAL_FILE.exists() else []
+        if LIVE_JOURNAL_FILE.exists():
+            text = LIVE_JOURNAL_FILE.read_text()
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data, _ = json.JSONDecoder().raw_decode(text)
+                logger.warning(
+                    "live_journal.json had trailing corruption; recovered %d events and rewriting clean",
+                    len(data) if isinstance(data, list) else 0,
+                )
+        else:
+            data = []
         data.append(entry)
         LIVE_JOURNAL_FILE.write_text(json.dumps(data, indent=2))
     except Exception as e:

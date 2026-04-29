@@ -1733,9 +1733,9 @@ This is materially important because: `tools/cohort_report.py` consumes `bot/sta
 
 ---
 
-### ☐ Session 29 — Live journal write regression (Apr 28+, planned, May 2-blocking)
+### ☑ Session 29 — Live journal write regression (Apr 28, shipped)
 
-**Problem (surfaced manually Apr 28 ~7:48 PM ET).** `bot/state/live_journal.json` mtime is `Apr 27 16:14:01 ET`. Most recent event timestamp inside the file is `2026-04-27T20:14:01 UTC`. Current time is `~Apr 28 23:48 UTC`. **Gap: 27.5+ hours of zero events written.** All 4 event types (`scan_found`, `bet`, `exit`, `session_end`) stopped at the same timestamp — this is a write-path failure, not a Session-21-specific regression.
+**Problem (surfaced manually Apr 28 ~7:48 PM ET).** `bot/state/live_journal.json` mtime was `Apr 27 16:14:01 ET`. Most recent event timestamp inside the file was `2026-04-27T20:14:01 UTC`. Current time was `~Apr 28 23:48 UTC`. **Gap: 27.5+ hours of zero events written.** All 4 event types (`scan_found`, `bet`, `exit`, `session_end`) stopped at the same timestamp — write-path failure, not a Session-21-specific regression.
 
 **What's still working (key separation):**
 - Live scanner IS scanning. `LIVE_SCAN_TELEMETRY` log line fires every 2 minutes (`seen=83 capacity=2 already_watching=3`).
@@ -1781,6 +1781,31 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 6. Mark Session 29 ☑ in CLAUDE.md.
 
 **Severity / urgency.** Tier 1, May 2-blocking. Bot's actual TRADING is unaffected; observability for the live_momentum-side analysis is degraded. Ship before May 2 so the retuning analysis has clean recent journal data. ~30-60 minute investigation + small fix + restart.
+
+**Diagnosis (Outcome: silent-failure-forever, not Session-23-specific).** Direct file inspection: `tail -c 200 bot/state/live_journal.json | od -c` showed the bytes ending `}\n]\n]` — one valid array close-bracket followed by an extra `]`. Last valid event timestamp was `2026-04-27T20:14:01.061713+00:00`, final event type was `scan_found`. The user's diagnostic script using `json.JSONDecoder().raw_decode()` successfully decoded 6,581 events — proving the leading JSON array was intact, only the trailing `]` was garbage.
+
+**Root cause: [bot/live_watcher.py:69-77](hustle-agent/bot/live_watcher.py:69-77).** `_journal_append`'s strict `json.loads()` raised `JSONDecodeError("Extra data: line 79333 column 1 (char 2104330)")` on the corrupted file. The broad `except Exception` silently absorbed it as a `WARNING` log. No write happened. Every subsequent call to `_journal_append` re-read the same corrupted file, re-raised, re-warned, never wrote. **One bad event poisoned all future writes forever.**
+
+**What CAUSED the initial corruption — second-order to the silent-failure regression.** Session 21 (commit `d5297e1`, deployed Apr 27) wired `_journal_record_scan` into 11 per-match gate sites in `scan_live_matches`. Write rate jumped from "~spawn-only" (≈100/day) to "every-match-skipped" (~70k–110k/day projected per the Session 21 commit message itself). `_journal_append` does an unlocked read-modify-write with `Path.write_text` — the docstring even names it "thread-safe-ish". At ~100/day this latency-blind pattern was harmless; at ~70k/day a partial-write or two-writer overlap eventually produced the malformed trailing-bracket pattern. **Session 23 (commit `7febc46`) is NOT the cause** — its 4 new `_maybe_emit_live_momentum_cf` sites write to `clv.json` via `_record_lm_cf`, not to `live_journal.json`.
+
+**What shipped.**
+- [bot/live_watcher.py:69-93](hustle-agent/bot/live_watcher.py:69-93) — `_journal_append` gained a JSONDecodeError-recovery branch. On strict-parse failure, falls back to `json.JSONDecoder().raw_decode(text)` (the same forgiving parser the user's diagnostic script proved works), logs a `WARNING` with the recovered event count, and rewrites the file cleanly. ~6 net new lines. The outer `except Exception` and the `data.append + write_text` lines are byte-identical to pre-fix.
+- [tests/test_live_watcher.py](hustle-agent/tests/test_live_watcher.py) — `test_journal_append_recovers_from_trailing_bracket_corruption` (~30 LOC). Plants the same `[...]\n]` shape observed in production, calls `_journal_append`, asserts the file ends valid JSON with both old + new entries. Verified to FAIL pre-fix (test's own `json.loads(journal.read_text())` re-raises the same JSONDecodeError on the unrecovered file) and PASS post-fix.
+- One-shot file repair: `bot/state/live_journal.json` was rewritten cleanly before restart (backup at `bot/state/live_journal.json.bak-session29`) so the bot's first call after restart hit the clean-path immediately. Also removed 7 test-pollution events from `KXNBAGAME-26APR26TEST-LAL` that the Session-19a-peakfix test had been silently failing to write since Apr 27 (see Watch list below).
+
+**Test results.** `python3 -m pytest tests/test_live_watcher.py -v` → 32 passed, 2 pre-existing failures unchanged (the `_trailing_active` / `_started_at` `__new__()` AttributeErrors documented as pre-existing in Sessions 4-6).
+
+**Verify (post-restart, completed).**
+1. **Pre-restart baseline:** journal mtime `Apr 28 20:36:34 2026` (28h stale); size 2,105,874 bytes (corrupted).
+2. **Bot restarted via launchd kickstart at 20:37:40 ET.** Orphan PID 1765 (running pre-fix code under launchd directly, no `run_bot.sh` wrapper) lingered alongside the fresh launchd → run_bot.sh → python tree (PIDs 19045/19048); SIGKILLed PID 1765 per the Sessions 23 / 28 pattern. Single-PID state restored.
+3. **Within 7 min of restart:** journal mtime advanced to `Apr 28 20:44:42 2026`. Size 2,118,734 bytes (cleanly written, parses with `json.loads`).
+4. **88 fresh `scan_found` events** in the first 2 seconds of post-restart scanning, with skip_reason distribution matching the LIVE_SCAN_TELEMETRY drops dict: low_volume 35, not_today 26, no_leader 13, no_vol_growth_first_seen 13, bad_event_shape 1. Session 21 instrumentation confirmed flowing.
+5. **No "had trailing corruption" recovery WARNING in `bot.log`** because the one-shot repair (step 1's cleanup, before restart) had already rewritten the file as valid JSON. The recovery branch is regression-locked by the test; production never had to hit it on this restart. If a future write race re-corrupts the file, the recovery branch will fire and self-heal.
+6. **No new errors in `bot.log`** post-restart (the visible Telegram-polling errors at 01:25 / 02:48 / 07:08 UTC are pre-restart noise unchanged from before).
+
+**Out of scope (held).** Migration of `_journal_append` to `bot/state_io.py:save_json` (atomic tempfile + rename); adding a `threading.Lock`; NDJSON migration of `live_journal.json`; backfilling the 27.5h gap (impossible). All defensive-depth moves that would prevent the next write race but don't address the silent-failure-forever regression that was killing observability now.
+
+**Watch list — Session 19a-peakfix test pollution (no session opened).** Running the test suite now reveals that `test_check_exit_trailing_stop_fires_after_peak_fix` (Session 19a-peakfix, line 340) does NOT monkeypatch `LIVE_JOURNAL_FILE`. Pre-Session-29 it was silently failing to write (because `_journal_append` was silently failing); post-Session-29 it successfully appends 7 `KXNBAGAME-26APR26TEST-LAL` exit events to the production journal on every test run. The 7 events were cleaned up in Session 29; future test runs will re-pollute. Fix is one line (`monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", tmp_path / "test_journal.json")`) but is out of scope per the user's "no scope creep" directive. Open a small follow-up if test pollution becomes a recurring annoyance.
 
 ---
 
