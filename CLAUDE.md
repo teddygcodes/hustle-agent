@@ -2019,6 +2019,141 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
+### ☐ Session 30-followup-2 — dataset 84%-missing-CFs investigation (Apr 29+, planned, May 2-blocking, urgent)
+
+**Problem (surfaced Apr 29 ~22:30 ET).** During Session 30-followup, the implementing chat reported "5/19 challenger CFs settled" based on the Session 30 dataset. Direct audit of `clv.json` shows the SOURCE has **119 challenger CFs**, not 19. The dataset is missing **84% of challenger CFs** (100 records).
+
+```
+clv.json CHALLENGER CFs: 119 total
+  counterfactual_settled: 69
+  counterfactual_open:    50
+  settle rate: 58% (in line with overall 55% live_momentum CF rate)
+
+Session 30 dataset CHALLENGER rows: 19 (16% of source)
+```
+
+**Why it matters.** Every Session 30 authored finding may be based on a fraction of the actual data:
+- "leader_price 60-70 wins at 100% +CLV at n=12" might be n=70+ in reality with a different distribution
+- "UFC −4.33¢ at n=5" might be n=30+ with a different signal
+- "challenger circuits over-perform" was the trigger for Session 30-followup; that finding is now confirmed-as-too-thin in part because the dataset itself was hiding most of the signal
+
+The May 2 retuning analysis depends on the dataset being correct. If 84% of CFs are missing, every conclusion drawn from `tools/live_momentum_buckets.py` is built on a tiny subset.
+
+**Hypotheses to distinguish (investigation must confirm):**
+1. **Time-window filter too tight.** Maybe `tools/live_momentum_dataset.py --days 7` filters CFs by `recorded_at` and the cutoff is excluding rows that should be included.
+2. **Join key mismatch.** Maybe the dataset joins clv records to live_ticks by ticker AND ts within ±N seconds, and the window is too narrow — most CFs don't have a corresponding tick in that window.
+3. **Schema/column filter dropping rows.** Maybe the dataset requires certain fields to be non-null and most CFs are missing one (e.g., `wp` is null for tennis matches without ESPN data).
+4. **Tunable-allowlist filter applied twice.** Session 23's CF emission already filters to `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS`; if the dataset re-applies a similar filter with slightly different membership, rows could leak.
+5. **Missing data source.** Maybe the dataset reads from a snapshot/cache rather than fresh clv.json, OR doesn't read certain CF status values.
+
+**Plan.**
+1. Read `tools/live_momentum_dataset.py` — trace exactly how CF records are loaded and joined to ticks.
+2. For ONE specific challenger CF that's in clv.json but missing from the dataset, walk through why it was dropped. (Pick the oldest open CF: `KXATPCHALLENGERMATCH-26APR27HSUNOG-HSU` recorded 2026-04-28T00:34:59.)
+3. Identify the filter/join condition that excludes it.
+4. Decide:
+   - If it's a tight join window: relax appropriately (don't over-relax)
+   - If it's a missing-field filter: emit the row with null fields rather than dropping
+   - If it's a deliberate scope (e.g., dataset only includes CFs with corresponding tick data): document why and reconcile with Session 30's spec ("one row per candidate decision")
+5. Ship the fix. Regenerate the dataset.
+6. **Re-author the Session 30 findings** using the corrected dataset. Each finding's n must reflect the new reality. If the leader_price 60-70 finding holds at n=70, that's a much stronger signal for the May 18 LM re-validation. If it dissolves, that's also valuable signal.
+7. Update CLAUDE.md Session 30 ☑ block with corrected n's and any flipped findings.
+
+**Out of scope.**
+- Touching `bot/clv.py` (settlement poller is fine — confirmed by 55-58% settle rate)
+- Touching `bot/live_watcher.py` (no production code path involved)
+- Adding new fields or new sources (just fix the join logic)
+- Re-investigating UFC or any other Session 30 finding beyond regenerating the bucket report
+
+**Verify.**
+1. `python3 -c "import json; clv=json.load(open('bot/state/clv.json')); cfs=[r for r in clv if r.get('opp_type')=='live_momentum' and r.get('status','').startswith('counterfactual')]; print(len(cfs))"` — number of CFs in clv.json
+2. `wc -l bot/state/research/live_momentum_dataset.csv` — number of rows after regeneration
+3. Ratio (rows / CFs) should be substantially higher than the current 16%. Target: ≥75% (some CFs may genuinely lack tick context and be filtered for valid reasons; document any such filter explicitly).
+4. Bucket report regenerated; n values updated; any flipped findings flagged in commit message.
+5. Tests in `tests/test_live_momentum_dataset.py` updated if the join logic changed; existing leakage property test still passes.
+6. Bot restart NOT required (read-only tools).
+7. Mark Session 30-followup-2 ☑.
+
+**Severity / urgency.** Tier 1, May 2-blocking. ~30-60 min focused work. If this isn't fixed before May 2, the retuning analysis runs on partial data and any conclusion drawn could be wrong-direction.
+
+---
+
+### ☐ Session 31 — CF emission for disable-check pathway (Apr 29+, planned, Tier 2)
+
+**Problem.** Session 30-followup surfaced this: matches that would have been entered if not for `MOMENTUM_DISABLED_SPORTS` are NOT being captured as CFs, because upstream gates (no_leader, low_volume, no_vol_growth) filter them out first. Result: the dataset cannot answer "what if we re-enabled this disabled sport?" — we have no CFs for the disable-only pathway.
+
+Per Session 23's design, `disabled_sport` was excluded from `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS` because it's a series-level filter that fires before per-match data is available. That reasoning was correct at design time but creates a structural blind spot for sport-disable revisit decisions (specifically: the wta_challenger asymmetric-evidence finding from Session 30-followup).
+
+**Plan (sketch — investigate first, ship targeted fix):**
+- Two candidate approaches:
+  - **(A) Reorder gate evaluation.** Run the disable check AFTER `no_leader` / `no_vol_growth` etc., so disabled-sport CFs only emit when other gates would have passed. Cleaner but changes telemetry semantics for `LIVE_SCAN_TELEMETRY` drops dict.
+  - **(B) Shadow CF emission for disabled sports.** Add a separate code path that emits CFs for disabled-sport matches that pass sport-applicability checks (volume, volume-growth, leader presence), regardless of whether other gates fired. Doesn't change telemetry; adds a new CF category `disabled_sport_shadow`.
+- Cap the new CF emission separately (e.g., 3/day per sport) to avoid flooding clv.json with disabled-sport CFs.
+- Update `tools/live_momentum_dataset.py` to handle the new CF category.
+- Tests asserting the new CFs emit AT THE RIGHT TIMES (when other gates would have passed) — critical to avoid double-counting.
+
+**Severity / urgency.** Tier 2. May 2 isn't going to be a "re-enable disabled sports" decision regardless of what the data says — that's a Session 22+ retuning move with its own evidence threshold. Defer Session 31 to post-May-2 unless May 2's findings directly demand it. ~2-3 hours scope.
+
+**Trigger to open:** explicit user decision after May 2 retuning analysis OR challenger CF settled count crosses 30 with ≥5 leader-loss outcomes (the watch-list trigger from Session 30-followup).
+
+---
+
+### ☐ Session 32 — CF cap policy review (Apr 29+, planned, Tier 2)
+
+**Problem.** Session 23's per-`(sport, skip_reason)`-per-day cap of 5 CFs throttles signal accumulation. For high-volume sports like tennis (challenger circuits play 100+ matches/day), the cap means we capture signal at ~2-3 rows/day per (sport, skip_reason). Reaching the 30-settled-CF threshold I set on the watch list takes ~2-3 weeks at current rate.
+
+Once Session 30-followup-2 fixes the dataset bug and we see the TRUE current accumulation rate, we may decide:
+- The cap is appropriately tight (clv.json bloat concern is real)
+- The cap should be tuned per-sport (looser for high-volume sports)
+- The cap should be a sliding 24h window instead of UTC-day buckets (avoids midnight reset throttle)
+- The stratification key should change (e.g., add `entry_price_band` so we capture varied price points within a sport+skip_reason)
+
+**Plan (do not start until Session 30-followup-2 ships):**
+- Measure post-fix CF accumulation rates per `(sport, skip_reason, day)` bucket
+- If any bucket's daily CF count consistently bumps the cap (saturated 5/5 most days), evaluate raising it
+- If clv.json size growth is comfortable (<5MB/day), more room to raise cap
+- Ship a targeted policy update: new cap value OR per-sport caps OR sliding-window logic
+
+**Severity / urgency.** Tier 2. Affects accumulation rate, not data correctness. ~1 hour scope after the dataset fix lands.
+
+**Trigger to open:** Session 30-followup-2 ships AND post-fix data shows materially capped accumulation (i.e., the cap is the rate limit, not natural volume).
+
+---
+
+### ☐ Session 33 — DQS persistence to live_ticks rows (Apr 29+, planned, Tier 2)
+
+**Problem.** Session 30 bucket report's DQS dimension is empty because DQS isn't stored on `live_ticks.jsonl` rows. DQS is computed in `bot/game_context.py` per-tick but only used in-flight by live_watcher's exit logic — it's not persisted.
+
+This blocks DQS-bucketed analysis at the dataset layer. Without DQS coverage, we can't answer "is DQS a useful feature for predicting forward returns?" or "does DQS-bucketed entry timing matter?"
+
+**Plan (sketch):**
+- Modify `bot/live_watcher.py` (or wherever live_ticks is written) to include `dqs` field on each tick row
+- Schema migration: pre-Session-33 ticks have `dqs=null`; dataset tool already handles nulls gracefully
+- Tests asserting dqs lands on tick rows
+- No retroactive backfill (forward-only, per the Session 21 + 23 pattern)
+
+**Severity / urgency.** Tier 2-3. Adds an analytical dimension; existing analysis works without it. ~1-2 hour scope.
+
+**Trigger to open:** post-May-2 if DQS-bucketed analysis would have helped resolve a specific question that surfaced.
+
+---
+
+### ☐ Session 34 — regime_sport_phase coverage for tennis/UFC/IPL (Apr 29+, planned, Tier 2)
+
+**Problem.** Session 30 bucket report's `game_phase` dimension is mostly Unknown for tennis/UFC/IPL because `period` field is None for those sports' tick data. Session 14 documented this as a structural gap (no clean preseason/regular/playoffs semantics for individual matches) but it nevertheless blocks in-match-phase analysis for the sports that need it most (UFC fights are short-duration, in-match phase is critical).
+
+**Plan (sketch):**
+- For tennis: derive phase from `seconds_remaining` / `period` if Kalshi provides set-by-set state; otherwise compute from elapsed time vs typical match length
+- For UFC: derive round number from elapsed time vs `5min/round` × `5 rounds`
+- For IPL: derive innings number from over count
+- Update `bot/regime.py:tag()` to compute `sport_phase` for these sports using the new logic
+- Backfill via `tools/backfill_regime.py` (Session 14's existing tool)
+
+**Severity / urgency.** Tier 2-3. Adds analytical dimension for sports where it's most useful. ~1-2 hour scope.
+
+**Trigger to open:** post-May-2 if sport_phase-bucketed analysis would have helped resolve a specific question for tennis/UFC/IPL.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
