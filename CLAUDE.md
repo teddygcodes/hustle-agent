@@ -1897,6 +1897,77 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
+### ☐ Session 30 — live_momentum research dataset + bucket analysis (Apr 28+, planned, ship-now)
+
+**Problem.** Live_momentum is the only profitable strategy (+$12.30 / 39 trades / 62% WR). Sample size is thin and the existing tools (`cohort_report`, `journal_analysis`, `excursion_report`) are descriptive — they tell you what happened, not what's predictive. To find an edge faster, we need a unified per-tick decision dataset that joins live_ticks + live_journal + clv into one tabular surface, plus bucket analysis across multiple dimensions (sport, leader_price, dip, wp_edge, dqs, game phase, spread). The dataset opens up ad-hoc analytical questions current tools can't answer; the bucket reports surface dimensional interactions (sport × leader_price, dip × dqs) that aren't in any existing tool.
+
+**Why ship now, not after May 2.** This is data-extraction work, not analysis-evidence-dependent work. The bot is already collecting the inputs (live_ticks.jsonl, live_journal.json, clv.json). Building the dataset/buckets tonight gives us 5 days of using the tool BEFORE May 2 retuning, which makes May 2's analysis richer. Waiting until May 3 buys us nothing on the data side.
+
+**What's IN scope: Stages 1 + 2 only (dataset + buckets).** The model stage (Stage 3 in the user's original spec) is deferred — see "out of scope" below.
+
+**Plan.**
+
+**Stage 1 — `tools/live_momentum_dataset.py`** (gitignored, local-only):
+- Load `bot/state/live_ticks.jsonl` AND `bot/state/archive/live_ticks-*.jsonl.gz`
+- Load `bot/state/live_journal.json`
+- Load `bot/state/clv.json`
+- Build one row per candidate decision tick (accept AND reject — leverage Session 21 skip_reason instrumentation + Session 23 live_momentum CFs)
+- Join bet/exit lifecycle from live_journal by ticker + timestamp proximity
+- Join clv records by ticker + order_id/trade_id
+- Compute forward returns at 30s, 60s, 120s after candidate tick
+- Compute MFE/MAE over a configurable forward horizon (default 120s)
+- **Decision-time fields ONLY as features** — outcome columns separately tagged
+- Output to `bot/state/research/live_momentum_dataset.csv` (or `.jsonl`)
+- Required columns per the user's spec (verbatim list — read the original Session 30 brief in this conversation's history)
+- Graceful missing-field handling (ESPN/wp can be null; don't crash)
+- Support both current JSONL and gzipped archives
+
+**Critical disciplines (enforced in tests):**
+- **Decision-time vs outcome leakage prevention.** All decision-time fields MUST be computed from data with timestamp < decision_tick_ts. Property test: shift the decision_tick_ts back 60s; assert no field's value uses post-shift data. This is the #1 ML trap.
+- **MFE/MAE naming collision avoidance.** Session 9's `mfe_cents` is "max favorable excursion from POSITION ENTRY through SETTLEMENT." Stage 1's MFE is "max favorable excursion from DECISION TICK over fixed forward window." Different math, different semantics — name them differently to avoid confusion. Recommend: `mfe_in_120s_window_cents` (or whatever the horizon is). Even better: extract `compute_mfe_in_window(...)` into `bot/clv.py` and consume from BOTH places — single source of truth, mirror Session 13b's `compute_clv_cents` discipline.
+- **Reuse `bot.clv.compute_clv_cents`** for any CLV math. NO parallel definitions.
+- **Class imbalance handling.** Accept:reject ratio is ~1:100. Even though Stage 3 (model) is deferred, the dataset should expose class weights or balanced-sampling helpers so future Stage 3 doesn't have to re-derive them.
+
+**Stage 2 — `tools/live_momentum_buckets.py`** (gitignored, local-only):
+- Read the dataset from Stage 1
+- Produce markdown bucket tables for: sport, leader_price bands, dip_cents bands, wp_edge bands, dqs bands, game phase, spread bands
+- For each bucket: n, avg fwd_return_30s/60s/120s, avg MFE/MAE_120s, avg CLV, positive CLV rate, win rate
+- Interaction tables: sport × leader_price_band, sport × dip_band, leader_price_band × wp_edge_band, dip_band × dqs_band
+- Mark buckets with n < 5 as low-confidence
+- Markdown to stdout
+
+**Tests in `tests/test_live_momentum_dataset.py` + `tests/test_live_momentum_buckets.py`:**
+- Fixture: small live_ticks stream with multiple ticks per ticker
+- Fixture: journal bet/exit lifecycle for a few tickers
+- Fixture: clv records covering accepted bets
+- Verify timestamp joins (±60s window, similar to Session 13b's calibration join)
+- Verify forward returns at 30/60/120s
+- Verify MFE/MAE math against hand-computed values
+- Verify missing fields don't crash
+- Verify bucket bands assignments
+- Verify low-sample buckets (n<5) marked low-confidence
+- **Property test: leakage exclusion.** All decision-time features computed from data BEFORE decision_tick_ts; verified by time-shift property.
+
+**Out of scope (deferred, NOT shipped this session):**
+- **Stage 3 (model.py).** Sample-size physics: ~120 historical bets + ~hundreds of CFs is marginal for ML. Validation AUC at this corpus would be 0.5-0.6 with wide confidence intervals — basically random. Defer to Session 31+ candidate when sample > 1000 settled live_momentum rows OR after May 18 re-validation surfaces stronger signal.
+- Live trading behavior changes (NO touching live_watcher entry/exit logic)
+- Config changes
+- Migration of live_ticks.jsonl schema
+- New instrumentation in live_watcher (forward-only data is fine; this stage works on what's already collected)
+
+**Verify (acceptance criteria).**
+1. `python3 tools/live_momentum_dataset.py --days 7` produces `bot/state/research/live_momentum_dataset.csv` with the required columns. Sample row count: 100s-low 1000s for the 7-day window post-Session-23.
+2. `python3 tools/live_momentum_buckets.py --dataset bot/state/research/live_momentum_dataset.csv` produces markdown report covering all 7 single-dimension buckets + 4 interaction tables.
+3. `python3 -m pytest tests/test_live_momentum_dataset.py tests/test_live_momentum_buckets.py -v` passes.
+4. The leakage property test PASSES — verifying no decision-time feature uses post-decision data.
+5. NO changes to bot/live_watcher.py, bot/main.py, bot/executor.py, or any live trading code path.
+6. Bot restart NOT required (read-only tools).
+7. Mark Session 30 ☑ in CLAUDE.md and commit.
+
+**Severity / urgency.** Tier 1, ship-now (NOT May 2-blocking but value-additive throughout the upcoming week). ~3-4 hours focused work for Stage 1+2 combined.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
