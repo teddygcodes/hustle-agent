@@ -1163,6 +1163,14 @@ class LiveGameWatcher:
             "kalshi_price": yes_ask,
             "dip_cents": dip_cents,
             "dqs": None,  # filled at sites where DQS was actually computed
+            # Session 34: thread elapsed-time so bot.regime.tag can populate
+            # match_phase on tennis/UFC/IPL live_momentum decisions. ESPN/Kalshi
+            # don't expose set/round/over for these sports today, so the
+            # elapsed-time fallback is the practical v1. Forward-compatible:
+            # if a future session sources rich state (set_number/round_num/
+            # over_count), thread those keys here too — regime.tag prefers
+            # state path over time path.
+            "elapsed_seconds": elapsed,
         }
 
         if not can_enter:

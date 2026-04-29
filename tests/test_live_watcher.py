@@ -921,6 +921,67 @@ def test_dqs_does_not_change_entry_decision(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 34: elapsed_seconds threaded through to _log_decision_dampened.extra
+# so bot.regime.tag can populate match_phase on tennis/UFC/IPL live_momentum
+# decisions.
+# ---------------------------------------------------------------------------
+
+
+def test_log_decision_extras_carry_elapsed_seconds(monkeypatch):
+    """Drive a tick down the not-can-enter (position_open) reject path and
+    verify the captured _log_decision_dampened extra dict carries
+    elapsed_seconds. mom_ctx is the single feeder; if it's there for one
+    site, it's there for all 5.
+
+    Why position_open: it's the cheapest reject path. _check_exit is mocked
+    so the held position doesn't trigger exit logic; we just want the
+    not-can-enter dampener call to fire."""
+    import asyncio
+    from bot import live_watcher
+
+    # Pre-existing held position blocks can_enter via the bets_placed branch.
+    held = [{
+        "ticker": "KXNBAGAME-26APR30TEST-LAL", "side": "yes", "price_cents": 70,
+        "contracts": 1,
+    }]
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26APR30TEST-LAL",
+        price_history=[70, 70, 70, 70, 70],
+        yes_ask=70,
+        bets_placed=held,
+    )
+
+    # Pin elapsed: _started_at set 60s ago in _build_momentum_watcher; force
+    # a known value so the assertion is stable across machine speeds.
+    import time as _time
+    monkeypatch.setattr(_time, "time", lambda: w._started_at + 1200)  # 20 min in
+
+    captured: list[dict] = []
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: captured.append(dict(d)))
+
+    asyncio.run(w._tick_momentum())
+
+    # Assert _log_decision_dampened was called at least once and the extra
+    # carries elapsed_seconds matching our pinned value.
+    assert w._log_decision_dampened.called, (
+        "expected _log_decision_dampened to fire on the not-can-enter path"
+    )
+    found_with_elapsed = False
+    for call in w._log_decision_dampened.call_args_list:
+        extra = call.kwargs.get("extra") or {}
+        if "elapsed_seconds" in extra:
+            assert extra["elapsed_seconds"] == 1200, (
+                f"expected elapsed_seconds=1200, got {extra['elapsed_seconds']!r}"
+            )
+            found_with_elapsed = True
+    assert found_with_elapsed, (
+        "no _log_decision_dampened call carried elapsed_seconds in extra — "
+        "Session 34 plumbing regressed."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session 21: scan_live_matches skip_reason instrumentation
 # ---------------------------------------------------------------------------
 

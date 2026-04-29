@@ -161,19 +161,23 @@ def test_event_horizon_hr_handles_malformed_close_ts():
 def test_tag_is_deterministic_property():
     """Same inputs must produce identical output across many random samples."""
     rng = random.Random(42)
-    sports = ["KXNBAGAME-X", "KXMLBGAME-Y", "KXNHLGAME-Z", "KXWX-NYC", "KXTREASURY"]
+    sports = ["KXNBAGAME-X", "KXMLBGAME-Y", "KXNHLGAME-Z", "KXWX-NYC", "KXTREASURY",
+              "KXATPMATCH-X", "KXUFCFIGHT-Y", "KXIPLGAME-Z"]
     for _ in range(100):
         ts = _utc(2026, 1, 1) + timedelta(minutes=rng.randint(0, 525_600))
         ticker = rng.choice(sports)
         if rng.random() < 0.7:
             close_ts = (ts + timedelta(hours=rng.uniform(0.1, 300))).isoformat()
-            ms = {"close_ts": close_ts}
+            ms = {"close_ts": close_ts, "elapsed_seconds": rng.randint(0, 7200)}
         else:
             ms = None
         a = tag(ts, ticker, ms)
         b = tag(ts, ticker, ms)
         assert a == b
-        assert set(a.keys()) == {"time_of_day", "day_of_week", "sport_phase", "event_horizon_hr"}
+        assert set(a.keys()) == {
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "match_phase",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -199,3 +203,224 @@ def test_tag_handles_empty_ticker():
     # Other axes still populate
     assert result["time_of_day"] is not None
     assert result["day_of_week"] is not None
+    assert result["match_phase"] is None  # Session 34: no sport → no phase
+
+
+# ---------------------------------------------------------------------------
+# Session 34: match_phase axis
+# ---------------------------------------------------------------------------
+# v1 taxonomy:
+#   tennis (atp/atp_challenger/wta/wta_challenger): set_1|set_2|set_3+ from
+#     set_number, else early|mid|late from elapsed_seconds, else None.
+#   ufc: round_1|round_2|round_3+ from round_num, else round_1|round_2|round_3+
+#     from elapsed_seconds, else None.
+#   ipl: powerplay|middle|death from over_count (1..20), else None (no time
+#     fallback).
+#   other sports: None.
+
+NOW = _utc(2026, 4, 25, 18)
+
+
+@pytest.mark.parametrize("ticker", [
+    "KXATPMATCH-26APR25-FED",
+    "KXATPCHALLENGERMATCH-26APR25-X",
+    "KXWTAMATCH-26APR25-WIL",
+    "KXWTACHALLENGERMATCH-26APR25-Y",
+])
+@pytest.mark.parametrize("elapsed, expected", [
+    (0,    "early"),   # 0 min
+    (1500, "early"),   # 25 min
+    (1799, "early"),   # 29:59 — boundary
+    (1800, "mid"),     # 30:00
+    (3000, "mid"),     # 50 min
+    (5399, "mid"),     # 89:59 — boundary
+    (5400, "late"),    # 90:00
+    (9000, "late"),    # 150 min — five-setter
+])
+def test_match_phase_tennis_with_elapsed_only(ticker, elapsed, expected):
+    result = tag(NOW, ticker, market_state={"elapsed_seconds": elapsed})
+    assert result["match_phase"] == expected
+
+
+@pytest.mark.parametrize("ticker", [
+    "KXATPMATCH-26APR25-FED",
+    "KXWTAMATCH-26APR25-WIL",
+])
+@pytest.mark.parametrize("set_num, expected", [
+    (1, "set_1"),
+    (2, "set_2"),
+    (3, "set_3+"),
+    (4, "set_3+"),
+    (5, "set_3+"),
+])
+def test_match_phase_tennis_with_set_info_overrides_elapsed(ticker, set_num, expected):
+    """When set_number is present, it wins over the time fallback."""
+    # elapsed alone would say "late" (>90m); set_number is what matters
+    ms = {"elapsed_seconds": 6000, "set_number": set_num}
+    assert tag(NOW, ticker, ms)["match_phase"] == expected
+
+
+def test_match_phase_tennis_no_state():
+    assert tag(NOW, "KXATPMATCH-26APR25-X", market_state=None)["match_phase"] is None
+    assert tag(NOW, "KXATPMATCH-26APR25-X", market_state={})["match_phase"] is None
+
+
+def test_match_phase_tennis_legacy_elapsed_key():
+    """Some callers pass `elapsed` instead of `elapsed_seconds`."""
+    assert tag(NOW, "KXATPMATCH-26APR25-X",
+               market_state={"elapsed": 60})["match_phase"] == "early"
+    assert tag(NOW, "KXATPMATCH-26APR25-X",
+               market_state={"elapsed": 3600})["match_phase"] == "mid"
+
+
+@pytest.mark.parametrize("elapsed, expected", [
+    (0,   "round_1"),
+    (299, "round_1"),
+    (300, "round_2"),
+    (599, "round_2"),
+    (600, "round_3+"),
+    (900, "round_3+"),
+])
+def test_match_phase_ufc_with_elapsed(elapsed, expected):
+    ticker = "KXUFCFIGHT-26APR25-VIE"
+    assert tag(NOW, ticker,
+               market_state={"elapsed_seconds": elapsed})["match_phase"] == expected
+
+
+@pytest.mark.parametrize("round_num, expected", [
+    (1, "round_1"),
+    (2, "round_2"),
+    (3, "round_3+"),
+    (4, "round_3+"),
+    (5, "round_3+"),
+])
+def test_match_phase_ufc_with_round_info(round_num, expected):
+    """When round_num is present, it wins over the time fallback."""
+    ticker = "KXUFCFIGHT-26APR25-VIE"
+    # elapsed alone would say "round_1" (<5min); round_num overrides
+    ms = {"elapsed_seconds": 60, "round_num": round_num}
+    assert tag(NOW, ticker, ms)["match_phase"] == expected
+
+
+def test_match_phase_ufc_no_state():
+    assert tag(NOW, "KXUFCFIGHT-26APR25-X")["match_phase"] is None
+    assert tag(NOW, "KXUFCFIGHT-26APR25-X", market_state={})["match_phase"] is None
+
+
+@pytest.mark.parametrize("over, expected", [
+    (1,  "powerplay"),
+    (3,  "powerplay"),
+    (6,  "powerplay"),
+    (7,  "middle"),
+    (12, "middle"),
+    (15, "middle"),
+    (16, "death"),
+    (18, "death"),
+    (20, "death"),
+])
+def test_match_phase_ipl_with_over_count(over, expected):
+    ticker = "KXIPLGAME-26APR25-CSK"
+    assert tag(NOW, ticker,
+               market_state={"over_count": over})["match_phase"] == expected
+
+
+@pytest.mark.parametrize("over", [0, -1, 21, 99])
+def test_match_phase_ipl_invalid_over_count_returns_none(over):
+    """Out-of-range overs → None, not a crash."""
+    ticker = "KXIPLGAME-26APR25-CSK"
+    assert tag(NOW, ticker, market_state={"over_count": over})["match_phase"] is None
+
+
+def test_match_phase_ipl_no_over_count_returns_none_even_with_elapsed():
+    """IPL has no time fallback per spec — overs don't map cleanly to seconds
+    once breaks/strategic-timeouts/innings-changes are involved."""
+    ticker = "KXIPLGAME-26APR25-CSK"
+    assert tag(NOW, ticker,
+               market_state={"elapsed_seconds": 3600})["match_phase"] is None
+    assert tag(NOW, ticker, market_state={})["match_phase"] is None
+
+
+@pytest.mark.parametrize("ticker", [
+    "KXNBAGAME-26APR25-LAL",  # nba
+    "KXNHLGAME-26APR25-NYR",  # nhl
+    "KXMLBGAME-26APR25-LAA",  # mlb
+    "KXNCAAMBGAME-26APR25-X", # ncaab
+    "KXF1RACE-26APR25",       # f1
+    "KXWX-NYC-RAIN",          # weather
+    "KXTREASURY-2YR",         # non-sport
+])
+def test_match_phase_for_non_listed_sport(ticker):
+    """NBA/NHL/MLB/NCAAB/F1 + non-sports return None — no match_phase semantics
+    in v1. Those sports either have working `period`/`completion` (sport_phase
+    covers them) or aren't matches we live-watch."""
+    ms = {"elapsed_seconds": 1200, "set_number": 1, "round_num": 1, "over_count": 5}
+    assert tag(NOW, ticker, ms)["match_phase"] is None
+
+
+def test_match_phase_handles_string_numerics():
+    """JSON round-tripping sometimes turns ints into strings; coerce."""
+    assert tag(NOW, "KXATPMATCH-X",
+               market_state={"elapsed_seconds": "1800"})["match_phase"] == "mid"
+    assert tag(NOW, "KXIPLGAME-X",
+               market_state={"over_count": "12"})["match_phase"] == "middle"
+
+
+def test_match_phase_handles_float_elapsed():
+    assert tag(NOW, "KXATPMATCH-X",
+               market_state={"elapsed_seconds": 1800.5})["match_phase"] == "mid"
+
+
+def test_match_phase_rejects_bool_as_int():
+    """bool is technically int in Python; explicit check to avoid True→1 mishaps."""
+    # set_number=True would otherwise become "set_1"
+    assert tag(NOW, "KXATPMATCH-X",
+               market_state={"set_number": True})["match_phase"] is None
+
+
+def test_match_phase_handles_negative_elapsed_as_none():
+    """Defensive: negative elapsed shouldn't bucket as anything."""
+    assert tag(NOW, "KXATPMATCH-X",
+               market_state={"elapsed_seconds": -5})["match_phase"] is None
+
+
+# ---------------------------------------------------------------------------
+# Session 34: regression guard — existing 4 axes must produce IDENTICAL values
+# pre vs post-Session-34. Only `match_phase` is new.
+# ---------------------------------------------------------------------------
+
+def test_existing_regime_fields_unchanged():
+    """Frozen pre-Session-34 expected values for the 4 original axes. If this
+    test fails, the Session 34 change is no longer additive — investigate
+    before shipping."""
+    cases = [
+        # (ts, ticker, market_state, expected 4-axis dict)
+        (_utc(2026, 4, 25, 18), "KXNBAGAME-26APR25-LAL", None,
+         {"time_of_day": "afternoon", "day_of_week": "sat",
+          "sport_phase": "playoffs", "event_horizon_hr": None}),
+        (_utc(2026, 4, 25, 18), "KXNBAGAME-26APR25-LAL",
+         {"close_ts": _utc(2026, 4, 25, 23).isoformat()},
+         {"time_of_day": "afternoon", "day_of_week": "sat",
+          "sport_phase": "playoffs", "event_horizon_hr": "2-12h"}),
+        (_utc(2026, 4, 22, 12), "KXATPMATCH-26APR22-X", None,
+         {"time_of_day": "morning", "day_of_week": "wed",
+          "sport_phase": None, "event_horizon_hr": None}),
+        (_utc(2026, 4, 25, 5), "KXIPLGAME-26APR25-CSK", None,
+         {"time_of_day": "overnight", "day_of_week": "sat",
+          "sport_phase": None, "event_horizon_hr": None}),
+        (_utc(2025, 11, 1, 18), "KXNBAGAME-25NOV01-LAL",
+         {"close_ts": (_utc(2025, 11, 1, 18) + timedelta(hours=24)).isoformat()},
+         {"time_of_day": "afternoon", "day_of_week": "sat",
+          "sport_phase": "regular", "event_horizon_hr": "12-48h"}),
+        (_utc(2026, 4, 25, 18), "", {},
+         {"time_of_day": "afternoon", "day_of_week": "sat",
+          "sport_phase": None, "event_horizon_hr": None}),
+    ]
+    for ts, ticker, ms, expected_orig in cases:
+        result = tag(ts, ticker, ms)
+        for axis, val in expected_orig.items():
+            assert result[axis] == val, (
+                f"axis={axis} regressed for ticker={ticker!r}: "
+                f"got {result[axis]!r}, expected {val!r}"
+            )
+        # Session 34: the 5th key exists; we don't pin its value here.
+        assert "match_phase" in result

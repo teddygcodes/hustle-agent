@@ -104,7 +104,7 @@ class TestSchemaIntegrity:
         assert "regime" in r
         regime = r["regime"]
         assert set(regime.keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         # close_ts was passed through extra → event_horizon_hr should populate
         assert regime["event_horizon_hr"] is not None
@@ -119,7 +119,7 @@ class TestSchemaIntegrity:
         )
         r = _read_records(tmp_decisions_file)[-1]
         assert set(r["regime"].keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         assert r["regime"]["event_horizon_hr"] is None  # no close_ts available
         assert r["regime"]["sport_phase"] is None       # non-sport ticker

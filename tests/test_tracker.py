@@ -140,7 +140,7 @@ class TestMFEMAEInitialization:
         assert "regime" in pos
         regime = pos["regime"]
         assert set(regime.keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         # NBA on Apr 25 → playoffs; opened_at 18:00 UTC → 14:00 ET → afternoon
         assert regime["sport_phase"] == "playoffs"
@@ -164,7 +164,7 @@ class TestMFEMAEInitialization:
         pos = tracker_env["read"]()[0]
         assert "regime" in pos
         assert set(pos["regime"].keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
 
 

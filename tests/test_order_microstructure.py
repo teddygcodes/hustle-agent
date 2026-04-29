@@ -67,7 +67,7 @@ def test_immediate_fill_at_requested_price_zero_slippage(tmp_path, monkeypatch):
     assert r["queue_depth_at_place"] == 100
     assert "regime" in r
     assert set(r["regime"].keys()) == {
-        "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+        "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
     }
     assert "O1" not in om._PENDING  # popped
 

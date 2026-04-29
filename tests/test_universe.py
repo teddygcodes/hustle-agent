@@ -138,7 +138,7 @@ class TestSnapshotAndFlush:
             assert "regime" in r
             regime = r["regime"]
             assert set(regime.keys()) == {
-                "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+                "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
             }
             assert regime["time_of_day"] in {"morning", "afternoon", "evening", "overnight"}
             assert regime["day_of_week"] in {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}

@@ -117,7 +117,7 @@ class TestSchemaIntegrity:
         assert "regime" in r
         regime = r["regime"]
         assert set(regime.keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         # MLB ticker → sport_phase resolves
         assert regime["sport_phase"] in {"preseason", "regular", "playoffs", "off"}

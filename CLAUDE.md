@@ -2197,20 +2197,58 @@ Once Session 30-followup-2 fixes the dataset bug and we see the TRUE current acc
 
 ---
 
-### ☐ Session 34 — regime_sport_phase coverage for tennis/UFC/IPL (Apr 29+, planned, Tier 2)
+### ☑ Session 34 — match_phase regime axis for tennis / UFC / IPL (Apr 29, shipped)
 
-**Problem.** Session 30 bucket report's `game_phase` dimension is mostly Unknown for tennis/UFC/IPL because `period` field is None for those sports' tick data. Session 14 documented this as a structural gap (no clean preseason/regular/playoffs semantics for individual matches) but it nevertheless blocks in-match-phase analysis for the sports that need it most (UFC fights are short-duration, in-match phase is critical).
+**Problem.** Session 30 bucket report's `game_phase` dimension was mostly Unknown for tennis, UFC, and IPL because `period=None` on those sports' tick rows (no ESPN scoreboard integration). Session 30-followup-2 surfaced IPL CLV at **−23.13¢** on settled CFs — we needed to know whether IPL is uniformly bad or bad in some in-match phases and okay in others. Same question applies to UFC (n=5 settled CFs, −16.60¢) and tennis challengers (atp_challenger n=29, **+4.97¢**; wta_challenger n=41, −5.54¢ — direction differs).
 
-**Plan (sketch):**
-- For tennis: derive phase from `seconds_remaining` / `period` if Kalshi provides set-by-set state; otherwise compute from elapsed time vs typical match length
-- For UFC: derive round number from elapsed time vs `5min/round` × `5 rounds`
-- For IPL: derive innings number from over count
-- Update `bot/regime.py:tag()` to compute `sport_phase` for these sports using the new logic
-- Backfill via `tools/backfill_regime.py` (Session 14's existing tool)
+This is plumbing, not analysis. New 5th regime axis on `bot/regime.py:tag()` so we GET the data; future bucket reads SEE the slices. Session 14 pattern (regime tag plumbing). v1 taxonomy is intentionally coarse (3 buckets per sport).
 
-**Severity / urgency.** Tier 2-3. Adds analytical dimension for sports where it's most useful. ~1-2 hour scope.
+**v1 taxonomy.** Per-sport, state-aware path preferred when present, time-fallback otherwise:
 
-**Trigger to open:** post-May-2 if sport_phase-bucketed analysis would have helped resolve a specific question for tennis/UFC/IPL.
+| Sport | State path | Elapsed-time fallback | Else |
+|---|---|---|---|
+| tennis (atp/atp_challenger/wta/wta_challenger) | `set_1` / `set_2` / `set_3+` (from `set_number`) | `early` (<30m) / `mid` (30-90m) / `late` (>90m) | None |
+| ufc | `round_1` / `round_2` / `round_3+` (from `round_num`) | `round_1` (<5m) / `round_2` (5-10m) / `round_3+` (>10m) | None |
+| ipl | `powerplay` (overs 1-6) / `middle` (7-15) / `death` (16-20) (from `over_count`) | None (no clean time→over mapping with breaks) | None |
+| any other sport | None | None | None |
+
+**Investigation summary (CASE B confirmed).** ESPN scoreboard integration in [bot/game_context.py](hustle-agent/bot/game_context.py) only handles nba/nhl/mlb/ncaab. Tennis/UFC/IPL have no ESPN feed. Kalshi market dict does not expose set/round/over for these sports today. So **only `elapsed_seconds` is practically threadable in v1**. The state path is forward-compatible — when a future session sources rich state from Kalshi or other feeds, the tagger flips to it without writer-side changes. **Six writers** call `regime.tag()` (calibration, clv ×3, decisions, microstructure, tracker, universe) — only `live_watcher`'s per-tick decision logs have match-state in scope. All other writers correctly get `match_phase=None`.
+
+**What shipped.**
+- [bot/regime.py:130-220](hustle-agent/bot/regime.py:130-220) — added `_match_phase(sport, market_state) -> str | None` helper and the 5th `match_phase` key to `tag()`. New module-level `_MATCH_PHASE_SPORTS` frozenset gates which sports get a non-None bucket. `_coerce_int` helper handles the JSON-roundtrip int/float/string cases plus rejects `bool` (which is a Python int subclass and would otherwise let `True` slip through as `set_1`). `REGIME_KEYS` tuple grew from 4 → 5 keys. Module docstring spells out v1 limitations + forward-compat path.
+- [bot/live_watcher.py:1166](hustle-agent/bot/live_watcher.py:1166) — added `"elapsed_seconds": elapsed` to the existing `mom_ctx` dict in `_tick_momentum`. All 5 `_log_decision_dampened` call sites in that function spread `**mom_ctx` into `extra`, so one insertion covers all 5 sites. The dampener already passes `extra` through to `decisions.log_decision`, which passes it as `market_state` to `regime.tag` ([bot/decisions.py:60](hustle-agent/bot/decisions.py:60)). No signature changes anywhere — purely additive.
+- [tools/universe_report.py:42](hustle-agent/tools/universe_report.py:42), [tools/calibration_report.py:36](hustle-agent/tools/calibration_report.py:36), [tools/weekly_digest.py:68](hustle-agent/tools/weekly_digest.py:68), [tools/cohort_report.py:94](hustle-agent/tools/cohort_report.py:94) — each `REGIME_AXES` tuple gained `"match_phase"`. The constants are only used as `argparse choices`; downstream aggregators are key-agnostic. The new axis works in `--regime-by match_phase` for free at next report run.
+- [tools/backfill_regime.py](hustle-agent/tools/backfill_regime.py) — reworked `_try_tag` + the `"regime" in rec` early-return in `backfill_jsonl` and `backfill_gz`. Old behavior: skip any record that already had a `regime` field. New behavior: skip ONLY when every key in `REGIME_KEYS` is present; if some keys are missing (e.g., 4-key pre-Session-34 dicts), extend the existing dict in-place by adding the missing keys. Preserves byte-identical legacy values; no axis ever overwrites. Backwards-compatible for any future REGIME_KEYS growth.
+- [tests/test_regime.py](hustle-agent/tests/test_regime.py) — +75 cases under "Session 34: match_phase axis" (parametrized: 28 tennis-elapsed, 10 tennis-set, 6 ufc-elapsed, 5 ufc-round, 9 ipl-overs, 4 ipl-invalid, 7 non-listed-sport, plus type coercion + bool-rejection + negative-elapsed cases). Critical regression guard `test_existing_regime_fields_unchanged` pins the 4 pre-existing axes byte-identical for 6 fixed input cases. `test_tag_is_deterministic_property` updated to assert the 5-key set.
+- [tests/test_live_watcher.py](hustle-agent/tests/test_live_watcher.py) — `test_log_decision_extras_carry_elapsed_seconds`: drives `_tick_momentum` down the position_open reject path with `time.time` pinned via monkeypatch, asserts the captured `_log_decision_dampened` extra dict carries `elapsed_seconds=1200`.
+- 10 test sites in [tests/test_decisions.py](hustle-agent/tests/test_decisions.py), [tests/test_clv.py](hustle-agent/tests/test_clv.py), [tests/test_tracker.py](hustle-agent/tests/test_tracker.py), [tests/test_calibration.py](hustle-agent/tests/test_calibration.py), [tests/test_universe.py](hustle-agent/tests/test_universe.py), [tests/test_order_microstructure.py](hustle-agent/tests/test_order_microstructure.py) — all `assert set(regime.keys()) == {4 keys}` patterns mechanically extended to 5 keys. No semantic test changes.
+
+**Test results.** 124 regime tests pass (incl. 75 new + the regression guard). 299 passed across all touched test files (test_regime + test_live_watcher + test_decisions + test_clv + test_tracker + test_calibration + test_universe + test_order_microstructure). The 3 failures observed in that targeted run (`test_status_card_shows_bet_placed`, `test_session_summary_includes_exits`, `test_per_day_cap_resets_at_utc_midnight`) were verified pre-existing via `git stash` — they fail on `main` without Session 34 changes (the documented `__new__()` bypass-init AttributeError pattern from Sessions 4-6).
+
+**Backfill.** `python3 tools/backfill_regime.py` extended **114,772 records** in-place with `match_phase=None`:
+- decisions.jsonl: 453 + 4 archives (1674+5518+4201+3149+3168 = 17,710)
+- predictions.jsonl: 30 + 4 archives (335+284+230+238 = 1,087)
+- universe.jsonl: 5,357 + 4 archives (23,876+23,183+17,837+23,226 = 88,122)
+- clv.json: 1,811
+- positions.json: 202
+
+All extended records preserve their original 4 axis values byte-identical (regression-guard test confirms semantics). Pre-Session-34 records lack elapsed/set/round/over in their `extra` blobs, so `match_phase` correctly resolves to None for them — that's the spec contract.
+
+**Bot restart.** `launchctl bootout` → backfill → `launchctl bootstrap`. Single fresh PID under launchd; bot.lock has size 5 (PID written, not the empty-lock pattern observed before the boot cycle). No new errors in `bot.log`; first scan cycle ran clean; 202 positions reconciled against Kalshi.
+
+**Live verification.** New live_momentum decision rows from tennis/UFC/IPL active matches will populate non-null `match_phase` once watchers fire. Quiet-window may need ≤24h for a populated bucket; the test discipline + clean deploy are the actual completion signals. May 2 retuning analysis is the first checkpoint where the new dimension produces actionable signal — the `live_momentum_dataset.csv` and `live_momentum_buckets.py` reports both pull arbitrary regime keys, so `match_phase` works for free at next regeneration.
+
+**Out of scope (held).**
+- NBA/NHL/MLB/NCAAB match_phase (those have working `period`; sport_phase covers them).
+- Tournament-level phase for tennis (round-of-16, quarterfinals — different concept).
+- Modifying any of the 4 pre-existing regime axes.
+- Updating `tools/live_momentum_dataset.py` / `live_momentum_buckets.py` to do anything new with match_phase (both tools are key-agnostic; new axis works at next regeneration).
+- Refactoring `bot/game_context.py`.
+- Adding ESPN cricket / UFC / tennis scoreboard integration to populate the rich state path. The state-path code is in place; future session can land the data source.
+
+**Watch list — Session 34-followup candidates (no session opened yet).**
+- If post-May-2 bucket analysis shows match_phase delivers signal but elapsed-time bucketing is too coarse (e.g., late tennis is materially different from early-late), open a session to wire ESPN tennis scoreboard / Kalshi cricket over-count into the state path.
+- If IPL bucketing surfaces a strong `death`-overs signal (we know IPL CLV is −23¢ overall — split would show whether early/middle/death drives it), the v1 elapsed-time fallback for tennis becomes more important too.
 
 ---
 

@@ -109,7 +109,7 @@ class TestCounterfactualRecording:
         rec = _read(tmp_clv_file)[-1]
         assert "regime" in rec
         assert set(rec["regime"].keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         # opp had close_ts → event_horizon_hr resolves
         assert rec["regime"]["event_horizon_hr"] is not None
@@ -132,7 +132,7 @@ class TestCounterfactualRecording:
         rec = _read(tmp_clv_file)[-1]
         assert "regime" in rec
         assert set(rec["regime"].keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
         assert rec["regime"]["event_horizon_hr"] is None
 
@@ -721,7 +721,7 @@ class TestLiveMomentumCounterfactual:
         # Regime tagged at write time (Session 14 discipline; 6 writers + this = 7).
         assert "regime" in r
         assert set(r["regime"].keys()) == {
-            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr",
+            "time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase",
         }
 
     def test_idempotent_on_repeat_call(self, tmp_clv_file):
