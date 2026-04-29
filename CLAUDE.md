@@ -1986,6 +1986,39 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
+### ☑ Session 30-followup — challenger-circuit edge probe (Apr 29, ~30 min, NO config change)
+
+**Question.** Session 30's bucket report flagged `atp_challenger` (n=6, +1.53¢ fwd_120s, 67% WR) and `wta_challenger` (n=13, +1.10¢, 46% WR) as positive on a *forward-return proxy*. Both sports were added to `MOMENTUM_DISABLED_SPORTS` on Apr 20 (commit `b1f08ff`) over real settled-P&L evidence. Before unwinding any disable, confirm the proxy by checking settled CLV on the same rows.
+
+**Findings — data, not opinion.**
+
+| Check | Result |
+|---|---|
+| Challenger rows in `live_momentum_dataset.csv` | 19 (atp_challenger=6, wta_challenger=13) |
+| `accept` value on all 19 rows | **all `False`** — these are CFs, not entries (skip_reason `no_vol_growth_first_seen` ×14, `no_leader` ×5; sport-disable gate not even reached) |
+| Rows with `outcome_clv_cents` populated | **5/19** — all wta_challenger, all `outcome_settlement=yes_won` (severe survivorship bias on settled subset) |
+| Rows with `outcome_realized_pnl` populated | 0/19 (consistent with `accept=False`) |
+| Settled subset: avg fwd_120s | +7.60¢ (vs +1.23¢ bucket avg over all 13 wta_challenger rows — settled subset is 6× richer; the bucket finding is being pulled by these wins) |
+| Settled subset: avg outcome_clv_cents | +38.40¢ |
+| fwd_120s sign vs CLV sign agreement | 4/5 (the one mismatch had fwd_120s=0.0, CLV=+33) |
+
+**Apr 20 disable evidence (verified against `paper_trades.json` directly):**
+- atp_challenger: n=17 terminal, **-$7.80**, 53% WR, **82% early-cut** — matches commit `b1f08ff` verbatim. Solid negative-P&L evidence.
+- wta_challenger: n=1 terminal, **+$3.20**, 1/1 WR, 100% early-cut. The Apr 20 commit's "WTA -$7.00 / 71% cut" must refer to **main-tour wta**, not wta_challenger. **wta_challenger was disabled by association, not by direct evidence.**
+- 0 challenger trades opened on/after 2026-04-21 (disable confirmed effective).
+
+**Decision: Outcome C — forward-return signal looks promising but settlement data is too thin and biased to act.** Sign agreement of 4/5 is technically above the 70% threshold but the n=5 settled sample is 100% leader-side wins (yes_won). We have **zero settled losers** to validate the proxy against; survivorship bias makes the current sign-agreement uninformative. The Session 30 bucket finding stands as a forward-return-only signal but should NOT be treated as edge until challenger CFs accumulate settled losers.
+
+**Asymmetry worth noting (side observation, not actionable yet):** the original Apr 20 disable was based on n=17 trades for atp_challenger but n=1 for wta_challenger. A future re-evaluation of `MOMENTUM_DISABLED_SPORTS` scope (Session 31+ candidate) should split per-circuit and require ≥30 settled challenger CFs *with at least 5 leader-loss settlements* before considering re-enable.
+
+**Watch-list trigger:** when challenger CFs in the research dataset accumulate **≥30 rows with `outcome_clv_cents` populated AND ≥5 rows with `outcome_settlement=no_won`**, re-run this probe. Until then, leave `MOMENTUM_DISABLED_SPORTS` untouched.
+
+**Out of scope (resisted):** no edits to `bot/config.py`, `bot/live_watcher.py`, or `tools/live_momentum_dataset.py`. No re-enable. No bot restart. No UFC investigation (separate rabbit hole — defer to May 2).
+
+**Verify.** `git diff bot/` empty. Only `CLAUDE.md` edited.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
