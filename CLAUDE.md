@@ -1809,6 +1809,76 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
+### ☐ Session 29-followup — bet/exit/session_end journal write regression (Apr 28+, planned, May 2-blocking)
+
+**Problem (surfaced by manual data-accumulation audit Apr 28 ~9:00 PM ET).** Session 29 fixed `_journal_append`'s JSONDecodeError-forever bug and restored `scan_found` writes. The verification confirmed scan_found resumed (88 events in 2 seconds post-restart) and ASSUMED all 4 event types resumed because they share `_journal_append`. **The assumption was wrong.** Direct audit shows:
+
+- Most recent `bet` event in journal: `2026-04-26T17:54:06 UTC` (~2.5 days ago)
+- Most recent `exit` event: prior to Session 29 corruption window
+- Most recent `session_end` event: `2026-04-27T20:13:04 UTC` (right when the corruption hit)
+- 0 bet/exit/session_end events in last 24h
+- BUT: a live_momentum position was OPENED at `2026-04-29T00:31:51 UTC` (~50 min before audit) — `positions.json` shows it. The bet code path executed, position state recorded, BUT no corresponding `bet` event reached `live_journal.json`.
+
+**This is a separate write-path regression from Session 29's JSONDecodeError fix.** scan_found writes go through one path and were healed; bet/exit/session_end writes go through a different path (or the same `_journal_append` reached by a different caller chain) that's still broken.
+
+**What's still working:**
+- Trading: positions opening, bets placing, exits firing, paper_trades + clv all updating
+- scan_found writes (Session 29 fix held for this path)
+- Session 23 live_momentum CFs (independent of journal — writes to clv.json directly)
+
+**What's broken:**
+- Session 18's `journal_analysis.py` exit-reason breakdown (no fresh exit events)
+- Session 18's time-to-exit distribution (no bet→exit pairs to compute from)
+- Session 18's session_end P&L distribution
+- The bet/exit half of `weekly_digest.py`'s journal section
+- Watch-but-no-enter funnel from Session 21 partially works (scan_found populated) but the "and then we entered/exited" half doesn't
+
+**Hypotheses to distinguish during investigation:**
+1. **Different writer function** — bet/exit/session_end use a separate writer (not `_journal_append`) that has its own broken-state flag or its own corruption-handling path that wasn't fixed. Most likely.
+2. **Caller-level exception swallowing** — bet/exit/session_end writes go through `_journal_append` but are wrapped in caller-level try/except (in the entry/exit code paths) that silently catches whatever now-different exception is raised post-Session-29.
+3. **Stale module state** — some module-level cache or flag was set during the corruption window and never reset. New watchers spawned post-restart should have fresh state, so this is less likely.
+4. **Different file path** — bet/exit/session_end might write to a different file we haven't checked. Unlikely given the journal_analysis.py reads only `live_journal.json`.
+
+**Plan.**
+1. **Phase 1 — investigate write paths:**
+   - Read `bot/live_watcher.py` and grep for every site that records bet, exit, or session_end events: `grep -nE "live_journal|_journal_append|'bet'|'exit'|'session_end'" bot/live_watcher.py`
+   - Compare each to the scan_found path (`_journal_record_scan` → `_journal_append`)
+   - Identify whether they use the same writer or a different one
+2. **Phase 2 — confirm root cause by reproduction:**
+   - Either: trigger a synthetic bet/exit/session_end via test harness, observe whether the write happens
+   - OR: add temporary debug logging at each suspected swallow point, restart, wait for a real bet, observe where the path breaks
+   - The 00:31:51 UTC position-open is concrete evidence one bet code path executed without writing — trace why
+3. **Phase 3 — targeted fix:**
+   - One-line or small-block fix at the actual broken point
+   - NO refactoring beyond restoring the path
+   - NO migration of all 4 event types to a "unified writer" (defensive-depth, save for Session 30+)
+4. **Phase 4 — regression tests:**
+   - Add a unit test for EACH of bet, exit, session_end (separately) asserting the write happens with expected payload
+   - Mock `_journal_append` (or whatever the actual writer is) and verify it's called with the right shape
+   - This is the verification gap that let Session 29 ship without catching this — close it now
+5. **Phase 5 — verify post-restart:**
+   - Restart bot
+   - Wait for a real bet to fire (could be hours; live_momentum entries are sparse) OR force one via test
+   - Confirm bet event appears in journal within minutes of position open in `positions.json`
+   - Same for exit and session_end as the cycle plays out
+
+**Out of scope (resist):**
+- Migrating `_journal_append` to `bot/state_io.py:save_json` (atomic tempfile + rename) — defensive depth, deferred from Session 29 explicitly
+- Refactoring bet/exit/session_end to a unified writer
+- The Session 19a-peakfix test pollution one-liner (separate watch-list item)
+- Backfilling the 28+h gap (impossible, data wasn't captured)
+
+**Severity / urgency.** Tier 1, May 2-blocking for the journal-side analysis. Bot's actual TRADING is unaffected. Ship before May 2 so journal_analysis can give useful exit-reason breakdowns at the retuning checkpoint. ~30-45 minute investigation + small fix + restart.
+
+**Verify (acceptance criteria):**
+1. Root cause identified by exact line/commit reference, written in commit message.
+2. Targeted fix shipped (one-line or small-block, NO refactoring).
+3. Regression tests added for ALL FOUR event types (bet, exit, session_end, scan_found) — closes the verification gap that let Session 29 ship without catching this.
+4. Bot restarted; within 10 min OR within the next live_momentum bet cycle (whichever comes first), bet event appears in journal corresponding to a positions.json entry.
+5. Mark Session 29-followup ☑ in CLAUDE.md.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
