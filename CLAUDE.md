@@ -1897,7 +1897,25 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 ---
 
-### ☐ Session 30 — live_momentum research dataset + bucket analysis (Apr 28+, planned, ship-now)
+### ☑ Session 30 — live_momentum research dataset + bucket analysis (Apr 28+, ship-now, shipped Apr 28-29)
+
+**Shipped.** `tools/live_momentum_dataset.py` (Stage 1) + `tools/live_momentum_buckets.py` (Stage 2) + `tests/test_live_momentum_dataset.py` (14 cases inc. leakage property test) + `tests/test_live_momentum_buckets.py` (13 cases). All 27 tests green. NO changes to `bot/` (read-only analysis layer over data already collected). Stage 3 (model.py) deferred per plan.
+
+**First run on 7-day data:** 89 rows (9 accept + 80 tunable-reject). Sample is thinner than the 100s-low-1000s spec estimate because (a) journal has only 13 momentum bets in the window and (b) Session 23 CFs are throttled to 5/day per (sport, skip_reason). Adequate for directional signals; thin for tight bucket inference.
+
+**Findings (authored from first real run, baseline fwd_return_120s = +0.13c):**
+- **Strongest signals (n>=5, |delta| >= 1.0c):**
+  - `sport=ufc` (n=5): **-4.33c** vs baseline. UFC live_momentum decisions are losing money on 120s forward; consider tightening UFC entry gates or pausing the sport in next retune.
+  - `sport=wta_challenger` (n=13): **+1.10c**, win rate 46.2% (vs ~15% baseline). Best-performing sport in window.
+  - `sport=atp_challenger` (n=6): **+1.53c**, win rate 67%. Thin but consistent with wta_challenger pattern — challenger circuits look favorable.
+  - `dip=6-8` (n=6): **+1.37c**, win rate 50%. Mid-dip entries outperform tight 0-2 dips (which dominate the sample at n=75 with +0.03c).
+  - `leader_price=60-70` (n=12): **+1.03c**, +CLV rate 100%. Cheaper leader prices outperform; 80-90 band is weakest at -0.61c (n=38).
+- **Suspicious-but-thin (n<5, |delta| >= 3.0c — needs more samples before acting):**
+  - `wp_edge=-0.05—0` (n=2): +9.87c. Worth watching if more samples accumulate.
+- **DQS bucket is empty** — DQS is not stored on tick rows in current schema (verified across 14516 ticks). Documented in dataset docstring; backfilling DQS into ticks is out of scope for Session 30 (would require `bot/live_watcher.py` change).
+- **Game-phase bucket is mostly Unknown** (n=85) because tennis/UFC/IPL ticks have `period=None`. NBA/NHL phases populated but n<5 each. Will improve as basketball + hockey playoff samples accumulate.
+
+**May 2 retune candidates surfaced:** UFC entry gates, leader_price=80-90 band (cluster of negative-EV decisions), challenger-circuit favorability boost.
 
 **Problem.** Live_momentum is the only profitable strategy (+$12.30 / 39 trades / 62% WR). Sample size is thin and the existing tools (`cohort_report`, `journal_analysis`, `excursion_report`) are descriptive — they tell you what happened, not what's predictive. To find an edge faster, we need a unified per-tick decision dataset that joins live_ticks + live_journal + clv into one tabular surface, plus bucket analysis across multiple dimensions (sport, leader_price, dip, wp_edge, dqs, game phase, spread). The dataset opens up ad-hoc analytical questions current tools can't answer; the bucket reports surface dimensional interactions (sport × leader_price, dip × dqs) that aren't in any existing tool.
 
