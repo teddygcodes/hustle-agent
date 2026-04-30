@@ -1684,6 +1684,16 @@ This matches the guardrail comment shipped in this followup: "If 300s ALSO produ
 
 **What this means for cohort_report (May 2-blocking concern from Session 28).** The bias is materially reduced even though the partial flag is still True: 802 pages vs the original 221 means the cursor enumerated ~3.6× as many markets before bailing. The `scanned_by` attribution from this followup forward is far more representative of "what's in Kalshi" than pre-Session-28 data. Whether that's "complete enough" for the May 2 retuning analysis is a judgment call to make against the actual cohort_report output — not against the binary partial flag.
 
+**Re-verification (Apr 30, ~36h post-deploy) — STABLE.** Scheduled re-measure with sufficient sample (n=32 unique scans since the 23:30 ET Apr 28 deploy):
+
+| metric | Apr 28 first-scan | Apr 29 n=4 spot-check | **Apr 30 n=32 re-verify** |
+|---|---|---|---|
+| cursor_rows median | 632 | 1850 | **1949** |
+| distribution | n/a | thin | min=810, p25=1612, p75=2206, max=2782 |
+| partial flag | 100% | 100% | 100% |
+
+Cursor reach 3× the first-scan baseline and held tight (p25/p75 = 1612/2206, ratio 1.37) over 36h covering Session 38a (ATP re-enable) and Session 39 (asyncio event loop blocking fix) deploys. The deadline-bump architecture is producing materially more cursor reach than the first-scan number suggested — likely because the first scan ran while the bot was warming up; steady state is ~1900 rows. Partial flag still 100% as predicted (Kalshi API ceiling, not solvable via deadline). `_position_check_loop` cadence median = 32.0s over 99 samples, well below the 35s Session-29 trigger. Referenced report: [bot/state/reports/cursor_stability_2026-04-30.md](bot/state/reports/cursor_stability_2026-04-30.md). **No further action; Session 28-2 (per-series-paginated rewrite) remains deferred per the original Outcome-D guardrail.**
+
 ---
 
 #### Watch list — Session 28-2 candidate (per-series-paginated universe rewrite)
