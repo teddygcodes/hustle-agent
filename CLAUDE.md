@@ -118,7 +118,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis disabled scope: `atp_challenger` + `wta` + `wta_challenger` (main-tour ATP re-enabled Apr 29 via Session 38a after n=56 settled CFs / +11.32¢ + n=4 historical trades / +$8.60 corroborated the original "precautionary" bundling was wrong). Leader floor is 0.65 (Session 19c lowered from 0.70 — see config.py:70). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis disabled scope: `atp_challenger` + `wta` + `wta_challenger` (main-tour ATP re-enabled Apr 29 via Session 38a after n=56 settled CFs / +11.32¢ + n=4 historical trades / +$8.60 corroborated the original "precautionary" bundling was wrong). Leader floor is 0.65 (Session 19c lowered from 0.70 — see config.py:70). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | **Apr 30 baseline** (Session 40): 73 settled, **−$40.42** (−$0.55/trade), 22W / 7L / 44 EE (60% EE rate). Apr 20 baseline was 39 settled / +$12.30. Session 40 Pattern C: exits saved $62 of incremental losses on the EE cohort — leak is structural (Win:Loss magnitude = 0.261), not exit-side. |
 | `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
@@ -406,6 +406,8 @@ Don't change these without data. If you do change one, update the comment with t
 **Grand total paper P&L: ≈ −$98.** Apr 20 rebuild was necessary because `exited_early` trades (59 of 93 resolved) were silently missing from `settlement_log` — only market-close won/lost were being logged. Post-fix: `executor._paper_record_exit` calls `tracker.log_settlement` + `patterns.record_resolution` on every paper exit, so the three counts (paper resolved, settlement_log length, sum of `strategies[k].real_trades`) stay in lock-step. Invariant warning fires if they drift.
 
 **Apr 29, 2026 — capital deposit:** `PAPER_STARTING_BALANCE` bumped 500 → **10,500** (+$10,000). Reconstructed paper balance post-restart = **$10,402** ($10,500 starting + −$98 historical). All future paper trades will have ~21× larger Kelly-sized positions; STRATEGY_BUDGETS absolute amounts scale 21× (vig_stack 60% = $6,241; live_momentum 20% = $2,080; arbs 20% = $2,080); 10% reserve floor = $1,050. Pre-bump trades (timestamp < 2026-04-30) are denominated in the $500-balance era; post-bump trades will produce ~21× larger dollar P&L per trade. **All edge math and CLV signals (cents-based) are scale-invariant** — the Sessions 19c / 30 / 36 / 38a retuning decisions are robust. May 13 Session 38a re-validation routine updated to filter `paper_trades.json` to `timestamp >= 2026-04-30` for the post-bump ATP cohort comparison.
+
+**Apr 30, 2026 — live_momentum cohort flipped negative (Session 40):** Apr 30 ground truth from `paper_trades.json` is **73 settled live_momentum trades, −$40.42 (−$0.55/trade), 22W / 7L / 44 EE (60% EE rate)** — down from the Apr 20 baseline of 39 settled / +$12.30 / 62% WR. Session 40 Phase-1 bucket diagnosis: 4 of the 7 active exit paths fired on the cohort (stop_loss n=21, take_profit n=17, near_settle n=3, trailing_stop n=1; plus 2 NO_JOURNAL_MATCH cases from Session 29-followup watcher-restart artifacts). Counterfactual analysis via `clv.closing_yes_price` (100% coverage) showed total cohort Δ/trade = **−$1.41** — holding all 44 EE'd trades to settlement would have lost $62 MORE, not less. The dominant buckets (stop_loss + take_profit = 86% of cohort) BOTH had negative deltas — exits saved money. Pattern C declared. The structural leak is **Win:Loss magnitude = 0.261** (avg win +$3.41 vs avg loss −$13.10; 7 lost-class trades alone net −$91.68, more than wiping out the 22 wins). Direction-setting conclusion for future sessions: *exit logic is balanced; investigate STRATEGY (entry gates, sport scope, sizing) rather than EXITS*. Watch-list trigger: re-investigate when EE cohort ≥ 80 trades OR per-trade P&L ≤ −$1.00.
 
 The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the then-visible data but missed 50 exited_early trades. Don't trust any pre-Apr-20 summary for early-exit strategies.
 
@@ -2624,6 +2626,82 @@ Session 18 documented this same pattern from the Apr 14 audit ("NO at 90-95¢ ri
 3. Within 5 min of restart, even if Kalshi is still flaky and `snapshot_universe` is mid-flight: `bot.lock` mtime advances every ≤30s; `bot_state.last_heartbeat` age stays < 60s; `LIVE_SCAN_TELEMETRY` log line appears every ~60s. The event loop stays responsive regardless of snapshot duration.
 4. After ~10 min: Tyler sees live_watcher notifications resuming on Telegram (first new bet entry / status card edit since 23:54:36 ET Apr 29).
 5. If any of those fail, do NOT restart-as-band-aid — open Session 39-followup to audit other synchronous-call sites in async paths.
+
+---
+
+### ☑ Session 40 — Live_momentum EE-rate investigation (Apr 30, shipped — Outcome C, doc-only)
+
+**Problem.** Live_momentum's net P&L slumped from +$12.30 (Apr 20 baseline, 39 settled) to **−$40.42** (Apr 30 baseline, 73 settled / 22W / 7L / 44 EE / 60% EE rate / −$0.55 per trade). Hypothesis under investigation: are the 7 active exit paths in `_check_exit` ([bot/live_watcher.py:2306-2480](hustle-agent/bot/live_watcher.py:2306)) firing on positions that would have settled positive if held? If yes, tighten the over-eager path. If no, the leak is structural and exits aren't the right surface.
+
+**Phase-0 corrections to the original prompt** (verified directly against on-disk state before running Phase 1):
+- `live_journal.json` exit events use `timestamp` field, NOT `ts`. Mode field is `momentum`|`dip` (both go through the same `_check_exit` priority order — bucket by ticker, not mode).
+- Reason strings use HYPHENS: `STOP-LOSS:` and `NEAR-SETTLE:` ([live_watcher.py:2376, 2459](hustle-agent/bot/live_watcher.py:2376)). The user's prompt's `'STOP LOSS' in reason` / `'NEAR SETTLE' in reason` matches would have failed silently.
+- `paper_trades.json` 0/44 EE'd live_momentum trades have `exit_reason` field (Session 36's `_paper_record_exit(reason=...)` either didn't fire for this cohort or uses a different path). All 44 must be journal-derived.
+- `clv.json:closing_yes_price` has 100% coverage on the 44 EE'd cohort, so the "would-have-settled-to" counterfactual collapses to a direct lookup — no tick-walk needed (the original prompt envisioned walking ticks).
+- 7 active exit paths confirmed: TAKE PROFIT / NEAR-SETTLE / TRAILING STOP / SCORE FLIP / OPP RUN EXIT / STOP-LOSS / DOLLAR STOP. UNDERWATER EXIT was REMOVED Apr 16 (not Session 16 as the prompt said) and did not fire on any cohort trade; 18 historical UNDERWATER events in the journal predate the cohort.
+
+**Phase 1 — Diagnosis (read-only).** Bucketed 44 EE'd trades by reason string (matched against journal exit events by ticker, nearest-timestamp; median join delta = 0.0s on every match). Computed counterfactual P&L per bucket via `(closing_yes_price/100 − entry_price) × contracts`.
+
+| bucket | n | Σ actual | avg actual | Σ if-held | avg if-held | Δ/trade | coverage |
+|---|---|---|---|---|---|---|---|
+| stop_loss | 21 | −$58.76 | −$2.80 | −$77.14 | −$3.67 | **−$0.88** | 21/21 |
+| take_profit | 17 | +$50.43 | +$2.97 | +$27.61 | +$1.62 | **−$1.34** | 17/17 |
+| near_settle | 3 | +$4.20 | +$1.40 | +$7.40 | +$2.47 | +$1.07 | 3/3 |
+| trailing_stop | 1 | +$0.68 | +$0.68 | −$12.07 | −$12.07 | −$12.75 | 1/1 |
+| no_journal_match | 2 | −$20.35 | −$10.18 | −$31.62 | −$15.81 | −$5.63 | 2/2 |
+| **TOTAL** | **44** | **−$23.80** | **−$0.54** | **−$85.82** | **−$1.95** | **−$1.41** | **44/44** |
+
+Score flip / opp run exit / dollar stop / underwater all = 0 events on this cohort. Only 4 active paths fired.
+
+**Pattern A check** (single bucket dominates losses): `stop_loss` owns 74% of cohort negative pnl, **but** its counterfactual delta is **−$0.88/trade** (NEGATIVE — exits SAVED money). Pattern A requires delta ≥ +$1.50/trade with n ≥ 10. **Fails.**
+
+**Pattern B check** (multiple paths share the problem): Only `near_settle` has positive delta (+$1.07/trade), but n=3 — fails the n ≥ 10 floor. **Fails.**
+
+**Pattern C — confirmed.** The dominant buckets (stop_loss n=21, take_profit n=17 = 38/44 = 86% of cohort) BOTH have NEGATIVE counterfactual deltas — the exits are roughly doing their job. Total cohort Δ/trade = **−$1.41**, meaning holding ALL 44 EE'd trades to settlement would have generated **$62 MORE in losses**, not less.
+
+**Pattern D** (coverage-thin): structurally cannot fire on this cohort — clv has 100% closing_yes_price coverage.
+
+**The structural finding.** Win:Loss magnitude = **0.261** (worse than Session 38a-2's WTA finding of 0.390). Avg win = +$3.41 (n=22); avg loss = −$13.10 (n=7). The 7 lost-class trades alone net −$91.68, more than wiping out the 22 wins (+$75.06). EE bucket (n=44) drags the total another −$23.80 to −$40.42 net. **The exit-logic question (Phase 1's bucket analysis) is not where the leak is.** The leak is in the entries that go to settlement and lose ~3.84× the size of an average win.
+
+**Decision: Outcome C — ship docs only.** No exit-path tightening; the data does not support it. Per the user's AskUserQuestion-2 answer ("Ship Pattern C cleanly: docs-only, watch-list trigger, stop"), no per-sport / match_phase / leader_price slicing — those are deferred to Sessions 38b/c/d/e + 41+ candidates if the watch-list trigger fires.
+
+**Verbatim direction-setting conclusion.** *Live_momentum's exit logic is balanced; the strategy itself has marginal edge — investigate STRATEGY (entry gates, sport scope, sizing) rather than EXITS in a future session.* The natural next probes from this finding:
+- The 7 lost-class trades' shape (entry price band, sport, leader_price, time-to-settlement). Why do they lose 3.84× the size of an average win?
+- Whether entry sizing is the asymmetric-loss multiplier (Kelly cap behavior on high-confidence entries that lose).
+- Per-sport breakdown — Sessions 38b (IPL), 38c (MOMENTUM_LEADER_MAX ≥ 90¢) are already queued and address pieces of this question.
+
+**NO_JOURNAL_MATCH cases** (n=2, both Apr 24-25): `KXNBAGAME-26APR24LALHOU-HOU` (entry 0.73, pnl −$14.60) and `KXIPLGAME-26APR25SRHRR-RR` (entry 0.74, pnl −$5.75). Most likely Session 29-followup watcher-restart-state-loss artifacts ("Watcher restart loses bets_placed instance state" — CLAUDE.md watch list item under Session 28). Bot was restarted multiple times in that window (Sessions 28, 28-followup, 29). Per "no rabbit-holes" answer, noted not investigated.
+
+**Out of scope (preserved + tightened by AskUserQuestion-2 answer).**
+- New exit paths (DQS-aware exits, per-sport thresholds) — Session 41+ if entry-side investigation surfaces evidence.
+- Wiring `LiveMomentumStrategy` (Session 19a port) into production — separate decision, has its own prereqs.
+- Re-evaluating disable list (Sessions 38a / 38a-2 just did this for ATP main / WTA main).
+- IPL sport-disable (Session 38b queued).
+- MOMENTUM_LEADER_MAX ceiling investigation (Session 38c queued).
+- Match_phase axis dataset wire-up (Session 38d queued).
+- Bucket-report n_total/n_settled split (Session 38e queued).
+- Per-sport / match_phase / leader_price slicing of EE buckets (user explicitly chose "no rabbit-holes").
+- Investigating the 2 NO_JOURNAL_MATCH cases beyond a one-line note.
+- Session 28-2 universe rewrite (still on watch list).
+
+**Watch-list trigger.** Re-investigate Session 40 when EITHER:
+- EE cohort grows to ≥ 80 trades on `paper_trades.json` (currently 44), OR
+- Net per-trade live_momentum P&L worsens to ≤ −$1.00 (currently −$0.55).
+
+If either fires, run the same Phase-1 bucket analysis on the larger sample to verify Pattern C still holds. Larger samples may surface a per-bucket signal that's currently below the n ≥ 10 floor (especially `near_settle` at n=3 and `trailing_stop` at n=1 — both have positive deltas but tiny n).
+
+**What shipped (doc-only).**
+1. This Session 40 ☑ block.
+2. Money section live_momentum baseline updated from Apr 20 (+$12.30 / 39 settled / 62% WR) to Apr 30 (−$40.42 / 73 settled / 60% EE rate / −$0.55 per trade), with the Win:Loss asymmetry (0.261) flagged as the structural finding.
+3. Strategies table at the top of CLAUDE.md updated with the current cohort numbers.
+
+**No code changes. No tests. No bot restart. No state mutation.** Read-only investigation; clean Pattern C ship.
+
+**Verify.**
+1. ☑ `git diff bot/` empty (only `CLAUDE.md` edited).
+2. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1167 passed (Session 39 baseline). Doc-only edits don't move this.
+3. ☑ No bot restart. No state mutation. No CLV churn.
+4. ☑ `wc -l bot/state/paper_trades.json` and EE counts unchanged after the Phase 1 read-only Python script.
 
 ---
 
