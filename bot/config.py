@@ -142,7 +142,29 @@ MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% w
 # based on post-deploy realized P&L.
 #
 # Still disabled (challengers + main WTA) — direct evidence (atp_challenger
-# n=17 -$7.80) or asymmetric evidence pending separate per-sport re-eval.
+# n=17 -$7.80) or per-sport re-eval verdicts below.
+#
+# Apr 30 — Session 38a-2 re-evaluation kept main-tour WTA disabled
+# (Outcome B). Evidence:
+#   1. n=48 settled CFs, mean CLV -1.23c, +CLV rate 71% (34/14).
+#      EV = 0.71 * (+31.06c avg win) + 0.29 * (-79.64c avg loss)
+#         = -1.229c per CF — structurally negative despite 71% +CLV.
+#      Win:Loss magnitude ratio 0.39 — losses are ~2.6x larger than wins,
+#      eating the win-frequency advantage.
+#   2. Historical n=6 paper trades (Apr 15-20): 1W/1L/4EE, -$10.20 net,
+#      avg -$1.70/trade. Restated from the original Apr-20 reading
+#      (1W/1L/5EE / -$7.00) — paper_trades.json now has 6 terminal
+#      entries; CLAUDE.md lines 414/458 corrected this session.
+#   3. Same skip_reason caveat as Session 38a — Session 23 tunable-
+#      allowlist makes "sport_disabled" share structurally 0% on
+#      settled CFs; criterion deweighted in the decision matrix.
+# Watch-list trigger (no scheduled routine — passive): re-evaluate when
+# settled wta CFs reach n=80 in future dataset regenerations OR if mean
+# CLV turns positive. Currently 48.
+#
+# atp_challenger and wta_challenger remain disabled — atp_challenger CFs
+# at n=62 / mean CLV -1.02c / 69% +CLV (slightly negative), wta_challenger
+# at n=61 / mean CLV -14.31c / 61% +CLV (strongly negative).
 #
 # Gate blocks NEW entries only; already-open positions exit normally via the
 # TP / SL / trailing-stop logic in live_watcher._check_exit, which does not

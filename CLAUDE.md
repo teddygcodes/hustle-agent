@@ -411,7 +411,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 **Why vig_stack is negative:** of 54 settled trades, 25 closed at a loss — the weight concentrated in volatile ladders. Ground truth by family: volatile (`KXHIGHDEN/NY/CHI`) = 36 trades, −$126.88, 69% early-cut; whitelist (`KXHIGHMIA/AUS/INX`) = 18 trades, +$16.26. Apr 18 Filter F set the volatile floor at NO ≥ 0.90; Apr 20 Session 2 raised it to **0.93** after bucket analysis showed only [92-96¢) is breakeven. Going forward we expect `real_pnl` to drift positive on new volatile-family trades. If a post-0.93 cohort of 10+ still prints negative, escalate.
 
-**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill). **Apr 29 Session 38a removed `"atp"` (main tour) from the disable set** after settled-CF re-run showed +11.32¢ mean CLV at n=56 with n_no_won=10 + 4 historical pre-disable trades net +$8.60 (3W/1L); the precautionary bundling lacked direct main-tour evidence. Current disable set: `{atp_challenger, wta, wta_challenger}` — direct evidence for atp_challenger; wta + wta_challenger pending separate per-sport re-evaluation. Session 2 also briefly raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to "skip the [75-80¢) dead zone" — but MIN is a floor, so 0.75 admits the dead zone while surrendering the positive [70-75¢) bucket. Reverted to 0.70 same day; proper dead-zone filter (explicit [75-80¢) exclusion in `is_leader`) is TODO. `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
+**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$10.20 / 67% cut — current paper_trades.json is n=6 / 1W/1L/4EE; the original Apr-20 cohort was n=7 / 1W/1L/5EE / −$7.00, since restated by Session 38a-2 audit). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill). **Apr 29 Session 38a removed `"atp"` (main tour) from the disable set** after settled-CF re-run showed +11.32¢ mean CLV at n=56 with n_no_won=10 + 4 historical pre-disable trades net +$8.60 (3W/1L); the precautionary bundling lacked direct main-tour evidence. Current disable set: `{atp_challenger, wta, wta_challenger}` — direct evidence for atp_challenger; wta + wta_challenger pending separate per-sport re-evaluation. Session 2 also briefly raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to "skip the [75-80¢) dead zone" — but MIN is a floor, so 0.75 admits the dead zone while surrendering the positive [70-75¢) bucket. Reverted to 0.70 same day; proper dead-zone filter (explicit [75-80¢) exclusion in `is_leader`) is TODO. `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
 
 **Open exposure** (from positions.json, check at session start): ~10-16 open positions, mostly vig_stack. Whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely; volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) now require NO ≥ 0.93 (post–Session 2). Any already-open position with a pre-0.93 entry continues to exit on normal rules — the floor gates entries, not exits.
 
@@ -455,7 +455,7 @@ Backup: `bot/state/strategy_audit.json.bak-20260421`.
 **Problem.** Two active dollar leaks visible after the Session-1 settlement-pipeline rebuild (ground-truth recompute from `paper_trades.json`):
 
 - **Vig_stack volatile branch**: KXHIGHDEN/NY/CHI = **−$126.88 on 36 trades, 69% early-cut**. Whitelist families (KXHIGHMIA/AUS/INX) = **+$16.26 on 18 trades**. Volatile-family entry-price buckets: `<92¢` = −$110.79 / 42 trades (deeply negative); `[92-96¢)` = +$0.17 / 12 trades, 11W/1L (92% WR) — the sole breakeven band.
-- **Live_momentum tennis**: ATP Challenger = 2W/1L/14 EE, **−$7.80, 82% cut**. WTA = 1W/1L/5 EE, **−$7.00, 71% cut**. Tennis combined = 72% of live_momentum volume for **−$6.20 net**. NBA + NHL alone = **+$19.60 on 10 trades**.
+- **Live_momentum tennis**: ATP Challenger = 2W/1L/14 EE, **−$7.80, 82% cut**. WTA = 1W/1L/4 EE, **−$10.20, 67% cut** (Session 38a-2 audit; the original Apr-20 reading was 1W/1L/5 EE / −$7.00). Tennis combined = 72% of live_momentum volume for **−$6.20 net** (Apr-20 cohort, predates the wta restatement). NBA + NHL alone = **+$19.60 on 10 trades**.
 - **Momentum entry dead zone**: [75-80¢) bucket = **−$3.20 across 9 trades**, bracketed by positive [70-75¢) (+$9.30) and [80-85¢) (+$8.40).
 
 **What shipped.**
@@ -2390,6 +2390,79 @@ Main-tour ATP was the highest-confidence positive finding from Investigation #1.
 5. May 13: scheduled routine fires; CONFIRM or REVERT per the rule above.
 
 **Out of scope (preserved — separate sessions).** wta_challenger / atp_challenger / wta re-evaluation; per-sport TickStrategy variants (Session 39); IPL disable (Session 38b); MOMENTUM_LEADER_MAX (Session 38c); match_phase axis dataset wire-up (Session 38d); bucket-report n-column split (Session 38e); CF emission for disable-check pathway (Session 31).
+
+---
+
+### ☑ Session 38a-2 — WTA main-tour disable re-evaluation (Apr 30, shipped — Outcome B, doc-only)
+
+**Problem.** Apr 30 evening — Tyler asked "why aren't we swing trading live games right now?" Investigation pointed at no-bet-eligible-watchers-active as the proximate cause but raised a structural question: should `wta` (main tour) still be in `MOMENTUM_DISABLED_SPORTS`? The Apr 20 disable cited weak per-sport evidence for wta — same asymmetric-evidence pattern Session 30-followup flagged for `wta_challenger` and Session 38a then resolved for atp main. Plus a CLAUDE.md doc audit found the wta-main historical line was stale (claimed 1W/1L/5EE / −$7.00; current `paper_trades.json` is 1W/1L/4EE / −$10.20).
+
+This session is the wta-main-specific re-evaluation. Outcome A (re-enable) and Outcome B (keep disabled, fix docs) were both legitimate landings. The brief's footer warning explicitly cautioned against shipping Outcome A by reflex.
+
+**Investigation (read-only Phase 1).** Re-ran the Session 38a hygiene checks against the current dataset:
+
+```
+CHECK 1: WTA settled CFs (live_momentum_dataset.csv, 714 rows total)
+  n_total              = 48
+  outcome_settlement   = 34 yes_won / 14 no_won
+  Mean CLV             = -1.23¢
+  Median CLV           = +30.00¢
+  +CLV count           = 34 (71%)
+  -CLV count           = 14 (29%)
+  Avg WIN size         = +31.06¢
+  Avg LOSS size        = -79.64¢
+  Win:Loss magnitude   = 0.390
+  EV per CF            = -1.229¢   ← structurally negative
+
+CHECK 2: WTA skip_reason distribution (settled CFs)
+  no_vol_growth_first_seen   15 (31.2%)
+  no_vol_growth_idle         14 (29.2%)
+  no_leader                  11 (22.9%)
+  low_volume                  8 (16.7%)
+  sport_disabled              0 (0.0%)   ← per Session 23 tunable-allowlist (same caveat as Session 38a)
+
+CHECK 3: WTA main-tour historical paper trades (paper_trades.json, 228 entries)
+  n=6 terminal: 1 won / 1 lost / 4 exited_early
+  Total realized P&L = -$10.20  (avg -$1.70/trade)
+    KXWTAMATCH-26APR15COCPOD  -$3.60   exited_early
+    KXWTAMATCH-26APR16WANCIR  +$2.80   exited_early
+    KXWTAMATCH-26APR16BONOLI  -$2.20   exited_early
+    KXWTAMATCH-26APR17BONCIR  +$6.00   won
+    KXWTAMATCH-26APR20VEKJEA  -$16.20  lost
+    KXWTAMATCH-26APR20POTKOS  +$3.00   exited_early
+```
+
+**Decision matrix vs the brief's Outcome A criteria.**
+
+| # | Criterion | Bar | Actual | Pass/Fail |
+|---|---|---|---|---|
+| 1 | Survivorship | n_no_won ≥ 10 AND ≥ 15% of total | 14 / 29% | ✓ PASS |
+| 2 | Skip_reason ≥50% sport_disabled | 50% | 0% (structurally absent — same caveat as Session 38a) | ✗ FAIL |
+| 3 | Historical | avg ≥ −$2/trade OR n<5 | −$1.70/trade | ✓ PASS |
+| 4 | CLV asymmetry / EV | EV > 0 | EV = −1.229¢/CF | ✗ FAIL |
+
+**Why EV is negative despite 71% +CLV — the decisive signal.** When wta wins it wins small (+31¢); when it loses it loses big (−80¢). 0.71 × 31.06 = 22.0¢ vs 0.29 × 79.64 = 23.1¢. The headline 71% +CLV rate is misleading; loss-magnitude eats the win-frequency advantage. This is consistent with the historical 4-of-6-EE pattern — strategy clips upside while letting losses run to SL/trail. This is a strategy-level exit-logic concern, NOT a sport-level signal — re-enabling wta would not address it and would write the negative-EV signal into realized P&L.
+
+**Decision: Outcome B.** Keep wta in `MOMENTUM_DISABLED_SPORTS`. The asymmetric-evidence pattern from Sessions 30-followup / 38a doesn't trigger a re-enable here because the CLV signal itself is genuinely negative on EV terms. Outcome B is the discipline working.
+
+**What shipped (doc-only, no code-behavior change, no bot restart).**
+- [hustle-agent/CLAUDE.md:414](hustle-agent/CLAUDE.md:414) — corrected stale WTA historical claim (was "−$7.00 / 71% cut" / Apr-20 cohort 1W/1L/5EE; restated to "−$10.20 / 67% cut" / current 1W/1L/4EE).
+- [hustle-agent/CLAUDE.md:458](hustle-agent/CLAUDE.md:458) — same correction in the "Live_momentum tennis" bullet.
+- [hustle-agent/bot/config.py:144-150](hustle-agent/bot/config.py:144) — extended the inline comment block above `MOMENTUM_DISABLED_SPORTS` with the Session 38a-2 evidence + watch-list trigger, mirroring the Session 38a evidence block.
+- This Session 38a-2 ☑ block (this entry).
+
+**Watch-list trigger (no scheduled routine — passive watch).** Re-evaluate wta-main when ANY of:
+- Settled wta CFs reach **n=80** on a future regeneration of `bot/state/research/live_momentum_dataset.csv` (current n=48).
+- Mean CLV crosses **positive** territory.
+- A meaningful sample (≥3) of NEW wta-main paper trades accumulates (currently impossible without a re-enable; would only become testable if Outcome A ships at a future date).
+
+**Out of scope (preserved — separate sessions).** atp_challenger re-eval (mean CLV −1.02¢, slightly negative — keep disabled); wta_challenger re-eval (mean CLV −14.31¢, strongly negative — keep disabled); the live_momentum exit-logic asymmetry surfaced here ("wins small, loses big") is a strategy-level concern flagged for a future session, not actioned here. IPL disable (Session 38b); MOMENTUM_LEADER_MAX (Session 38c); match_phase axis (Session 38d); bucket-report n-column split (Session 38e).
+
+**Verify.**
+1. ☑ Math sanity check: 1W (BONCIR +$6.00) + 1L (VEKJEA −$16.20) + 4 EE (−$3.60, +$2.80, −$2.20, +$3.00) = 6 trades summing to −$10.20.
+2. ☑ Investigation queries are read-only against on-disk state; comment-only edits cannot perturb them. Re-running produces identical numbers.
+3. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1167 passed (Session 39 baseline). Comment-only changes don't move this.
+4. ☑ No bot restart. No state change. No CLV churn. No new behavior in `bot/state/decisions.jsonl`.
 
 ---
 
