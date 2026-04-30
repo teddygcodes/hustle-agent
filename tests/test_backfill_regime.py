@@ -31,19 +31,40 @@ def test_backfill_jsonl_is_idempotent(tmp_path):
     assert "regime" in first
 
 
-def test_backfill_skips_records_with_existing_regime(tmp_path):
-    """A record that already has regime must be left untouched —
-    even if the existing regime is partial / hand-written."""
+def test_backfill_extends_records_with_partial_regime(tmp_path):
+    """Session 34: a record with an incomplete regime dict gets extended in
+    place — the existing key value is preserved byte-identical, missing
+    REGIME_KEYS are added."""
     p = tmp_path / "decisions.jsonl"
     existing = {
         "ts": "2026-04-25T12:00:00+00:00",
         "ticker": "KXNBAGAME-X",
-        "regime": {"time_of_day": "afternoon"},
+        "regime": {"time_of_day": "afternoon"},  # 1 of 5 keys
+    }
+    p.write_text(json.dumps(existing) + "\n")
+    n = backfill_jsonl(p)
+    assert n == 1
+    out = json.loads(p.read_text().strip())["regime"]
+    assert out["time_of_day"] == "afternoon"  # preserved byte-identical
+    for key in ("day_of_week", "sport_phase", "event_horizon_hr", "match_phase"):
+        assert key in out
+
+
+def test_backfill_skips_records_with_complete_regime(tmp_path):
+    """Session 34: when all REGIME_KEYS are present, backfill is a no-op."""
+    from bot.regime import REGIME_KEYS
+    p = tmp_path / "decisions.jsonl"
+    complete_regime = {key: None for key in REGIME_KEYS}  # all 5 keys
+    complete_regime["time_of_day"] = "afternoon"  # at least one non-None
+    existing = {
+        "ts": "2026-04-25T12:00:00+00:00",
+        "ticker": "KXNBAGAME-X",
+        "regime": complete_regime,
     }
     p.write_text(json.dumps(existing) + "\n")
     n = backfill_jsonl(p)
     assert n == 0
-    assert json.loads(p.read_text().strip())["regime"] == {"time_of_day": "afternoon"}
+    assert json.loads(p.read_text().strip())["regime"] == complete_regime
 
 
 def test_backfill_dry_run_does_not_write(tmp_path):
@@ -82,9 +103,10 @@ def test_backfill_handles_gzipped_archive(tmp_path):
     assert "regime" in row
 
 
-def test_backfill_json_array_real_records_and_skips_disabled(tmp_path):
-    """clv.json / positions.json store records as a JSON array (not JSONL).
-    backfill_json_array tags every dict-shaped entry."""
+def test_backfill_json_array_extends_partial_regime(tmp_path):
+    """clv.json / positions.json store records as a JSON array. Session 34:
+    backfill_json_array extends every dict that's missing any REGIME_KEY,
+    preserving non-regime fields and any pre-existing regime sub-keys."""
     p = tmp_path / "clv.json"
     p.write_text(json.dumps([
         {"ticker": "KXNBAGAME-X", "recorded_at": "2026-04-25T12:00:00+00:00"},
@@ -93,10 +115,13 @@ def test_backfill_json_array_real_records_and_skips_disabled(tmp_path):
     ]))
     n = backfill_json_array(p)
     records = json.loads(p.read_text())
-    assert n == 1
+    assert n == 2
     assert "regime" in records[0]
-    # Existing-regime row preserved verbatim
-    assert records[1]["regime"] == {"already": "tagged"}
+    assert "regime" in records[1]
+    # Pre-existing regime sub-key preserved alongside the new REGIME_KEYS
+    assert records[1]["regime"]["already"] == "tagged"
+    for key in ("time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase"):
+        assert key in records[1]["regime"]
 
 
 def test_backfill_jsonl_handles_blank_lines(tmp_path):
