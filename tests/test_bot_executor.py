@@ -668,3 +668,109 @@ class TestCloseTsThreading:
         accept = next((r for r in recs if r.get("decision") == "accept"), None)
         assert accept is not None, f"expected an accept log, got decisions: {[r['decision'] for r in recs]}"
         assert accept["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# Session 36 — _paper_record_exit reason persistence
+# ---------------------------------------------------------------------------
+
+
+class TestPaperRecordExitReason:
+    """Session 36: _paper_record_exit gained a `reason` parameter that persists
+    as `exit_reason` on the paper_trades.json record. exit_position threads
+    its caller-supplied reason through both the no-bid path and the normal
+    market-exit path. Forward-only: pre-Session-36 records have no exit_reason."""
+
+    def test_paper_record_exit_persists_reason(self, tmp_state):
+        """_paper_record_exit(reason='X') writes exit_reason='X' on the record."""
+        from bot import executor as exc
+        from bot.state_io import save_json as _save_json
+
+        _save_json(tmp_state["paper_trades"], [{
+            "id": "ord-123",
+            "ticker": "KXFOO",
+            "status": "filled",
+            "price": 0.50,
+        }])
+
+        exc._paper_record_exit("ord-123", 0.65, 1.50, reason="auto_take_profit")
+
+        records = json.loads(tmp_state["paper_trades"].read_text())
+        assert records[0]["status"] == "exited_early"
+        assert records[0]["exit_price"] == 0.65
+        assert records[0]["pnl"] == 1.50
+        assert records[0]["exit_reason"] == "auto_take_profit"
+        assert "resolved_at" in records[0]
+
+    def test_paper_record_exit_default_reason(self, tmp_state):
+        """When called without reason kwarg, default 'unknown' is persisted —
+        guards against accidental loss of attribution."""
+        from bot import executor as exc
+        from bot.state_io import save_json as _save_json
+
+        _save_json(tmp_state["paper_trades"], [{"id": "ord-456", "status": "filled"}])
+
+        exc._paper_record_exit("ord-456", 0.20, -0.75)  # no reason kwarg
+
+        records = json.loads(tmp_state["paper_trades"].read_text())
+        assert records[0]["exit_reason"] == "unknown"
+
+    def test_exit_position_threads_reason_through_market_exit(self, tmp_state, monkeypatch):
+        """exit_position(ticker, reason='auto_cut_loss') → record has exit_reason='auto_cut_loss'."""
+        from bot import executor as exc
+        from bot.state_io import save_json as _save_json
+
+        order_id = "ord-789"
+        _save_json(tmp_state["positions"], [{
+            "ticker": "KXBAR",
+            "order_id": order_id,
+            "status": "filled",
+            "side": "yes",
+            "filled": 5,
+            "price_cents": 60,
+            "paper": True,
+        }])
+        _save_json(tmp_state["paper_trades"], [{
+            "id": order_id,
+            "ticker": "KXBAR",
+            "status": "filled",
+        }])
+
+        # yes_bid = 50¢ → 10¢ loss × 5 contracts = -$0.50
+        monkeypatch.setattr(exc, "get_market", lambda t: {"yes_bid": 50, "no_bid": 50})
+
+        result = exc.exit_position("KXBAR", reason="auto_cut_loss")
+
+        assert result["success"] is True
+        records = json.loads(tmp_state["paper_trades"].read_text())
+        assert records[0]["exit_reason"] == "auto_cut_loss"
+
+    def test_exit_position_no_bid_path_threads_reason_with_suffix(self, tmp_state, monkeypatch):
+        """No-bid path persists '<reason>_no_bid' — matches the existing
+        pos['exit_reason'] suffix written to positions.json."""
+        from bot import executor as exc
+        from bot.state_io import save_json as _save_json
+
+        order_id = "ord-nobid"
+        _save_json(tmp_state["positions"], [{
+            "ticker": "KXNOBID",
+            "order_id": order_id,
+            "status": "filled",
+            "side": "yes",
+            "filled": 3,
+            "price_cents": 80,
+            "paper": True,
+        }])
+        _save_json(tmp_state["paper_trades"], [{
+            "id": order_id,
+            "ticker": "KXNOBID",
+            "status": "filled",
+        }])
+
+        monkeypatch.setattr(exc, "get_market", lambda t: {"yes_bid": 0, "no_bid": 0})
+
+        result = exc.exit_position("KXNOBID", reason="auto_take_profit")
+
+        assert result["success"] is True
+        records = json.loads(tmp_state["paper_trades"].read_text())
+        assert records[0]["exit_reason"] == "auto_take_profit_no_bid"

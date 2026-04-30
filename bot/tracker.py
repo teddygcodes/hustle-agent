@@ -153,6 +153,7 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
         pos["ticks_observed"] = int(pos.get("ticks_observed", 0)) + 1
 
         # Categorized alerts
+        opp_type = pos.get("opp_type", "")
         if pnl_percent >= TAKE_PROFIT_THRESHOLD:
             alerts.append({
                 "type": "take_profit",
@@ -164,6 +165,7 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
                 "unrealized_pnl": unrealized_pnl,
                 "pnl_percent": pnl_percent,
                 "contracts": filled,
+                "opp_type": opp_type,
             })
             logger.info(f"Take profit alert: {ticker} +{pnl_percent:.0%}")
         elif pnl_percent <= CUT_LOSS_THRESHOLD:
@@ -187,6 +189,7 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
                 "unrealized_pnl": unrealized_pnl,
                 "pnl_percent": pnl_percent,
                 "contracts": filled,
+                "opp_type": opp_type,
             })
             logger.warning(f"Cut loss alert: {ticker} {pnl_percent:.0%}")
         elif pnl_percent < -POSITION_MOVE_ALERT:
@@ -200,6 +203,7 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
                 "unrealized_pnl": unrealized_pnl,
                 "pnl_percent": pnl_percent,
                 "contracts": filled,
+                "opp_type": opp_type,
             })
 
     # Check resting orders: auto-cancel on settled markets, alert on stale on active markets

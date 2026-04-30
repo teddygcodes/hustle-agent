@@ -66,6 +66,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("glint.main")
 
+# Vig-stack opp_types are exempt from auto-exit paths (edge_flipped, take_profit,
+# cut_loss). Edge is structural (YES sum > 100¢ on the ladder), so individual
+# contract price moves don't invalidate it — only a full ladder vig collapse
+# would. See Battle Scar #9 in CLAUDE.md and Session 36.
+_VIG_STACK_OPP_TYPES = ("vig_stack_no", "vig_stack_series")
+
 
 # ---------------------------------------------------------------------------
 # Persistent pending queue helpers
@@ -975,6 +981,71 @@ class GlintBot:
         finally:
             self._active_watchers.pop(query, None)
 
+    async def _dispatch_position_alerts(self, alerts):
+        """Act on take_profit / cut_loss / position_move / resting_expiry alerts
+        from update_positions. Vig stack positions are exempt from auto-exit
+        (TP and SL paths) — see Battle Scar #9 + Session 36. Extracted from
+        _main_loop so the dispatch logic is testable in isolation."""
+        for a in alerts:
+            alert_type = a.get("type", "position_move")
+            opp_type = a.get("opp_type", "")
+            if alert_type == "take_profit":
+                # Vig stack: structural edge, hold to settlement.
+                if opp_type in _VIG_STACK_OPP_TYPES:
+                    logger.info(
+                        "Take-profit SKIPPED for %s (vig_stack — structural, hold to settlement)",
+                        a["ticker"],
+                    )
+                    continue
+                if PAPER_MODE:
+                    exit_result = exit_position(a["ticker"], reason="auto_take_profit")
+                    if exit_result.get("success"):
+                        pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
+                        await self.notifier.send_message(
+                            f"💰 AUTO TAKE PROFIT: {a['ticker']} +{a['pnl_percent']:.0%} "
+                            f"(${pnl:.2f}) — locked in",
+                            priority="critical",
+                        )
+                    else:
+                        await self.notifier.send_message(
+                            f"📈 TAKE PROFIT FAILED: {a['ticker']} +{a['pnl_percent']:.0%} "
+                            f"— {exit_result.get('reason')}\nReply SELL {a['ticker']}",
+                            priority="critical",
+                        )
+                else:
+                    await self.notifier.send_message(
+                        f"📈 TAKE PROFIT? {a['ticker']} +{a['pnl_percent']:.0%} "
+                        f"(${a['unrealized_pnl']:.2f})\nReply SELL {a['ticker']}",
+                        priority="critical",
+                    )
+            elif alert_type == "cut_loss":
+                # Vig stack: structural edge, hold to settlement.
+                if opp_type in _VIG_STACK_OPP_TYPES:
+                    logger.info(
+                        "Cut-loss SKIPPED for %s (vig_stack — structural, hold to settlement)",
+                        a["ticker"],
+                    )
+                    continue
+                exit_result = exit_position(a["ticker"], reason="auto_cut_loss")
+                if exit_result.get("success"):
+                    pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
+                    await self.notifier.send_message(
+                        f"✂️ AUTO CUT: {a['ticker']} {a['pnl_percent']:.0%} "
+                        f"(${pnl:.2f}) — exited to stop bleeding",
+                        priority="critical",
+                    )
+                else:
+                    await self.notifier.send_message(
+                        f"📉 CUT LOSS FAILED: {a['ticker']} {a['pnl_percent']:.0%} "
+                        f"(${a['unrealized_pnl']:.2f}) — {exit_result.get('reason')}\n"
+                        f"Reply SELL {a['ticker']}",
+                        priority="critical",
+                    )
+            elif alert_type == "resting_expiry":
+                pass  # silenced
+            else:
+                pass  # position move notifications silenced
+
     async def _heartbeat_loop(self):
         """Touch bot.lock every 30s so wedged-loop detection (Gotcha #6) isn't
         masked by long scan_interval. Also refreshes bot_state.last_heartbeat
@@ -1209,50 +1280,7 @@ class GlintBot:
             # ----------------------------------------------------------
             try:
                 alerts = update_positions(called_from="_main_loop")
-                for a in alerts:
-                    alert_type = a.get("type", "position_move")
-                    if alert_type == "take_profit":
-                        if PAPER_MODE:
-                            exit_result = exit_position(a["ticker"], reason="auto_take_profit")
-                            if exit_result.get("success"):
-                                pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
-                                await self.notifier.send_message(
-                                    f"💰 AUTO TAKE PROFIT: {a['ticker']} +{a['pnl_percent']:.0%} "
-                                    f"(${pnl:.2f}) — locked in",
-                                    priority="critical",
-                                )
-                            else:
-                                await self.notifier.send_message(
-                                    f"📈 TAKE PROFIT FAILED: {a['ticker']} +{a['pnl_percent']:.0%} "
-                                    f"— {exit_result.get('reason')}\nReply SELL {a['ticker']}",
-                                    priority="critical",
-                                )
-                        else:
-                            await self.notifier.send_message(
-                                f"📈 TAKE PROFIT? {a['ticker']} +{a['pnl_percent']:.0%} "
-                                f"(${a['unrealized_pnl']:.2f})\nReply SELL {a['ticker']}",
-                                priority="critical",
-                            )
-                    elif alert_type == "cut_loss":
-                        exit_result = exit_position(a["ticker"], reason="auto_cut_loss")
-                        if exit_result.get("success"):
-                            pnl = exit_result.get("realized_pnl", a["unrealized_pnl"])
-                            await self.notifier.send_message(
-                                f"✂️ AUTO CUT: {a['ticker']} {a['pnl_percent']:.0%} "
-                                f"(${pnl:.2f}) — exited to stop bleeding",
-                                priority="critical",
-                            )
-                        else:
-                            await self.notifier.send_message(
-                                f"📉 CUT LOSS FAILED: {a['ticker']} {a['pnl_percent']:.0%} "
-                                f"(${a['unrealized_pnl']:.2f}) — {exit_result.get('reason')}\n"
-                                f"Reply SELL {a['ticker']}",
-                                priority="critical",
-                            )
-                    elif alert_type == "resting_expiry":
-                        pass  # silenced
-                    else:
-                        pass  # position move notifications silenced
+                await self._dispatch_position_alerts(alerts)
             except Exception as e:
                 logger.error(f"Position update error: {e}")
 
@@ -1272,7 +1300,7 @@ class GlintBot:
                         # Individual contract price moves don't invalidate the edge —
                         # it only goes away if the entire ladder's vig collapses.
                         # Do NOT auto-exit on recalculated edge flips.
-                        if opp_type in ("vig_stack_no", "vig_stack_series"):
+                        if opp_type in _VIG_STACK_OPP_TYPES:
                             logger.info("Edge-flip SKIPPED for %s (vig_stack — structural edge, hold to settlement)", ticker)
                             continue
                         if PAPER_MODE:

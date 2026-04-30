@@ -1170,8 +1170,18 @@ def check_fills() -> list[dict]:
     return updates
 
 
-def _paper_record_exit(order_id: str, exit_price: float, realized_pnl: float) -> None:
-    """Update the matching paper_trades.json record when a paper position exits early."""
+def _paper_record_exit(
+    order_id: str,
+    exit_price: float,
+    realized_pnl: float,
+    reason: str = "unknown",
+) -> None:
+    """Update the matching paper_trades.json record when a paper position exits early.
+
+    `reason` is persisted as `exit_reason` so downstream analysis can distinguish
+    auto_take_profit / auto_cut_loss / edge_flipped / manual / EXITALL paths.
+    Forward-only — historical records keep no `exit_reason` field.
+    """
     paper_trades = _load_json(PAPER_TRADES_FILE)
     if not isinstance(paper_trades, list):
         return
@@ -1181,6 +1191,7 @@ def _paper_record_exit(order_id: str, exit_price: float, realized_pnl: float) ->
             t["status"] = "exited_early"
             t["exit_price"] = round(exit_price, 4)
             t["pnl"] = realized_pnl
+            t["exit_reason"] = reason
             t["resolved_at"] = datetime.now(timezone.utc).isoformat()
             exited = t
             break
@@ -1249,7 +1260,7 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
             pos["exited_at"] = datetime.now(timezone.utc).isoformat()
             pos["realized_pnl"] = realized_pnl
             _save_json(POSITIONS_FILE, positions)
-            _paper_record_exit(pos.get("order_id", ""), 0.0, realized_pnl)
+            _paper_record_exit(pos.get("order_id", ""), 0.0, realized_pnl, reason=f"{reason}_no_bid")
             return {
                 "success": True,
                 "realized_pnl": realized_pnl,
@@ -1268,7 +1279,7 @@ def exit_position(ticker: str, reason: str = "manual") -> dict:
         pos["exited_at"] = datetime.now(timezone.utc).isoformat()
         pos["realized_pnl"] = realized_pnl
         _save_json(POSITIONS_FILE, positions)
-        _paper_record_exit(pos.get("order_id", ""), exit_price / 100.0, realized_pnl)
+        _paper_record_exit(pos.get("order_id", ""), exit_price / 100.0, realized_pnl, reason=reason)
         return {
             "success": True,
             "order_result": {"order_id": pos.get("order_id", ""), "status": "paper_exited", "filled_count": filled},
