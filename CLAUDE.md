@@ -363,6 +363,16 @@ Vig_stack's cheap NOs are often in the 89-95¢ range. That's 8:1 to 19:1 risk/re
 ### 12. Settlement log idempotency (Apr 18)
 `tracker._log_settlements_to_audit` is now idempotent on `(ticker, strategy, result, pnl, contracts)`. Pre-fix, re-running `resolve_trades` on already-settled positions double-counted — one ticker had 14 duplicate entries. If you touch that function, keep the dedup check in or the strategy totals will drift again.
 
+### 13. Synchronous I/O inside async coroutines blocks the event loop (Session 39, Apr 30)
+Apr 30 incident: `_universe.snapshot_universe(scan_id)` was called directly from `_main_loop()` (an async coroutine). `snapshot_universe` is fully synchronous — `requests` calls + `_time.sleep()` retry sleeps in the cursor walk. Healthy Kalshi: ~3-15s per snapshot, fine. Flaky Kalshi (constant `Connection reset by peer` + read-timeout errors) on Apr 30: 38-48s × 800+ pages = 3-hour wedges, twice in a row. While each wedge ran, `_live_scan_loop` / `_heartbeat_loop` / `_position_check_loop` / Telegram polling all starved — the bot was technically alive (PID 38402) but functionally dead for 12+ hours. Symptom: zero Telegram notifications since 23:54:36 ET Apr 29; `bot.lock` mtime + `bot_state.last_heartbeat` both stuck for hours.
+
+**Rule:** any synchronous I/O (`requests`, `_time.sleep`, blocking SDK calls) inside an async coroutine must be wrapped in `loop.run_in_executor`. Pattern used at [bot/main.py:923, 1082, 1196, 1408, 1411](hustle-agent/bot/main.py:1196):
+```python
+loop = asyncio.get_event_loop()
+await loop.run_in_executor(None, lambda: sync_fn(arg))
+```
+If you write a new async loop and it calls into `bot/universe.py`, `bot/scanner.py`, `bot/tracker.py`, `bot/executor.py`, or anything that hits Kalshi: assume it's blocking, wrap in executor, audit at PR time. The Session 39 regression test at [tests/test_main.py:test_main_loop_runs_snapshot_universe_via_executor](hustle-agent/tests/test_main.py) asserts `snapshot_universe` runs on a non-`MainThread` worker thread — if a future refactor regresses it back to a direct sync call, that test fails.
+
 ---
 
 ## Data-Driven Tuning (The Apr 14 Audit)
@@ -2502,41 +2512,35 @@ Session 18 documented this same pattern from the Apr 14 audit ("NO at 90-95¢ ri
 
 ## Apr 30 — Critical Fix (Session 39)
 
-### ☐ Session 39 — Fix asyncio event loop blocking on snapshot_universe (Apr 30, planned, CRITICAL)
+### ☑ Session 39 — Fix asyncio event loop blocking on snapshot_universe (Apr 30, shipped, CRITICAL)
 
-**Problem.** Bot wedged for 12+ hours starting Apr 29 23:59 ET. Two consecutive 3-hour `snapshot_universe` wedges (overnight starting at 23:59:21, then morning starting at 09:00:31) blocked the asyncio event loop. While each wedge ran, ZERO other coroutines could execute: `_live_scan_loop` starved (no live watchers spawned, no Telegram notifications since 23:54:36 ET Apr 29 — Tyler's "no notifications since 11:49 PM" symptom), `_heartbeat_loop` starved (bot.lock + bot_state.last_heartbeat both stuck for hours), `_position_check_loop` starved (no MFE/MAE updates), Telegram polling starved (no command responses). Bot was technically alive (PID 38402) but functionally dead.
+**Problem.** Bot wedged for 12+ hours starting Apr 29 23:59 ET. Two consecutive 3-hour `snapshot_universe` wedges (overnight starting at 23:59:21, then morning starting at 09:00:31) blocked the asyncio event loop. While each wedge ran, ZERO other coroutines could execute: `_live_scan_loop` starved (no live watchers spawned, no Telegram notifications since 23:54:36 ET Apr 29 — Tyler's "no notifications since 11:49 PM" symptom), `_heartbeat_loop` starved (`bot.lock` + `bot_state.last_heartbeat` both stuck for hours), `_position_check_loop` starved (no MFE/MAE updates), Telegram polling starved (no command responses). Bot was technically alive (PID 38402) but functionally dead.
 
-**Root cause: [bot/main.py:1189](hustle-agent/bot/main.py:1189) calls `_universe.snapshot_universe(scan_id)` directly synchronously inside the async `_main_loop()`.** Synchronous `requests` calls + retry sleeps in the cursor walk block the event loop for the full snapshot duration. When Kalshi is healthy this is ~3-15 seconds (fine). When Kalshi is flaky (Connection reset by peer + read timeouts — Apr 30 had constant resets), each page crawls 38-48 seconds × 800+ pages = HOURS.
+**Root cause.** [bot/main.py:1189](hustle-agent/bot/main.py:1189) called `_universe.snapshot_universe(scan_id)` directly synchronously inside the async `_main_loop()`. Synchronous `requests` calls + `_time.sleep()` retry sleeps in the cursor walk blocked the event loop for the full snapshot duration. Healthy Kalshi: ~3-15s (fine). Flaky Kalshi (Connection reset by peer + read timeouts — Apr 30 had constant resets): 38-48s × 800+ pages = HOURS. The `run_in_executor` pattern was already established at 4 other sites in `bot/main.py` (lines 923, 1082, 1408, 1411) — `snapshot_universe` was just missed.
 
-**The pattern is established at 4 other call sites in bot/main.py — `snapshot_universe` was just missed:**
-- [bot/main.py:923](hustle-agent/bot/main.py:923): `await loop.run_in_executor(None, scan_all_crypto_markets)` (crypto loop)
-- [bot/main.py:1082](hustle-agent/bot/main.py:1082): `await loop.run_in_executor(...)` (position_check_loop's update_positions)
-- [bot/main.py:1408](hustle-agent/bot/main.py:1408): `await loop.run_in_executor(None, _outcome_tracker.check_and_resolve)`
-- [bot/main.py:1411](hustle-agent/bot/main.py:1411): `await loop.run_in_executor(None, _outcome_tracker.log_calibration_summary)`
+**What shipped.**
+- [bot/main.py:1188-1196](hustle-agent/bot/main.py:1188) — wrapped the synchronous `_universe.snapshot_universe(scan_id)` call in `await loop.run_in_executor(None, lambda: _universe.snapshot_universe(scan_id))`, with `loop = asyncio.get_event_loop()` mirroring the four other in-file call sites. Comment cites the Apr 30 incident + the four sibling patterns. `_universe.get_buffered_markets` and `_universe.flush_universe` (lines 1201, 1213) stay synchronous — both are fast in-memory / atomic-write operations with no Kalshi I/O.
+- [bot/universe.py:277-307](hustle-agent/bot/universe.py:277) — defense-in-depth: added a wall-clock deadline check **inside** the retry loop, after each `_time.sleep(sleep_s)`. The outer cursor walk only re-checks at the top of each cursor iteration, so a wedged page burning its full retry budget could blow past `_SNAPSHOT_DEADLINE_SEC` by a full page-time. Now: if `_time.monotonic() - started > _SNAPSHOT_DEADLINE_SEC` post-sleep, set `deadline_hit_in_retry = True`, break the retry loop, log a new `deadline %ds exceeded mid-retry at page %d` WARN, set `partial = True`, and bail the outer cursor walk.
+- [tests/test_main.py:test_main_loop_runs_snapshot_universe_via_executor](hustle-agent/tests/test_main.py) — new regression test that drives one iteration of `_main_loop` and records the thread on which `snapshot_universe` runs. Asserts the thread name is NOT `MainThread` (i.e., it's a ThreadPoolExecutor worker). If a future refactor regresses the executor wrap back to a direct sync call, this test fails immediately.
+- [tests/test_universe.py:TestPartialCursor::test_deadline_exceeded_mid_retry_bails_partial](hustle-agent/tests/test_universe.py) — new test that monkeypatches `_time.monotonic` + `_time.sleep` to advance a synthetic clock past `_SNAPSHOT_DEADLINE_SEC` after the first retry sleep. Asserts cursor calls = 1 (initial only — the retry budget gets shaved short, vs the existing `test_transient_error_dict_retries_exhausted_marks_partial` which expects 4 calls when the deadline isn't in play). Asserts the new mid-retry WARN fired via `caplog`.
+- [CLAUDE.md](hustle-agent/CLAUDE.md) Battle Scar #13 entry: "Synchronous I/O inside async coroutines blocks the event loop" with the `run_in_executor` pattern called out. Cites this incident and the regression test.
 
-**Plan.**
+**Tests.** `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1167 passed in 27.17s** (Session 37 baseline 1165 + 2 new Session 39 tests). 0 failures.
 
-1. **Primary fix (~3 lines):** wrap [bot/main.py:1189](hustle-agent/bot/main.py:1189) in `loop.run_in_executor(None, lambda: _universe.snapshot_universe(scan_id))`. Get loop via `asyncio.get_running_loop()`. Mirror the pattern at line 1082.
+**Why `asyncio.get_event_loop()` not `asyncio.get_running_loop()`.** All four existing call sites in [bot/main.py](hustle-agent/bot/main.py) use `get_event_loop()` (lines 919, 1078, 1407). Matched the local style. Migrating all five to `get_running_loop()` (the modern preference inside async functions) is a separate cleanup-pass session if Tyler wants it.
 
-2. **Secondary defense (recommended):** in [bot/universe.py:278-290](hustle-agent/bot/universe.py:278) (the retry loop inside the cursor walk), add a deadline check between retries — if `_time.monotonic() - started > _SNAPSHOT_DEADLINE_SEC` after a retry sleep, break out of the retry loop, set `partial = True`, bail the cursor walk. Prevents the "stuck on one page for minutes" symptom even when each page's retries individually exceed the per-page budget.
-
-3. **Test:** add a regression test asserting `snapshot_universe` is invoked through `run_in_executor` from `_main_loop` (mock executor; assert call). Mocked Kalshi client that simulates the 30s connection-reset retry; assert the event loop continues processing other coroutines (heartbeat task ticks at least once during the snapshot run).
-
-4. **Battle Scar candidate:** add a new entry to CLAUDE.md "Critical Gotchas" titled "Synchronous I/O inside async coroutines blocks the event loop" with the specific `run_in_executor` pattern called out. Cite Session 39 incident as the worked example.
-
-**Out of scope.**
+**Out of scope (held).**
 - Refactoring `bot/universe.py` to use `aiohttp` (real async I/O) — bigger lift; `run_in_executor` is the surgical fix.
-- Session 28-2 per-series-paginated universe rewrite (still on watch list).
-- Auditing other synchronous-call sites in async paths beyond `snapshot_universe` — Session 39-followup if any are found.
-- Restarting the bot manually before the fix — user explicitly chose to wait for the real fix rather than apply a quick-restart band-aid.
+- Session 28-2 per-series-paginated universe rewrite (still on the watch list).
+- Auditing other synchronous-call sites in async paths beyond `snapshot_universe` — open Session 39-followup if a second blocker surfaces post-deploy.
+- Anything in `agent/` per project scope (the network primitives at `agent/kalshi_client.py` contribute to the wedge — no `requests` timeout — but are excluded by the bot-only memory).
 
 **Verify (post-deploy).**
-1. `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1165 passed (Session 37 baseline holds).
-2. Restart bot via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Kill orphan PID per Battle Scar #3 if needed.
-3. Within 5 min of restart, even if Kalshi is still flaky and snapshot_universe is mid-flight: `bot.lock` mtime advances every ≤30s; `bot_state.last_heartbeat` age stays < 60s; `LIVE_SCAN_TELEMETRY` log line appears every ~60s. The event loop is now responsive regardless of `snapshot_universe` blocking.
-4. After ~10 min: Tyler should see live_watcher notifications resuming on Telegram (first new bet entry / status card edit since 11:49 PM Apr 29).
-
-**Severity / urgency.** **CRITICAL.** Bot has been wedged for 12+ hours blocking all live-watcher activity. Tyler chose option 3 over the quick-restart band-aid (which would have re-wedged on the next flaky-Kalshi window). Ship ASAP. ~30 min coder work + restart = full recovery.
+1. `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1167 passed.
+2. Restart bot via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Kill orphan PIDs per Battle Scar #3 if multiple appear.
+3. Within 5 min of restart, even if Kalshi is still flaky and `snapshot_universe` is mid-flight: `bot.lock` mtime advances every ≤30s; `bot_state.last_heartbeat` age stays < 60s; `LIVE_SCAN_TELEMETRY` log line appears every ~60s. The event loop stays responsive regardless of snapshot duration.
+4. After ~10 min: Tyler sees live_watcher notifications resuming on Telegram (first new bet entry / status card edit since 23:54:36 ET Apr 29).
+5. If any of those fail, do NOT restart-as-band-aid — open Session 39-followup to audit other synchronous-call sites in async paths.
 
 ---
 

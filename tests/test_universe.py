@@ -343,6 +343,59 @@ class TestPartialCursor:
         universe.snapshot_universe("S1")
         assert cursor_calls["n"] == 1  # no retry — bailed immediately
 
+    # Session 39: deadline check INSIDE the retry loop. Without this, a
+    # single page burning through retry sleeps can blow past the cursor
+    # walk's wall-clock deadline by a full page-time before the outer
+    # check at the top of the cursor iteration catches it.
+    def test_deadline_exceeded_mid_retry_bails_partial(self, tmp_universe_file, monkeypatch, caplog):
+        """When a retry sleep advances the wall clock past _SNAPSHOT_DEADLINE_SEC,
+        the cursor walk must bail BEFORE issuing the next get_markets call.
+        Compare to test_transient_error_dict_retries_exhausted_marks_partial
+        which expects 1 + _CURSOR_RETRY_MAX (4) cursor calls when the deadline
+        is not in play. With the inner check, we burn ONE retry slot and then
+        break — cursor_calls = 1."""
+        clock = {"now": 0.0}
+
+        def fake_monotonic():
+            return clock["now"]
+
+        def fake_sleep(_secs):
+            # Each retry sleep advances the clock past BOTH the cursor walk's
+            # deadline (300s) and the Pass-2 shadow fetch's grace deadline
+            # (+30s) so the whole snapshot bails cleanly.
+            clock["now"] += universe._SNAPSHOT_DEADLINE_SEC + 100
+
+        monkeypatch.setattr(universe._time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(universe._time, "sleep", fake_sleep)
+
+        cursor_calls = {"n": 0}
+
+        def stub(**kwargs):
+            if "series_ticker" not in kwargs:
+                cursor_calls["n"] += 1
+            return {"error": "Kalshi API error: [Errno 54] Connection reset by peer"}
+
+        monkeypatch.setattr("agent.kalshi_client.get_markets", stub)
+
+        with caplog.at_level("WARNING", logger="bot.universe"):
+            universe.snapshot_universe("S1")
+
+        # Initial get_markets only — the deadline check after the first retry
+        # sleep prevents a second get_markets call.
+        assert cursor_calls["n"] == 1, (
+            f"expected 1 cursor call (initial only; deadline trips after first "
+            f"retry sleep), got {cursor_calls['n']}"
+        )
+
+        # The new deadline-mid-retry warning must have fired.
+        assert any(
+            "deadline" in rec.message and "mid-retry" in rec.message
+            for rec in caplog.records
+        ), (
+            f"expected mid-retry deadline warning, got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
 
 class TestNeverRaises:
     """The trade path must never blow up because of universe-log failure."""

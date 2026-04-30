@@ -1186,7 +1186,14 @@ class GlintBot:
             # via on_market_seen. flush_universe runs in `finally` so a
             # scanner exception doesn't strand the buffered rows.
             scan_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-            _universe.snapshot_universe(scan_id)
+            # Session 39: snapshot_universe does synchronous requests calls +
+            # retry sleeps in the cursor walk. On Apr 30, flaky Kalshi caused
+            # a single snapshot to block the event loop for 3+ hours, starving
+            # _live_scan_loop / _heartbeat_loop / _position_check_loop /
+            # Telegram polling. Run it on the default executor so the loop
+            # stays responsive. Mirror the pattern at lines 923, 1082, 1408.
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: _universe.snapshot_universe(scan_id))
             # Session 13a: pull the snapshotted universe out as a list of
             # Market dataclasses so scan_cycle can pass it to the
             # Strategy contract without strategies re-fetching from

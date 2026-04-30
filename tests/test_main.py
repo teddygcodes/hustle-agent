@@ -198,6 +198,97 @@ def test_position_check_loop_swallows_update_errors(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 39 — snapshot_universe must run via run_in_executor
+# ---------------------------------------------------------------------------
+
+
+def test_main_loop_runs_snapshot_universe_via_executor(tmp_path, monkeypatch):
+    """Session 39: _main_loop must dispatch _universe.snapshot_universe through
+    loop.run_in_executor so the synchronous Kalshi cursor walk doesn't block
+    the asyncio event loop.
+
+    Verified by recording the thread on which snapshot_universe runs. If the
+    fix is in place, snapshot_universe runs on a ThreadPoolExecutor worker
+    thread (name != 'MainThread'). If the fix regresses (direct sync call),
+    it runs on the main thread and starves _heartbeat_loop / _live_scan_loop /
+    _position_check_loop / Telegram polling — the Apr 30 wedge symptom.
+    """
+    import threading
+    from bot import main as botmain
+
+    # Build a minimal bot. Use __new__ to skip __init__ since we're not
+    # exercising real Telegram / Kalshi paths.
+    class _PausableNotifier:
+        paused = False
+
+        async def send_message(self, *_, **__):
+            pass
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+    bot.notifier = _PausableNotifier()
+
+    # Capture the thread snapshot_universe runs on, plus mock out side effects.
+    snapshot_threads: list[str] = []
+
+    def fake_snapshot(scan_id):
+        snapshot_threads.append(threading.current_thread().name)
+        return 0
+
+    # Stub the universe module's snapshot/buffer/flush surface.
+    monkeypatch.setattr(botmain._universe, "snapshot_universe", fake_snapshot)
+    monkeypatch.setattr(botmain._universe, "get_buffered_markets", lambda _scan_id: [])
+    monkeypatch.setattr(botmain._universe, "flush_universe", lambda _scan_id: 0)
+    monkeypatch.setattr(botmain._universe, "on_market_seen", lambda *a, **kw: None)
+
+    # Force scan_cycle to raise so we hit the scan_failed → 60s sleep path,
+    # giving us a clean exit point that doesn't drag in fills / opportunities /
+    # outcome tracker etc.
+    def boom_scan(*_a, **_kw):
+        raise RuntimeError("test stub: short-circuit to scan_failed path")
+
+    monkeypatch.setattr(botmain, "scan_cycle", boom_scan)
+
+    # Stub bot-state I/O + lock touch.
+    monkeypatch.setattr(botmain, "_load_bot_state", lambda: {})
+    monkeypatch.setattr(botmain, "_save_bot_state", lambda _state: None)
+
+    class _NoopLock:
+        def touch(self):
+            pass
+
+    monkeypatch.setattr(botmain, "LOCK_FILE", _NoopLock())
+
+    # Async no-op for scheduled events.
+    async def fake_scheduled(_self):
+        return None
+
+    monkeypatch.setattr(botmain, "check_scheduled_events", fake_scheduled)
+
+    # Patch sleep: the 60s scan_failed sleep is our exit hook. Flip _running
+    # so the next loop iteration bails out at the `while self._running` gate.
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs):
+        sleeps.append(secs)
+        bot._running = False
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(bot._main_loop())
+
+    assert len(snapshot_threads) == 1, (
+        f"snapshot_universe should be invoked exactly once per loop iteration; "
+        f"got {len(snapshot_threads)} calls"
+    )
+    assert snapshot_threads[0] != "MainThread", (
+        f"snapshot_universe ran on {snapshot_threads[0]!r} — expected an executor "
+        f"worker thread. The Session 39 run_in_executor wrap may have regressed; "
+        f"this would re-introduce the Apr 30 event-loop wedge."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------
 

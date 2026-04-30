@@ -275,6 +275,7 @@ def snapshot_universe(scan_id: str) -> int:
                 kwargs["cursor"] = cursor
             try:
                 result = get_markets(**kwargs)
+                deadline_hit_in_retry = False
                 for attempt in range(_CURSOR_RETRY_MAX):
                     if not (isinstance(result, dict) and "error" in result):
                         break
@@ -287,7 +288,23 @@ def snapshot_universe(scan_id: str) -> int:
                         pages, scan_id, attempt + 1, _CURSOR_RETRY_MAX, sleep_s, err,
                     )
                     _time.sleep(sleep_s)
+                    # Session 39: re-check the wall-clock deadline AFTER each
+                    # retry sleep. The outer loop only checks at the top of
+                    # each cursor iteration, so a wedged page that burns its
+                    # full retry budget (up to 3.5s of sleeps + N HTTP calls
+                    # against a flaky Kalshi) can blow past the deadline by a
+                    # full page-time before the outer check catches it.
+                    if _time.monotonic() - started > _SNAPSHOT_DEADLINE_SEC:
+                        deadline_hit_in_retry = True
+                        break
                     result = get_markets(**kwargs)
+                if deadline_hit_in_retry:
+                    _logger.warning(
+                        "universe.snapshot_universe: deadline %ds exceeded mid-retry at page %d (scan_id=%s) — flushing partial",
+                        _SNAPSHOT_DEADLINE_SEC, pages, scan_id,
+                    )
+                    partial = True
+                    break
             except Exception:
                 _logger.warning(
                     "universe.snapshot_universe: cursor pagination failed at page %d (scan_id=%s) — flushing partial",
