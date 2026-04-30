@@ -113,19 +113,41 @@ MOMENTUM_SCALE_SMALL_DIP = 1.0   # 1x on min-threshold dips — they qualify but
 MOMENTUM_SCALE_MED_DIP   = 1.2   # 1.2x on medium dips — bigger dip = better bounce
 MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% win, +3.67c avg
 
-# Momentum sports that are gated off at the entry point (Apr 20 post-rebuild).
+# Momentum sports that are gated off at the entry point.
+#
+# Apr 20 (post-rebuild) original disable evidence:
 #   ATP Challenger:  2W/1L/14 exited_early, -$7.80, 82% cut rate
 #   WTA:             1W/1L/5  exited_early, -$7.00, 71% cut rate
 #   Tennis combined: 72% of live_momentum volume for -$6.20 net
 #   NBA + NHL alone: +$19.60 across 10 trades
-# Blanket tennis kill: main ATP is included precautionarily — no positive data
-# yet to justify keeping it on while the challenger + WTA cohorts are this deep
-# in the red. Revisit if/when an ATP cohort prints +P&L on n=10+ trades.
+#   ATP main tour:   bundled "precautionarily" — NO direct main-tour evidence
+#
+# Apr 29 — Session 38a re-evaluation re-enabled main-tour ATP. Evidence:
+#   1. n=56 settled rejected-opportunity CFs, mean CLV +11.32¢, 82% +CLV,
+#      n_no_won=10 (passes survivorship floor; vs Session 30-followup
+#      wta_challenger which was 5/5 yes_won and failed survivorship).
+#   2. 4 historical main-tour atp paper trades pre-disable (Apr 15-20):
+#      KXATPMATCH-26APR15SONRUB-RUB +$3.80, MOUMUS +$3.60, ZVECER +$4.20,
+#      PRIOCO -$3.00. NET +$8.60, 3W/1L, 75% WR. All entries in
+#      [0.70, 0.81] LEADER_MIN-eligible band. Same TP/trailing-stop
+#      signature as the +$19.60 NBA+NHL post-Session-19c cohort.
+#   3. The Apr 20 "precautionary" bundling is directly contradicted by
+#      the historical trades that pre-existed the disable.
+# Caveat: CF skip_reason distribution is dominated by upstream tunable
+# gates (no_leader, low_volume, no_vol_growth) — sport_disabled is
+# structurally absent from CF emission per Session 23's tunable-allowlist
+# design, so the +11.32¢ signal is directional (atp main-tour leader-side
+# price drift) rather than a direct disable-only counterfactual. Mandatory
+# +14-day re-validation routine scheduled 2026-05-13 to confirm or revert
+# based on post-deploy realized P&L.
+#
+# Still disabled (challengers + main WTA) — direct evidence (atp_challenger
+# n=17 -$7.80) or asymmetric evidence pending separate per-sport re-eval.
 #
 # Gate blocks NEW entries only; already-open positions exit normally via the
 # TP / SL / trailing-stop logic in live_watcher._check_exit, which does not
 # consult this set (verified). See live_watcher.py `_tick_momentum` can_enter.
-MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "wta", "wta_challenger"}
+MOMENTUM_DISABLED_SPORTS = {"atp_challenger", "wta", "wta_challenger"}
 
 # ---------------------------------------------------------------------------
 # Sport Instincts — situational awareness thresholds

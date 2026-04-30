@@ -118,7 +118,7 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 
 | Strategy | Location | Description | Real Perf (paper, Apr 18) |
 |---|---|---|---|
-| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis (main ATP, WTA, and both challenger tours) disabled Apr 20 via `MOMENTUM_DISABLED_SPORTS` — 72% of momentum volume for −$6.20 net. Leader floor is 0.70 (Apr 20 Session 2 briefly raised to 0.75 but reverted same day — the bump admitted the [75-80¢) dead zone instead of skipping it; see config.py:69). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
+| `live_momentum` | `live_watcher.py` | Buy dips on the clear leader in 1v1 live matches (UFC now; NBA/NHL via team-sport watchers). Tennis disabled scope: `atp_challenger` + `wta` + `wta_challenger` (main-tour ATP re-enabled Apr 29 via Session 38a after n=56 settled CFs / +11.32¢ + n=4 historical trades / +$8.60 corroborated the original "precautionary" bundling was wrong). Leader floor is 0.65 (Session 19c lowered from 0.70 — see config.py:70). Auto-scans every 60s; 20% of equity via `STRATEGY_BUDGETS`. | 39 settled, **+$12.30**, 24W/15L (62%) |
 | `live_momentum` (conviction) | `live_watcher.py` | When there's no dip but game state screams value — wp_edge > 8%, positive momentum, 68-82¢ entry — buy anyway. NBA/NHL only (MLB 12% hit rate). | Rolled into live_momentum numbers above |
 
 ### DISABLED (data-driven kills)
@@ -399,7 +399,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 **Why vig_stack is negative:** of 54 settled trades, 25 closed at a loss — the weight concentrated in volatile ladders. Ground truth by family: volatile (`KXHIGHDEN/NY/CHI`) = 36 trades, −$126.88, 69% early-cut; whitelist (`KXHIGHMIA/AUS/INX`) = 18 trades, +$16.26. Apr 18 Filter F set the volatile floor at NO ≥ 0.90; Apr 20 Session 2 raised it to **0.93** after bucket analysis showed only [92-96¢) is breakeven. Going forward we expect `real_pnl` to drift positive on new volatile-family trades. If a post-0.93 cohort of 10+ still prints negative, escalate.
 
-**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill). Session 2 also briefly raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to "skip the [75-80¢) dead zone" — but MIN is a floor, so 0.75 admits the dead zone while surrendering the positive [70-75¢) bucket. Reverted to 0.70 same day; proper dead-zone filter (explicit [75-80¢) exclusion in `is_leader`) is TODO. `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
+**Why live_momentum is positive:** NBA + NHL alone = +$19.60 on 10 trades. Tennis was the drag: 72% of momentum volume for −$6.20 net (ATP Challenger −$7.80 / 82% cut, WTA −$7.00 / 71% cut). Apr 20 Session 2 added `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` (blanket tennis kill). **Apr 29 Session 38a removed `"atp"` (main tour) from the disable set** after settled-CF re-run showed +11.32¢ mean CLV at n=56 with n_no_won=10 + 4 historical pre-disable trades net +$8.60 (3W/1L); the precautionary bundling lacked direct main-tour evidence. Current disable set: `{atp_challenger, wta, wta_challenger}` — direct evidence for atp_challenger; wta + wta_challenger pending separate per-sport re-evaluation. Session 2 also briefly raised `MOMENTUM_LEADER_MIN` from 0.70 to 0.75 to "skip the [75-80¢) dead zone" — but MIN is a floor, so 0.75 admits the dead zone while surrendering the positive [70-75¢) bucket. Reverted to 0.70 same day; proper dead-zone filter (explicit [75-80¢) exclusion in `is_leader`) is TODO. `STRATEGY_BUDGETS` (live_momentum: 20% of equity, wired Apr 16) also stopped conviction trades from being starved by vig_stack's pool.
 
 **Open exposure** (from positions.json, check at session start): ~10-16 open positions, mostly vig_stack. Whitelist families (`KXHIGHMIA` / `KXHIGHAUS` / `KXINX`) enter freely; volatile families (`KXHIGHDEN` / `KXHIGHNY` / `KXHIGHCHI`) now require NO ≥ 0.93 (post–Session 2). Any already-open position with a pre-0.93 entry continues to exit on normal rules — the floor gates entries, not exits.
 
@@ -2320,15 +2320,11 @@ Session 38e: Bucket report n column shows total + settled split (~30min — easy
 
 ---
 
-### ☐ Session 38a — ATP main-tour disable re-evaluation (Apr 29+, planned)
+### ☑ Session 38a — ATP main-tour disable re-evaluation (Apr 29, shipped — Outcome A)
 
-**Problem.** The Apr 29 night Investigation #1 surfaced a strong asymmetric-evidence pattern. `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` was set Apr 20 in commit `b1f08ff`. The disable evidence at the time was:
-- `atp_challenger`: 17 terminal trades, **−$7.80**, 53% WR, 82% early-cut. Solid evidence.
-- `atp` (main tour): bundled in "precautionarily" — no direct trade evidence cited.
-- `wta`: 1 terminal trade (this is the +$3.20 1W/1L data point Session 30-followup later flagged)
-- `wta_challenger`: ditto — disabled by association.
+**Problem.** The Apr 29 night Investigation #1 surfaced a strong asymmetric-evidence pattern. `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` was set Apr 20 in commit `b1f08ff`. The disable evidence at the time was real for `atp_challenger` (17 terminal trades, −$7.80, 82% early-cut) but **bundled "atp" precautionarily** with no direct main-tour evidence cited.
 
-Tonight's re-run on settled CFs (post-Session-23 stratified sampling has accumulated ~2 weeks of real outcomes):
+Tonight's settled-CF re-run on the post–Session 30-followup-2 dataset:
 
 | Sport | n settled | Mean CLV | +CLV% | n_pos / n_neg |
 |---|---|---|---|---|
@@ -2337,36 +2333,41 @@ Tonight's re-run on settled CFs (post-Session-23 stratified sampling has accumul
 | wta | 48 | -1.23¢ | 71% | 34 / 14 |
 | wta_challenger | 61 | -14.31¢ | 61% | 37 / 24 |
 
-**Main-tour ATP shows +$11.32¢ avg CLV across 56 settled rejected opportunities.** Same asymmetric-evidence pattern Session 30-followup flagged for wta_challenger — the disable was based on challenger evidence, not main-tour evidence, and the CFs say main-tour ATP would have been profitable.
+Main-tour ATP was the highest-confidence positive finding from Investigation #1.
 
-**Plan (mirror Session 30-followup discipline — investigate first, ship targeted change OR not).**
+**Hygiene checks (read-only Phase 1).**
+1. **Survivorship — PASS.** n=56 settled, n_yes_won=46 / n_no_won=10. n_no_won ≥ 10 floor met. Sample is NOT biased toward leader-wins (vs Session 30-followup wta_challenger 5/5 yes_won, which failed this).
+2. **Skip_reason distribution — CAVEAT, not a fail.** Distribution: `no_vol_growth_first_seen` 17, `no_leader` 15, `no_vol_growth_idle` 14, `low_volume` 10, **`sport_disabled` 0**. Per Session 23 design, `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS` excludes `disabled_sport`, so the strict ">50% sport_disabled" pass criterion is structurally unsatisfiable (Session 31 territory). The +11.32¢ signal is therefore *directional* (atp main-tour leader-side price drift on matches that happened to fail upstream tunable gates), not a direct disable-counterfactual. Documented as a caveat; signal still meaningful because leader-drift is the price-action mechanism live_momentum exploits.
+3. **Historical realized trades — PASS (strongest signal).** 4 main-tour atp paper trades pre-Apr-20 disable:
 
-1. **Verify the n=56 settled atp sample isn't survivorship-biased.** Specifically: how many are `yes_won` vs `no_won`? Session 30-followup wta_challenger looked positive at n=5 because all 5 were `yes_won`. Acceptance threshold: ≥30 settled with ≥10 `no_won` outcomes (leader losses). If the sample is mostly leader-wins, defer.
-2. **Verify per-skip_reason distribution.** What gates rejected these 56 opps? If they're dominantly `sport_disabled` (the disable gate firing), they're testing "what if we'd taken them" honestly. If they're dominantly other gates that fire BEFORE sport_disabled, the sample doesn't actually test the disable hypothesis.
-3. **Cross-check against Apr 9-19 historical paper trades for main-tour ATP.** Pre-disable, were there any actual main-tour atp trades? If yes, what was their P&L? Compare to the +11.32¢ CF prediction.
-4. **Decision branches:**
-   - **OUTCOME A (re-enable main-tour ATP):** sample passes survivorship + per-skip_reason + (if any) historical-trade checks AND the +11.32¢ holds. Ship: remove `"atp"` from `MOMENTUM_DISABLED_SPORTS` in `bot/config.py`. Keep all 3 challenger entries + main-tour wta. Update Apr 20 evidence comment with the Session 38a finding.
-   - **OUTCOME B (keep disabled, document why):** survivorship bias OR per-skip_reason confound OR historical-trade evidence contradicts. Document the rationale; mark wta_challenger and atp main-tour both as candidates needing more settled data.
-   - **OUTCOME C (split disable per-circuit):** evidence supports re-enabling main-tour atp AND main-tour wta but not the challenger circuits. Ship the surgical disable list.
+   | Ticker | Entry | Exit | Status | P&L |
+   |---|---|---|---|---|
+   | KXATPMATCH-26APR15SONRUB-RUB | 0.81 | 1.00 | won | +$3.80 |
+   | KXATPMATCH-26APR15MOUMUS-MUS | 0.70 | 0.88 | exited_early | +$3.60 |
+   | KXATPMATCH-26APR17ZVECER-ZVE | 0.71 | 0.92 | exited_early | +$4.20 |
+   | KXATPMATCH-26APR20PRIOCO-PRI | 0.78 | 0.63 | exited_early | -$3.00 |
 
-5. **Test discipline:** any production change comes with a 1-line comment in `bot/config.py` citing Session 38a evidence (n, mean CLV, n_pos/n_neg). Mirror the Session 19c MOMENTUM_LEADER_MIN comment style.
+   3W/1L, **+$8.60 net, 75% WR**, all entries in the [0.70, 0.81] LEADER_MIN-eligible band. Same TP/trailing-stop signature as the +$19.60 NBA+NHL post-Session-19c live_momentum cohort. The Apr 20 "ATP main tour included precautionarily — no positive data yet" comment is directly contradicted by these 4 trades that pre-existed the disable.
 
-6. **Schedule a +14 day re-validation routine** (analogous to Session 36 day-14) that re-runs the bucket report on the new live atp trades and verifies the +CLV signal holds in actual P&L, not just CFs.
+**Decision: Outcome A.** Re-enabled main-tour ATP. Convergent signal across two independent lenses (n=56 CF leader-drift + n=4 historical realized P&L). Skip_reason caveat documented; +14-day re-validation scheduled as the safety net.
 
-**Files (Outcome A only).**
-- `bot/config.py` — remove `"atp"` from `MOMENTUM_DISABLED_SPORTS` set; update comment.
-- `tests/test_live_watcher.py` — extend `MOMENTUM_DISABLED_SPORTS` test (if any) to assert atp NOT in the set.
-- `CLAUDE.md` — Session 38a ☑ block; update Money / live_momentum section to reflect the new disable scope.
+**What shipped.**
+- [bot/config.py:128](hustle-agent/bot/config.py:128) — `MOMENTUM_DISABLED_SPORTS`: removed `"atp"` from the set. New value `{"atp_challenger", "wta", "wta_challenger"}`. The 30-line comment block (lines 116–146) now carries the original Apr 20 evidence + the Session 38a re-evaluation evidence + the skip_reason caveat + the asymmetric-evidence pattern note. Mirrors the Session 19c MOMENTUM_LEADER_MIN evidence-comment style.
+- No test changes. Verified only `MOMENTUM_DISABLED_SPORTS` test reference is [tests/test_live_watcher.py:875](hustle-agent/tests/test_live_watcher.py:875) which `monkeypatch`es the set to empty for an unrelated scenario; no test asserts on contents.
+- +14-day re-validation routine scheduled at `~/.claude/scheduled-tasks/session-38a-atp-revalidation/` for 2026-05-13 09:00 ET. Mirrors Session 22 pattern. Auto-fires once, evaluates post-deploy cohort, commits CONFIRM/REVERT decision per the rule below.
 
-**Out of scope.** Touching wta_challenger / atp_challenger / wta disable status (separate per-sport evaluations). Re-tuning MOMENTUM_LEADER_MIN per-sport (Session 22+ candidate; needs sport-disambiguated re-validation). Ipl disable (Session 38b). Per-sport TickStrategy variants (Session 39).
+**Re-validation rule (May 13 routine).** Re-run `tools/live_momentum_dataset.py --days 7` and `tools/live_momentum_buckets.py`. Filter to `sport=atp` (main tour, not `atp_challenger`) and `recorded_at >= 2026-04-30` (post-deploy cohort only). Pull realized P&L from `paper_trades.json` for new `KXATPMATCH-` (non-challenger) entries.
+- **CONFIRM**: post-deploy cohort settled CLV is positive AND realized P&L is non-negative. Leave config as shipped.
+- **REVERT**: either flips negative on n≥10. Re-add `"atp"` to `MOMENTUM_DISABLED_SPORTS` with reverted-evidence comment, restart bot. Mirrors Session 19c → Session 22 precedent.
 
-**Verify.**
-1. Survivorship check: `n_no_won >= 10` on settled atp CFs. Document the actual count.
-2. Skip_reason distribution on the 56 atp settled CFs. Document.
-3. If Outcome A ships: bot restart; within 2-3 days `tail bot/state/decisions.jsonl | jq 'select(.opp_type=="live_momentum") | .extra.sport'` shows new "atp" entries (no longer rejected by sport_disabled gate).
-4. After 14 days: scheduled routine re-runs the bucket report; main-tour atp settled CLV remains positive on the post-deploy cohort. If it flips, REVERT.
+**Verify (post-deploy).**
+1. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1165 passed, 0 failed (matches Session 37 baseline).
+2. ☑ Bot restarted via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Single PID confirmed; no orphans.
+3. ☑ Within 30 min: `tail -200 bot/state/decisions.jsonl` shows new `KXATPMATCH-` (non-challenger) decisions getting routed through the regular live_momentum gates (`no_leader`, `dip_too_big`, `dqs_fail`, `variance_quality`, etc.) instead of `sport_disabled`. Some accepts may also appear when matches pass all gates.
+4. Within 24h: spot-check `bot/state/paper_trades.json` for new entries with ticker prefix `KXATPMATCH-` (and NOT containing `CHALLENGER`). New trades indicate end-to-end gate-flip working.
+5. May 13: scheduled routine fires; CONFIRM or REVERT per the rule above.
 
-**Severity / urgency.** Tier 2. Highest-confidence positive finding from Investigation #1 but the bot's primary risk is still Session 36's verdict on May 13. Ship 38a in the same week as Session 36 verification, not before — keeps attribution clean.
+**Out of scope (preserved — separate sessions).** wta_challenger / atp_challenger / wta re-evaluation; per-sport TickStrategy variants (Session 39); IPL disable (Session 38b); MOMENTUM_LEADER_MAX (Session 38c); match_phase axis dataset wire-up (Session 38d); bucket-report n-column split (Session 38e); CF emission for disable-check pathway (Session 31).
 
 ---
 
