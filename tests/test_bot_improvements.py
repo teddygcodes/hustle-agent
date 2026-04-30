@@ -154,72 +154,8 @@ def test_econ_not_in_active_strategies():
 # ---------------------------------------------------------------------------
 # Task 5: Bot health watchdog
 # ---------------------------------------------------------------------------
-
-import asyncio
-from unittest.mock import patch, AsyncMock
-from datetime import datetime, timezone, timedelta
-
-
-def _make_bot_state(last_heartbeat_offset_minutes: float, running: bool) -> dict:
-    ts = (datetime.now(timezone.utc) - timedelta(minutes=last_heartbeat_offset_minutes)).isoformat()
-    return {
-        "running": running,
-        "last_heartbeat": ts,
-        "scan_count": 10,
-        "scans_today": 2,
-        "odds_api_requests_this_month": 50,
-        "started_at": ts,
-        "last_scan": ts,
-        "current_date": "2026-04-05",
-        "last_odds_api_request": ts,
-        "last_nightly_summary": "2026-04-05",
-    }
-
-
-def _run_bot_start(state: dict) -> list[str]:
-    """Helper: run GlintBot.start() with fully mocked I/O, return send_message call strings."""
-    from bot.main import GlintBot
-
-    mock_notifier = AsyncMock()
-    mock_notifier.initialize = AsyncMock()
-    mock_notifier.start_polling = AsyncMock()
-    mock_notifier.send_message = AsyncMock()
-    mock_notifier.paused = False
-
-    async def _run():
-        with patch("bot.main._load_bot_state", return_value=state), \
-             patch("bot.main._save_bot_state"), \
-             patch("bot.main._load_pending", return_value=[]), \
-             patch("bot.main._save_pending"), \
-             patch("bot.main._acquire_lock"), \
-             patch("bot.main._release_lock"), \
-             patch("bot.main.TelegramNotifier", return_value=mock_notifier), \
-             patch.object(GlintBot, "_register_commands"), \
-             patch.object(GlintBot, "_main_loop", new_callable=AsyncMock), \
-             patch.object(GlintBot, "_crypto_scan_loop", new_callable=AsyncMock):
-            bot = GlintBot()
-            await bot.start()
-        return [str(call) for call in mock_notifier.send_message.call_args_list]
-
-    return asyncio.run(_run())
-
-
-def test_watchdog_alerts_on_stale_heartbeat():
-    """If last_heartbeat is >15 min old and running=True, send Telegram alert on startup."""
-    stale_state = _make_bot_state(last_heartbeat_offset_minutes=20, running=True)
-    calls = _run_bot_start(stale_state)
-    assert any(
-        "heartbeat" in c.lower() or "crash" in c.lower() or "stale" in c.lower()
-        for c in calls
-    ), f"Expected watchdog alert, got calls: {calls}"
-
-
-def test_watchdog_no_alert_when_fresh():
-    """If last_heartbeat is recent (2 min), no watchdog alert."""
-    fresh_state = _make_bot_state(last_heartbeat_offset_minutes=2, running=True)
-    calls = _run_bot_start(fresh_state)
-    watchdog_calls = [
-        c for c in calls
-        if "heartbeat" in c.lower() or "crash" in c.lower() or "stale" in c.lower()
-    ]
-    assert len(watchdog_calls) == 0, f"Unexpected watchdog alert: {watchdog_calls}"
+# The Telegram alert path was silenced in Session 4 (noisy during normal operation);
+# only the bot.log warning survives. Session 37 (Apr 29) deleted the dead alert path
+# in bot/main.py and removed the two tests that asserted on the silenced behavior —
+# the bot.log warning has no good in-process test (start() spawns 5 concurrent forever-loops
+# that aren't all easily mockable). If the warning regresses, it'll be visible in bot.log.

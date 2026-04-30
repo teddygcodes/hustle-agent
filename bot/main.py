@@ -251,7 +251,6 @@ class GlintBot:
         self.notifier = TelegramNotifier()
         self._running = False
         self._last_summary_date: str | None = None
-        self._watchdog_alert: str | None = None
         self._active_watchers: dict[str, tuple] = {}  # query -> (LiveGameWatcher, asyncio.Task)
 
     async def start(self):
@@ -273,7 +272,9 @@ class GlintBot:
         # Restore DK/FD disabled flags from previous session (12h TTL)
         odds_scraper.load_source_flags(state)
 
-        # Watchdog: if the bot was marked running but heartbeat is stale, it likely crashed
+        # Watchdog: if the bot was marked running but heartbeat is stale, it likely crashed.
+        # The Telegram alert path was silenced in Session 4 (noisy during normal operation);
+        # the logger.warning is the surviving signal — surfaces in bot.log for postmortem.
         _HEARTBEAT_STALE_MINUTES = 15
         last_hb = state.get("last_heartbeat")
         if state.get("running") and last_hb:
@@ -284,10 +285,6 @@ class GlintBot:
                     logger.warning(
                         "Watchdog: last heartbeat was %.0f min ago — bot likely crashed silently",
                         age_minutes,
-                    )
-                    self._watchdog_alert = (
-                        f"⚠️ Watchdog: bot was running but last heartbeat was "
-                        f"{age_minutes:.0f} min ago. Likely crashed silently. Restarting now."
                     )
             except Exception:
                 pass
@@ -314,11 +311,6 @@ class GlintBot:
         state["running"] = True
         state["started_at"] = datetime.now(timezone.utc).isoformat()
         _save_bot_state(state)
-
-        # Send watchdog alert now that state is saved and Telegram is ready
-        if self._watchdog_alert:
-            # Watchdog alert silenced
-            self._watchdog_alert = None
 
         self._running = True
 

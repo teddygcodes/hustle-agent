@@ -153,30 +153,42 @@ class TestCooldownResolved:
 # ---------------------------------------------------------------------------
 
 class TestDailyTickerLossLimit:
-    def test_ticker_exceeding_daily_loss_blocked(self, tmp_state):
+    def test_ticker_exceeding_daily_loss_blocked(self, tmp_state, monkeypatch):
         """If ticker has lost > $1.00 today, block re-entry."""
+        import datetime as _dt_module
         import bot.executor as exc
-        now = datetime.now(timezone.utc)
+        # `_check_position_limits` does `from datetime import datetime` LOCALLY (line 340),
+        # so a module-level patch on bot.executor.datetime doesn't reach it. Patch the class
+        # in the datetime module itself — monkeypatch isolates per-test.
+        # Pin to mid-day UTC so `now - 5h` stays on the same UTC date as `now` (the
+        # test was wall-clock-flaky in late-evening UTC hours).
+        fixed_now = datetime(2026, 4, 29, 14, 0, 0, tzinfo=timezone.utc)
+
+        class _FixedDatetime(_dt_module.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return fixed_now if tz is None else fixed_now.astimezone(tz)
+        monkeypatch.setattr(_dt_module, "datetime", _FixedDatetime)
 
         positions = [
             {
                 "ticker": "KXHIGHDEN-26APR06-T63",
                 "status": "exited_early",
-                "exited_at": (now - timedelta(hours=5)).isoformat(),  # past cooldown
+                "exited_at": (fixed_now - timedelta(hours=5)).isoformat(),  # past cooldown
                 "realized_pnl": -0.44,
                 "cost": 2.0,
             },
             {
                 "ticker": "KXHIGHDEN-26APR06-T63",
                 "status": "exited_early",
-                "exited_at": (now - timedelta(hours=5)).isoformat(),
+                "exited_at": (fixed_now - timedelta(hours=5)).isoformat(),
                 "realized_pnl": -0.44,
                 "cost": 2.0,
             },
             {
                 "ticker": "KXHIGHDEN-26APR06-T63",
                 "status": "exited_early",
-                "exited_at": (now - timedelta(hours=5)).isoformat(),
+                "exited_at": (fixed_now - timedelta(hours=5)).isoformat(),
                 "realized_pnl": -0.33,
                 "cost": 2.0,
             },
@@ -533,10 +545,10 @@ class TestVigStackFamilyFloor:
 
     def test_weather_min_price_constant(self):
         from bot.config import VIG_STACK_WEATHER_MIN_PRICE
-        assert VIG_STACK_WEATHER_MIN_PRICE == 0.90, (
-            "Volatile-family floor tuned at 0.90 on Apr 18. Below this, "
-            "risk/reward demands WR > 85%, which volatile families clock "
-            "at 28%. Change requires fresh evidence."
+        assert VIG_STACK_WEATHER_MIN_PRICE == 0.93, (
+            "Volatile-family floor raised 0.90 → 0.93 on Apr 20 (Session 2) after "
+            "bucket analysis showed only [92-96¢) is breakeven for volatile families; "
+            "<92¢ is -$110.79 / 42 trades. Change requires fresh evidence."
         )
 
     def test_weather_floor_strictly_above_baseline(self):
@@ -590,17 +602,13 @@ class TestVigStackFamilyFloor:
         )
 
     def test_volatile_family_at_weather_floor_survives(self):
-        """KXHIGHDEN @ 0.90 NO must pass (meets the weather floor exactly)."""
-        # Volatile family, NO at 0.90 (meets weather floor exactly). Scanner
-        # requires yes_sum_prob >= 1.05 ladder-level before any contract is
-        # considered; at NO=0.90, the complement YES is ~5-10¢ which alone
-        # wouldn't clear the ladder-vig floor. Use 3 contracts with two
-        # high-YES companions so yes_sum = 5+99+99 = 203 → vig_factor=2.03 →
-        # no_fair_A = 100-5/2.03 = 97.54 → relative_edge = 7.54/90 = 8.4% ✓.
-        # The B and C contracts get filtered individually by no_price_too_low
-        # (<0.03) but still count toward the ladder vig sum.
+        """KXHIGHDEN @ 0.93 NO must pass (meets the Apr-20 weather floor exactly)."""
+        # Volatile family, NO at 0.93 (meets the post-Session-2 weather floor exactly).
+        # At NO=0.93 the complement YES is ~7¢. Two high-YES companions → yes_sum =
+        # 7+99+99 = 205 → vig_factor = 2.05 → no_fair_A = 100 - 7/2.05 ≈ 96.59 →
+        # relative_edge = 3.59/93 ≈ 3.86% (clears the 2% threshold).
         markets = [
-            {"ticker": "KXHIGHDEN-A", "title": "A", "yes_ask": 5, "no_ask": 90,
+            {"ticker": "KXHIGHDEN-A", "title": "A", "yes_ask": 7, "no_ask": 93,
              "volume": 100, "open_interest": 100},
             {"ticker": "KXHIGHDEN-B", "title": "B", "yes_ask": 99, "no_ask": 1,
              "volume": 100, "open_interest": 100},
@@ -610,7 +618,7 @@ class TestVigStackFamilyFloor:
         opps = _run_vig_stack_strategy(markets, weather=["KXHIGHDEN"])
         surfaced = {o["ticker"] for o in opps}
         assert "KXHIGHDEN-A" in surfaced, (
-            f"Volatile family KXHIGHDEN @ 0.90 NO meets weather floor and "
+            f"Volatile family KXHIGHDEN @ 0.93 NO meets weather floor and "
             f"should surface. Got: {surfaced}"
         )
 

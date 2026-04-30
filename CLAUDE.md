@@ -2294,6 +2294,12 @@ All extended records preserve their original 4 axis values byte-identical (regre
 
 ---
 
+### ☑ Session 37 — Test hygiene cleanup (Apr 29, shipped)
+
+10 documented pre-existing test failures cleaned up; suite baseline now 0 failures (1165 passed). Group C delete removed a dead silenced-watchdog Telegram-alert path in [bot/main.py:318-321](hustle-agent/bot/main.py:318) (logger.warning preserved as the sole watchdog signal); no other production code changed.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:

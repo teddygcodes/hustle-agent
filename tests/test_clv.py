@@ -779,17 +779,35 @@ class TestLiveMomentumCounterfactual:
             sport="ufc", skip_reason="low_volume", now=ts_ufc_lv,
         ) is True
 
-    def test_per_day_cap_resets_at_utc_midnight(self, tmp_clv_file):
+    def test_per_day_cap_resets_at_utc_midnight(self, tmp_clv_file, monkeypatch):
         # Fill the cap on day 1; day 2 (UTC midnight rollover) gets a fresh cap.
+        # Production sets `recorded_at = datetime.now(...)` (wall-clock write time, NOT
+        # `scan_event_ts` — by design: the cap shouldn't be vulnerable to back-dated
+        # scan_event_ts injection). To exercise the day1/day2 boundary deterministically,
+        # monkeypatch bot.clv.datetime so day-1 writes are stamped with day-1 wall-clock.
         day1 = datetime(2026, 4, 27, 23, 0, 0, tzinfo=timezone.utc)
+        day2 = datetime(2026, 4, 28, 0, 30, 0, tzinfo=timezone.utc)
+
+        frozen = {"now": day1}
+
+        class _FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                t = frozen["now"]
+                return t if tz is None else t.astimezone(tz)
+        monkeypatch.setattr(clv, "datetime", _FrozenDatetime)
+
         for i in range(5):
+            frozen["now"] = day1 + timedelta(minutes=i)
             clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
                 ticker=f"KXUFC-D1-{i}",
                 sport="ufc",
                 skip_reason="no_leader",
                 scan_event_ts=day1 + timedelta(minutes=i),
             ))
-        day2 = datetime(2026, 4, 28, 0, 30, 0, tzinfo=timezone.utc)
+
+        # Cap check uses `now=day2` directly, doesn't depend on the patched class for
+        # `today_start_utc(now)`. Records' `recorded_at` is on day1 → count=0 at day2.
         assert clv._should_emit_live_momentum_cf(
             sport="ufc", skip_reason="no_leader", now=day2,
         ) is True

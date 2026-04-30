@@ -106,9 +106,10 @@ def test_scan_ethereum_series_no_markets_returns_empty():
     assert result == []
 
 
-def test_eth_in_active_strategies():
+def test_eth_not_in_active_strategies():
+    """eth_price_edge disabled — vol model overestimates intraday movement (CRYPTO_ENABLED=False)."""
     from bot.config import ACTIVE_STRATEGIES
-    assert "eth_price_edge" in ACTIVE_STRATEGIES
+    assert "eth_price_edge" not in ACTIVE_STRATEGIES
 
 
 # ---------------------------------------------------------------------------

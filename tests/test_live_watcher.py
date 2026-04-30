@@ -130,6 +130,9 @@ def test_status_card_shows_bet_placed():
     watcher.bets_placed = [{"side": "yes", "contracts": 15, "price_cents": 55, "ticker": "X", "order_id": "P"}]
     watcher.exits = []
     watcher.ticker = "KXNBAGAME-26APR05LALDEN-LAL"
+    # Set by __init__; __new__ skips it. _format_status_card's bets_placed branch reads both.
+    watcher._trailing_active = {}
+    watcher._peak_values = {}
 
     card = watcher._format_status_card(
         home_team="Los Angeles Lakers", away_team="Denver Nuggets",
@@ -166,13 +169,23 @@ def test_status_card_shows_exited_position():
 
 
 def test_session_summary_includes_exits():
+    import time
+    from collections import Counter, deque
     from bot.live_watcher import LiveGameWatcher
     watcher = LiveGameWatcher.__new__(LiveGameWatcher)
     watcher.query = "lakers"
     watcher.bets_placed = []
     watcher.exits = [{"side": "yes", "contracts": 10, "price_cents": 55,
                        "ticker": "X", "order_id": "P", "reason": "edge faded", "pnl": 2.30}]
-    summary = watcher._format_session_summary("Los Angeles Lakers", "Denver Nuggets")
+    # Set by __init__; __new__ skips them. _format_session_summary reads all of these.
+    watcher._started_at = time.time()
+    watcher.mode = "momentum"
+    watcher._match_title = "Los Angeles Lakers @ Denver Nuggets"
+    watcher.ticker = "KXNBAGAME-26APR05LALDEN-LAL"
+    watcher._price_history = deque()
+    watcher._tick_telem = Counter()
+    with patch("bot.live_watcher._journal_append"):
+        summary = watcher._format_session_summary("Los Angeles Lakers", "Denver Nuggets")
     assert "EXITED" in summary
     assert "+$2.30" in summary
     assert "Session P&L" in summary
