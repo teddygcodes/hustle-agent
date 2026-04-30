@@ -866,3 +866,267 @@ class TestSweepDeterminism:
         assert all(t == 50 for t in totals1)
         # Test top-3 should be both variants (only 2 in grid), each scoring 120¢.
         assert all(v.total_pnl_cents == 120 for v in r1.test_top3)
+
+
+# --- Session 41: TP/SL sweep regression tests -------------------------------
+
+
+class TestSweepBaselineUpdated:
+    def test_sweep_baseline_reflects_session_19c_production(self):
+        """Session 19c shipped MOMENTUM_LEADER_MIN=0.65 (was 0.70). Session 41
+        also restated SWEEP_BASELINE to (0.65, 6) so post-Session-19c sweeps
+        compare against current production, not stale pre-19c values."""
+        assert tb.SWEEP_BASELINE == (0.65, 6)
+
+
+class TestSweepGridTpSl:
+    def test_grid_has_12_variants(self):
+        """Session 41 spec table: TP rows {10, 12, 14, 16} × SL cols {20, 25,
+        30, 35} = 16 cells, minus fringe skips (10,35) / (14,35) / (16,30) /
+        (16,35) = 12 variants. (Spec text said '11' counting non-baseline
+        variants; (12, 30) is the baseline within the 12-entry grid.)"""
+        assert len(tb.SWEEP_GRID_TP_SL) == 12
+
+    def test_baseline_is_in_grid(self):
+        """`(12, 30)` (current production TP/SL) must be one of the swept
+        variants so per-trade Δ vs baseline is computable on the test set
+        without a separate run. Mirrors how `SWEEP_GRID_PRIMARY` includes
+        the LM/TS baseline."""
+        assert tb.SWEEP_BASELINE_TP_SL == (12, 30)
+        assert (12, 30) in tb.SWEEP_GRID_TP_SL
+
+    def test_grid_skips_documented_fringe_combos(self):
+        """The Session 41 grid intentionally skips (10,35) / (14,35) / (16,30)
+        / (16,35) per the user's spec ('TP > SL has weird semantics; (10,35)
+        and (14,35) and (16,30+) likely add no signal'). Lock the skip set so
+        future edits don't silently re-add fringe combos."""
+        excluded = {(10, 35), (14, 35), (16, 30), (16, 35)}
+        for combo in excluded:
+            assert combo not in tb.SWEEP_GRID_TP_SL, f"{combo} should be skipped"
+
+    def test_grid_ratios_span_the_interesting_range(self):
+        """Math says ratio > 0.6 needed to flip EV positive at 30% WR. Grid
+        should cover both sides of that threshold so the sweep can detect
+        it."""
+        ratios = [tp / sl for (tp, sl) in tb.SWEEP_GRID_TP_SL]
+        assert min(ratios) <= 0.40  # current baseline ratio
+        assert max(ratios) >= 0.70  # well above the EV-flip threshold
+
+
+class TestRunVariantTpSl:
+    def test_default_tp_sl_matches_existing_path(self, monkeypatch):
+        """Critical regression: `_run_variant(LM, TS)` (TP/SL omitted) must
+        produce identical P&L to `_run_variant(LM, TS, take_profit_cents=12,
+        stop_loss_cents=30)` (current production defaults). Proves the new
+        kwargs don't perturb the baseline path when set to current production
+        values."""
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXUFCFIGHT-B", "2026-04-23T01:00:00Z"),
+        ]
+
+        def fake_replay(strategy, trade, **kw):
+            # P&L mirrors strategy._take_profit_cents and _stop_loss_cents so
+            # we can confirm the kwargs threaded through to the strategy.
+            tp = strategy._take_profit_cents
+            sl = strategy._stop_loss_cents
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=tp * 10 - sl,  # arbitrary but deterministic
+                exit_reason="TAKE_PROFIT",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        # Path 1: kwargs omitted (defaults flow from bot.config — TP=12, SL=30)
+        v_default = tb._run_variant(0.65, 6, paper)
+        # Path 2: kwargs set to current production values explicitly
+        v_explicit = tb._run_variant(
+            0.65, 6, paper, take_profit_cents=12, stop_loss_cents=30,
+        )
+        # Same P&L because the strategy reads the same TP/SL in both cases.
+        assert v_default.total_pnl_cents == v_explicit.total_pnl_cents
+        assert v_default.n_replays == v_explicit.n_replays
+
+    def test_tp_sl_overrides_thread_through_to_strategy(self, monkeypatch):
+        """When the new kwargs are non-None, they must reach the
+        LiveMomentumStrategy constructor and end up on the strategy
+        instance's `_take_profit_cents` / `_stop_loss_cents`."""
+        paper = [_trade("KXNBAGAME-A", "2026-04-23T00:00:00Z")]
+        captured: list[tuple[int, int]] = []
+
+        def fake_replay(strategy, trade, **kw):
+            captured.append(
+                (strategy._take_profit_cents, strategy._stop_loss_cents)
+            )
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        tb._run_variant(
+            0.65, 6, paper,
+            take_profit_cents=14, stop_loss_cents=25,
+        )
+        assert captured == [(14, 25)]
+
+    def test_variant_result_carries_tp_sl_fields(self, monkeypatch):
+        """Verify VariantResult carries the override values so downstream
+        renderers and aggregators can attribute results."""
+        paper = [_trade("KXNBAGAME-A", "2026-04-23T00:00:00Z")]
+        monkeypatch.setattr(
+            tb, "_replay_paper_trade",
+            lambda s, t, **kw: tb.ReplayResult(
+                ticker=t["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            ),
+        )
+        v = tb._run_variant(0.65, 6, paper, take_profit_cents=14, stop_loss_cents=25)
+        assert v.take_profit_cents == 14
+        assert v.stop_loss_cents == 25
+        # And the LM/TS sweep path leaves them None:
+        v2 = tb._run_variant(0.65, 6, paper)
+        assert v2.take_profit_cents is None
+        assert v2.stop_loss_cents is None
+
+
+class TestVariantResultLabel:
+    def test_label_uses_lm_ts_when_no_tp_sl(self):
+        v = tb.VariantResult(
+            leader_min=0.65, trail_stop_cents=6,
+            total_pnl_cents=0, n_replays=0, n_winning_replays=0,
+            per_replay=[],
+        )
+        assert v.label == "LM=0.65 TS=6"
+
+    def test_label_uses_tp_sl_when_overrides_set(self):
+        v = tb.VariantResult(
+            leader_min=0.65, trail_stop_cents=6,
+            total_pnl_cents=0, n_replays=0, n_winning_replays=0,
+            per_replay=[],
+            take_profit_cents=14, stop_loss_cents=25,
+        )
+        assert v.label == "TP=14 SL=25"
+
+
+class TestRunSweepTpSl:
+    def test_iterates_full_tp_sl_grid_x_unique_tickers(self, monkeypatch):
+        """N variants × M unique tickers = N×M strategy replays in training,
+        plus baseline-on-test (1 extra), plus top-3-on-test (3 extras × M),
+        plus best-aggregations. Mirrors TestSweepGrid for the LM/TS path."""
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXUFCFIGHT-B", "2026-04-23T01:00:00Z"),
+            _trade("KXIPLGAME-C", "2026-04-26T00:00:00Z"),
+        ]
+        captured_tp_sl: list[tuple[int, int]] = []
+
+        def fake_replay(strategy, trade, **kw):
+            captured_tp_sl.append(
+                (strategy._take_profit_cents, strategy._stop_loss_cents)
+            )
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=10, exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        # Smaller grid to keep the test cheap but exercise the same code path.
+        small_grid = [(10, 20), (12, 30), (14, 25)]
+        train, test = tb.split_train_test(paper, train_pct=0.70)
+        report = tb.run_sweep_tp_sl(
+            small_grid, train, test, slippage_cents=2,
+        )
+
+        # 3 variants × 2 train tickers = 6 train replays.
+        # + 1 baseline × 1 test ticker = 1 baseline replay.
+        # + 3 top variants × 1 test ticker = 3 test replays.
+        # = 10 total replays.
+        assert len(captured_tp_sl) == 10
+        # All variants ran with their own TP/SL.
+        assert (10, 20) in captured_tp_sl
+        assert (12, 30) in captured_tp_sl
+        assert (14, 25) in captured_tp_sl
+        # Report carries the held-fixed LM/TS.
+        assert report.leader_min_fixed == tb.SWEEP_TP_SL_FIXED_LM
+        assert report.trail_stop_cents_fixed == tb.SWEEP_TP_SL_FIXED_TS
+        assert report.baseline == (12, 30)
+
+    def test_baseline_always_runs_even_when_not_in_top3(self, monkeypatch):
+        """If the baseline isn't in the top-3 training variants, run_sweep_tp_sl
+        must still execute it on the test set so the decision number is
+        computable. Mirrors the same discipline in run_sweep."""
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXNBAGAME-B", "2026-04-26T00:00:00Z"),
+        ]
+        # Force baseline (12, 30) to bottom-rank by giving it a worse P&L
+        # than other variants (which earn more).
+        pnl_by_tp_sl = {
+            (10, 20): 200,  # best
+            (12, 30): -100,  # baseline, worst
+            (14, 25): 150,
+            (16, 25): 100,
+        }
+
+        def fake_replay(strategy, trade, **kw):
+            tp_sl = (strategy._take_profit_cents, strategy._stop_loss_cents)
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=pnl_by_tp_sl[tp_sl],
+                exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        train, test = tb.split_train_test(paper, train_pct=0.50)
+        grid = [(10, 20), (12, 30), (14, 25), (16, 25)]
+        report = tb.run_sweep_tp_sl(grid, train, test, slippage_cents=0)
+        # baseline_test should be populated even though (12, 30) is rank 4.
+        assert report.baseline_test is not None
+        assert report.baseline_test.take_profit_cents == 12
+        assert report.baseline_test.stop_loss_cents == 30
+        # And it isn't in the top-3 (training rank by P&L: 200, 150, 100, -100).
+        top3_pairs = {
+            (v.take_profit_cents, v.stop_loss_cents) for v in report.test_top3
+        }
+        assert (12, 30) not in top3_pairs
+
+    def test_render_includes_baseline_marker_and_decision_gate_text(
+        self, monkeypatch
+    ):
+        """Smoke-test the renderer: baseline row gets the marker; decision-gate
+        text mentions Pattern A/B/C; held-fixed (LM, TS) shown in header."""
+        paper = [_trade("KXNBAGAME-A", "2026-04-23T00:00:00Z")]
+        monkeypatch.setattr(
+            tb, "_replay_paper_trade",
+            lambda s, t, **kw: tb.ReplayResult(
+                ticker=t["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            ),
+        )
+        # Use the real grid so the renderer sees the production-shape variant
+        # set; one ticker is enough for a smoke test.
+        train, test = tb.split_train_test(
+            paper + [_trade("KXNBAGAME-B", "2026-04-26T00:00:00Z")],
+            train_pct=0.50,
+        )
+        report = tb.run_sweep_tp_sl(
+            tb.SWEEP_GRID_TP_SL, train, test, slippage_cents=0,
+        )
+        out = tb.render_sweep_tp_sl_report(report)
+        # Header shouts Session 41 + held-fixed
+        assert "Session 41" in out
+        assert "Held fixed" in out
+        assert "MOMENTUM_LEADER_MIN=0.65" in out
+        # Baseline row gets the marker.
+        assert "TP=12 SL=30 ← baseline" in out
+        # Sport-profile caveat is documented.
+        assert "Sport-profile caveat" in out
+        # Decision-gate text references Pattern A/B/C.
+        assert "Pattern A" in out
+        assert "Pattern B" in out
+        assert "Pattern C" in out

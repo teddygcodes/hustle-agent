@@ -2705,6 +2705,108 @@ If either fires, run the same Phase-1 bucket analysis on the larger sample to ve
 
 ---
 
+### ☑ Session 41 — TP/SL ratio sweep for live_momentum (Apr 30, shipped — Outcome C, doc-only + Phase 0 plumbing)
+
+**Problem.** Session 40 (Apr 30) ruled out exit-path tightening as the live_momentum leak surface (Pattern C: counterfactual showed exits saved $62 on EE cohort). Win:Loss magnitude = 0.261 (avg win +$3.41 vs avg loss −$13.10) was named the structural finding. Session 41 directly tested the next hypothesis: is the TP/SL ratio shape itself (currently `LIVE_TAKE_PROFIT_CENTS=12 / LIVE_STOP_LOSS_CENTS=30 = 0.40`) creating structural negative EV? Math says ratio > 0.6 needed to flip EV positive at 30% WR. Sweep TP × SL on a 12-variant grid, hold (LM=0.65, TS=6) fixed at current production, train/test 70/30, +50¢ test per-trade Δ gate.
+
+**Phase 0 — plumbing (shipped, NOT a Pattern C dependency).** The user's draft underestimated the back-tester scope: `tools/tick_backtest.py:_run_variant` instantiated `LiveMomentumStrategy(leader_min=..., trail_stop_cents=...)` and never threaded TP/SL through, despite the strategy constructor accepting them at [bot/strategies/live_momentum.py:59,61](hustle-agent/bot/strategies/live_momentum.py:59). Plumbing required:
+- New constants `SWEEP_BASELINE_TP_SL = (12, 30)` and `SWEEP_GRID_TP_SL` (12 entries: 3+4+3+2 from the spec table, skipping fringe combos `(10,35) / (14,35) / (16,30) / (16,35)` per `TP > SL` semantics or far-from-interesting ratios).
+- Stale `SWEEP_BASELINE` updated `(0.70, 6) → (0.65, 6)` post-Session-19c production drift (separate side-effect, locked by `TestSweepBaselineUpdated`).
+- Added `Optional[int]` `take_profit_cents` / `stop_loss_cents` fields on `VariantResult`. Label property switches: when both overrides are set, render `TP={tp} SL={sl}`; otherwise render the existing `LM=... TS=...`.
+- Extended `_run_variant` signature with `take_profit_cents=None / stop_loss_cents=None` kwargs. When None, doesn't pass them to the strategy constructor — preserves the Session 19c LM/TS sweep path byte-identically.
+- New `TpSlSweepReport` dataclass (mirrors `SweepReport` shape, but `baseline: tuple[int, int]` for TP/SL and adds `leader_min_fixed`/`trail_stop_cents_fixed` to make the held-fixed pair explicit).
+- New `run_sweep_tp_sl()` driver, `render_sweep_tp_sl_report()` markdown, `_run_sweep_tp_sl_cli()` dispatcher.
+- New `--sweep-tp-sl` CLI flag (mutually exclusive with `--sweep`).
+
+14 new regression tests in `tests/test_tick_backtest.py` (5 classes): `TestSweepBaselineUpdated`, `TestSweepGridTpSl`, `TestRunVariantTpSl`, `TestVariantResultLabel`, `TestRunSweepTpSl`. Including the critical `test_default_tp_sl_matches_existing_path` regression (assert _run_variant with TP/SL omitted produces identical P&L to TP=12 SL=30 explicit — proves new kwargs don't perturb the LM/TS sweep path).
+
+Discipline gates cleared:
+- `python3 -m pytest tests/test_tick_backtest.py tests/test_live_momentum_strategy.py tests/test_live_momentum_strategy_helpers.py -v` → 73 passed (14 new + 59 existing). 0 failures.
+- `python3 tools/tick_backtest.py --paper-trades 10 --min-entry-date 2026-04-23` → **4/4 PASS / 0 FAIL within 1¢** (matches Session 19a-followup baseline; 5 COVERAGE_GAP, 1 SKIP unchanged). Plumbing didn't perturb parity.
+
+**Sample (Phase 1 sanity verified before sweep ran).**
+```
+total paper trades: 228
+all settled live_momentum: 73
+post-Apr-23 settled live_momentum: 31  (≥20 ✓)
+status: 14 exited_early / 12 won / 5 lost
+sport: KXNBAGAME 11, KXIPLGAME 7, KXUFCFIGHT 7, KXNHLGAME 6
+tennis-alias trades: 0 of 31  (sport-profile override irrelevant)
+```
+After dedupe by ticker: 18 unique tickers in the 21-trade train split, 9 unique in the 10-trade test split.
+
+**Phase 2 — sweep results.** Full run output preserved at [bot/state/reports/session_41_tp_sl_sweep_2026-04-30.md](bot/state/reports/session_41_tp_sl_sweep_2026-04-30.md).
+
+Training (n=21, 18 unique tickers replayed):
+
+| TP \ SL | 20 | 25 | 30 (current) | 35 |
+|---|---|---|---|---|
+| 10 | +646 | +646 | +646 | — |
+| 12 (current) | +886 | +886 | **+886 baseline** | +886 |
+| 14 | +550 | +550 | +550 | — |
+| 16 | +550 | +550 | — | — |
+
+**KEY FINDING — SL axis is structurally flat.** Across all 4 SL values within every TP row, the training Σ P&L is byte-identical. Tightening SL (20¢) does NOT bite into more positions; loosening (35¢) does NOT preserve any extra positions. Mechanism: TAKE_PROFIT, TRAILING_STOP, and NEAR_SETTLE fire before STOP_LOSS in the production exit-priority order; positions that hit SL=30 in production also hit SL=20 (drop-from-entry is monotonic past every threshold once losing), and positions that survive past SL=35 are the same as those that survive past SL=20 (they're winning, not losing). So SL becomes a no-op in this cohort.
+
+Test (n=10, 9 unique tickers replayed; top-3 training variants + baseline):
+
+| Variant | Train Σ¢ | Test Σ¢ | Δ vs baseline test¢ | Test n | Test per-trade Δ¢ |
+|---|---|---|---|---|---|
+| TP=12 SL=20 | +886 | −922 | +0 | 9 | +0.0 |
+| TP=12 SL=25 | +886 | −922 | +0 | 9 | +0.0 |
+| TP=12 SL=30 ← baseline | +886 | −922 | 0 | 9 | 0.0 |
+
+All 3 top-3 training variants are TP=12 with different SL values — and they all tie at exactly −922¢ on test (same SL-flat finding holds). Best variant test per-trade Δ = **+0¢/trade** vs the +50¢ Pattern A gate. **FAIL.**
+
+Per-sport on test (best variant TP=12 SL=20): NBA 5/9 trades −644¢, IPL 2/9 −416¢, NHL 2/9 +138¢ (UFC absent from test split). Consistent with Session 38b's queued IPL-disable signal (IPL is the worst per-trade on this sample; mean ~−$2.08). Day-of-week: wed −1408¢ on n=6 dominates the loss; sun/tue positive but n≤2 each.
+
+**Decision: Outcome C (Pattern C — no ship).** Two distinct reasons converging on the same answer:
+
+1. **SL axis is dead.** No SL value beats baseline on training OR test. The ratio asymmetry hypothesis falls apart on the SL side: SL=20 (ratio 0.60, math says EV-positive) produces identical P&L to SL=30 (ratio 0.40) because the gate doesn't fire enough to matter on the post-Apr-23 cohort.
+2. **TP=12 already wins training.** TP=12 dominates over TP=10 (+240¢ training) and TP=14/16 (+336¢ training). But test set never validated TP≠12 because the top-3 selector picked the 4-way tie at TP=12. So the data structurally cannot say whether a different TP value would generalize. Even if it could, current production IS TP=12 — no change is implied.
+
+Per the user's spec: Pattern C → **Ship NOTHING.** No `bot/config.py` edit. Mirror Session 18.5 / 38a-2 / 40 outcomes.
+
+**Direction-setting conclusion.** Sessions 40 and 41 together rule out *both* exit-firing-prematurely AND ratio-shape-asymmetry as the live_momentum leak surface. The structural Win:Loss=0.261 from Session 40 is NOT explained by either lever. The strategy needs a different surface entirely. Three queued candidates already address pieces:
+- **Sport scope** — Session 38b (IPL disable; this sweep's per-sport breakdown reinforces with IPL n=2 / −416¢).
+- **Entry quality at the price ceiling** — Session 38c (MOMENTUM_LEADER_MAX ≥ 90¢, premium leaders are dramatic losers).
+- **Per-sport TP/SL** — explicit out-of-scope in Session 41; if the SL-axis-flat finding holds at larger n, per-sport TP/SL variants become a stronger candidate (UFC vs court-sports difference from Session 18 Finding #2; tennis already has the sport profile override so the framework is partly built).
+
+A fourth — sizing (Kelly cap on high-confidence trades that lose big) — is not yet a queued session. The 7 lost-class trades net −$91.68 with avg −$13.10 (vs avg win +$3.41); position-size-on-losses appears to be the asymmetric multiplier. Worth a brainstorming pass next if 38b/c/d/e + this Session 41 plumbing don't move the needle by ~Day 14.
+
+**Methodological caveat.** The top-3-by-training selector covered only the TP=12 cluster in this sweep, leaving TP=10 / TP=14 / TP=16 unvalidated on the test set. For sweeps where training surfaces a clean cluster (this one) the design works as-intended; for sweeps where the operator wants dispersed-TP validation (a future session), top-K-with-axis-diversity is the better selector. Documented as a Session-41-specific limitation; not blocking Pattern C.
+
+**Watch-list trigger.** Re-investigate Session 41 when EITHER:
+- Post-Apr-23 settled live_momentum cohort grows to ≥ 60 trades (currently 31 — Session 19a-followup discipline doubled), AND/OR
+- The SL-axis-flat finding ceases to hold (i.e., a future SL value within [20, 35] produces a per-row Σ-P&L delta ≥ +50¢ on training).
+
+Either path implies the regime shifted enough that the ratio hypothesis deserves another look. Until one fires, hold.
+
+**What shipped.**
+- [tools/tick_backtest.py](hustle-agent/tools/tick_backtest.py) — Phase 0 plumbing (~150 LOC). Adds `SWEEP_GRID_TP_SL`, `SWEEP_BASELINE_TP_SL`, `TpSlSweepReport`, `run_sweep_tp_sl`, `render_sweep_tp_sl_report`, `_run_sweep_tp_sl_cli`, `--sweep-tp-sl` CLI flag. Updates `SWEEP_BASELINE` to (0.65, 6) post-Session-19c. Extends `VariantResult` and `_run_variant` with optional TP/SL.
+- [tests/test_tick_backtest.py](hustle-agent/tests/test_tick_backtest.py) — 14 new regression tests across 5 classes.
+- [bot/state/reports/session_41_tp_sl_sweep_2026-04-30.md](bot/state/reports/session_41_tp_sl_sweep_2026-04-30.md) — full sweep output for posterity.
+- This Session 41 ☑ block.
+
+**What did NOT change.**
+- `bot/config.py` — `LIVE_TAKE_PROFIT_CENTS=12` and `LIVE_STOP_LOSS_CENTS=30` unchanged. Pattern C ships nothing here.
+- `bot/live_watcher.py`, `bot/strategies/live_momentum.py`, `bot/main.py`, `bot/executor.py` — untouched.
+- `MOMENTUM_DISABLED_SPORTS`, `MOMENTUM_LEADER_MIN`, `MOMENTUM_DQS_TRAIL_STOP`, `MOMENTUM_PRICE_WINDOW` — all unchanged. Production strategy parameters untouched.
+- `paper_trades.json`, `clv.json`, `decisions.jsonl`, `live_journal.json`, all other state files — unchanged.
+
+**No bot restart.** Phase 0 plumbing is local-only changes to `tools/tick_backtest.py` (read-only tool, NOT imported by `bot/main.py`). Production code path didn't move; running bot is unaffected.
+
+**Verify.**
+1. ☑ `python3 -m pytest tests/test_tick_backtest.py tests/test_live_momentum_strategy.py tests/test_live_momentum_strategy_helpers.py -v` → 73 passed.
+2. ☑ `python3 tools/tick_backtest.py --paper-trades 10 --min-entry-date 2026-04-23` → 4/4 PASS / 0 FAIL within 1¢.
+3. ☑ `python3 tools/tick_backtest.py --sweep-tp-sl --min-entry-date 2026-04-23` → full report, no winner per gate.
+4. ☑ `python3 -c "from bot.config import LIVE_TAKE_PROFIT_CENTS, LIVE_STOP_LOSS_CENTS; print(LIVE_TAKE_PROFIT_CENTS, LIVE_STOP_LOSS_CENTS)"` → `12 30` (unchanged).
+5. ☑ No bot restart. No production state mutation. Sweep output persisted at `bot/state/reports/session_41_tp_sl_sweep_2026-04-30.md`.
+
+**Out of scope (held).** All Session 38b/c/d/e items remain queued. No sizing investigation. No per-sport TP/SL plumbing extension. No re-running with a wider TP grid (TP=8, TP=18 etc.) — the data already says SL is dead and TP=12 is best on training; widening doesn't change that until cohort doubles.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
