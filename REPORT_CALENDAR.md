@@ -15,7 +15,6 @@ All times are in Eastern Time. The bot wall clock and ET match.
 
 | Routine | Fires | Status | Output | Why |
 |---|---|---|---|---|
-| Cursor stability re-check | 2026-04-30 5:00 PM ET | scheduled | inline + `bot/state/reports/cursor_stability_2026-04-30.md` | Apr 29 9:07 AM routine died at n=4; tomorrow's larger sample confirms STABLE branch |
 | Session 39 day-1 spot check | 2026-05-01 9:00 AM ET | scheduled | `bot/state/reports/session_39_day_1_2026-05-01.md` | Verify asyncio executor wrapping holds across one full normal-day. Heartbeat lag, _position_check_loop cadence, partial rate. HEALTHY / DEGRADED / WEDGED-AGAIN. |
 | Session 36 day-7 hold-to-settlement check | 2026-05-06 9:00 AM ET | scheduled | `bot/state/reports/vig_stack_holds_2026-05-06.md` | Did vig_stack early-exit % drop from 32% baseline after Session 36 TP/SL exemption shipped? |
 | Session 39 day-7 flaky-Kalshi stress check | 2026-05-07 9:00 AM ET | scheduled | `bot/state/reports/session_39_day_7_2026-05-07.md` | Did Session 39 fix hold through any flaky-Kalshi windows during the week? Per-day partial rate, wedge events (heartbeat gaps > 5min), cadence p95. HOLD / REGRESSED / NO-STRESS-OCCURRED. |
@@ -31,6 +30,7 @@ All times are in Eastern Time. The bot wall clock and ET match.
 | Session 17 cadence verification 72h | 2026-04-29 12:21 AM ET | lastRunAt only — no detailed outcome captured by dispatched chat |
 | Session 28 cursor stability check | 2026-04-29 9:07 AM ET | Dispatched chat died at 11s with 3 in-flight Bash calls; no commit. Manual re-run same morning showed cursor_rows median 1850 over n=4 (3× the 632 baseline) — sample too thin to commit, rescheduled for Apr 30 |
 | Session 36 smoke test (1h post-restart) | 2026-04-29 9:33 PM ET | Fired ~8 min late vs scheduled 9:25 PM. lastRunAt confirmed; outcome captured in chat. (Bot has been on Session 36 + 37 + 38a code since; the SKIPPED smoke signal will appear naturally as vig_stack positions drift into TP/SL territory.) |
+| Cursor stability re-check | 2026-04-30 5:00 PM ET | **STABLE.** Cursor_rows median 1949 over n=32 unique scans (3× the 632 baseline). Distribution tight: min=810, p25=1612, p75=2206, max=2782. Partial flag 100% (expected — Kalshi API ceiling, Session 28-2 deferred). Cadence median 32.0s over n=99 samples (under Session 29 trigger of 35s — Apr 28 watch-list drift entry resolved-as-stable). No regression from Sessions 38a/38a-followup/39. Committed as a5be853. Report: `bot/state/reports/cursor_stability_2026-04-30.md`. |
 
 ## How this file works
 
