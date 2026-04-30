@@ -8,7 +8,7 @@ The original agentic reasoning layer (`agent/`) still exists and owns the Kalshi
 
 ## Current Status (Apr 29, 2026)
 
-- **Mode:** `PAPER_MODE = True` — $500 simulated balance, full pipeline, zero live orders.
+- **Mode:** `PAPER_MODE = True` — **$10,500 simulated balance** (bumped 500 → 10,500 on Apr 29, 2026 with a +$10,000 deposit to scale position sizes for faster signal accumulation; reconstructed balance post-restart = $10,402 with historical −$98 P&L), full pipeline, zero live orders.
 - **Active strategies (`ACTIVE_STRATEGIES`):** `vig_stack_series`, `vig_stack_futures`, `sports_monotonicity_arb`, `sports_consistency_arb`. Plus `live_momentum` via the live-game watcher subsystem.
 - **Paper performance** (post-Apr-20 settlement-pipeline rebuild — from `bot/state/paper_trades.json`, the ground-truth ledger):
   - `vig_stack_series`: 54 settled, **−$110.62**, 29W/25L (54% WR)
@@ -480,7 +480,7 @@ All tunables live in `bot/config.py`. No scattered constants anywhere else.
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
 | `PAPER_MODE` | `True` | Simulate all trades; flip to `False` for live |
-| `PAPER_STARTING_BALANCE` | `$500` | Simulated starting balance |
+| `PAPER_STARTING_BALANCE` | `$10,500` | Simulated starting balance. Bumped 500 → 10,500 on Apr 29, 2026 (+$10,000 deposit). All edge math is balance-invariant; only Kelly sizing + dollar caps scale 21× |
 | `MIN_RELATIVE_EDGE` | `0.15` | Skip opportunities below 15% relative edge |
 | `KELLY_FRACTION` | `0.25` | Use 25% of full Kelly for sizing |
 | `MAX_BET_FRACTION` | `0.05` | Hard cap at 5% of balance per trade |

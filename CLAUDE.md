@@ -12,7 +12,7 @@
 
 Glint is an autonomous prediction-market trading bot that runs 24/7 against **Kalshi** and takes edge across four active strategies. It's a pure Python `asyncio` application — one process, one Telegram bot interface, one orchestrator class (`GlintBot` in `bot/main.py`). No LLM in the trading loop. Every decision is deterministic math + safety checks + Kelly sizing.
 
-**Starting capital:** $500 simulated (`PAPER_STARTING_BALANCE` in `config.py`). Real Kalshi account runs in parallel when `PAPER_MODE = False`.
+**Starting capital:** $10,500 simulated (`PAPER_STARTING_BALANCE` in `config.py`). Bumped 500 → 10,500 on Apr 29, 2026 (+$10,000 deposit) to scale position sizes up for faster signal accumulation. All edge math (CLV in cents, win rates, gate thresholds) is balance-invariant; only Kelly sizing + dollar-magnitude caps (10% reserve floor, MAX_POSITION_PERCENT, STRATEGY_BUDGETS absolutes) scale 21× with the deposit. Historical −$98 paper P&L unchanged; reconstructed balance post-restart = $10,402. Real Kalshi account runs in parallel when `PAPER_MODE = False`.
 
 **Current mode:** `PAPER_MODE = True` (see `bot/config.py:569`). Paper and live share the full pipeline — only `execute_trade()` branches on this flag.
 
@@ -394,6 +394,8 @@ Don't change these without data. If you do change one, update the comment with t
 | Everything else | 0 | $0 | — | — |
 
 **Grand total paper P&L: ≈ −$98.** Apr 20 rebuild was necessary because `exited_early` trades (59 of 93 resolved) were silently missing from `settlement_log` — only market-close won/lost were being logged. Post-fix: `executor._paper_record_exit` calls `tracker.log_settlement` + `patterns.record_resolution` on every paper exit, so the three counts (paper resolved, settlement_log length, sum of `strategies[k].real_trades`) stay in lock-step. Invariant warning fires if they drift.
+
+**Apr 29, 2026 — capital deposit:** `PAPER_STARTING_BALANCE` bumped 500 → **10,500** (+$10,000). Reconstructed paper balance post-restart = **$10,402** ($10,500 starting + −$98 historical). All future paper trades will have ~21× larger Kelly-sized positions; STRATEGY_BUDGETS absolute amounts scale 21× (vig_stack 60% = $6,241; live_momentum 20% = $2,080; arbs 20% = $2,080); 10% reserve floor = $1,050. Pre-bump trades (timestamp < 2026-04-30) are denominated in the $500-balance era; post-bump trades will produce ~21× larger dollar P&L per trade. **All edge math and CLV signals (cents-based) are scale-invariant** — the Sessions 19c / 30 / 36 / 38a retuning decisions are robust. May 13 Session 38a re-validation routine updated to filter `paper_trades.json` to `timestamp >= 2026-04-30` for the post-bump ATP cohort comparison.
 
 The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the then-visible data but missed 50 exited_early trades. Don't trust any pre-Apr-20 summary for early-exit strategies.
 

@@ -633,7 +633,22 @@ PENDING_GO_WINDOW_HOURS = 2    # Opportunity expires this many hours after marke
 # All edge detection, sizing, and alerts run normally — only execution is skipped.
 # Flip to False only after paper trading shows consistent +CLV.
 PAPER_MODE = True
-PAPER_STARTING_BALANCE = 500.0  # Simulated starting balance for paper trading ($)
+PAPER_STARTING_BALANCE = 10500.0
+# Simulated starting balance for paper trading ($).
+# Apr 29, 2026 — bumped 500 → 10,500 (+$10,000 deposit) per user request to scale
+# position sizes up for faster signal accumulation. All edge math (CLV in cents,
+# win rates, gate thresholds) is balance-invariant; only Kelly sizing, the 10%
+# reserve floor ($50 → $1,050), MAX_POSITION_PERCENT cap, and STRATEGY_BUDGETS
+# absolute dollar amounts scale 21×. Historical paper P&L is unchanged in dollar
+# terms; the −$98 net just becomes a smaller percentage of the new equity.
+# Reconstructed balance post-restart: $10,500 + (-$98 historical P&L) = $10,402.
+# Per-strategy budget jumps:
+#   vig_stack 60%: $241 → $6,241
+#   live_momentum 20%: $80 → $2,080
+#   arbs 20%: $80 → $2,080
+# Future paper trades will have ~21× larger dollar magnitudes per trade — bad
+# week shows meaningful loss numbers; good week shows meaningful gains. Still
+# zero real money at risk.
 
 # ---------------------------------------------------------------------------
 # Active strategies — only these edge types trigger trades
