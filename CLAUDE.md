@@ -2300,6 +2300,203 @@ All extended records preserve their original 4 axis values byte-identical (regre
 
 ---
 
+## Apr 29+ Evidence-Driven Retuning Arc (Sessions 38–40)
+
+Sessions 12–37 built the eyes (instrumentation) and the reactive loop (find what's broken → fix it). Sessions 38+ open the *active interrogation* loop: take the evidence we've already collected and convert it into hypotheses worth testing. The trigger was Investigation #1 on the night of Apr 29 — a re-run of `tools/live_momentum_buckets.py` against the regenerated dataset (714 rows, 321 with settled CLV) surfaced three real signals plus two infrastructure gaps. Each becomes its own session below.
+
+**Framing principle:** these sessions ship in parallel with the May 6 / May 13 / May 18 routine verifications (which gate the *vig_stack* side). Live_momentum-side changes are a different surface — they don't conflict with the Session 36 hold-to-settlement verdict. But each candidate is a separate ship — never bundled — so attribution stays clean.
+
+```
+Session 38a: ATP main-tour disable re-evaluation     (~1-2h, highest-confidence positive finding)
+            ↓
+Session 38b: IPL sport-disable                       (~30min, highest-confidence negative finding)
+            ↓
+Session 38c: MOMENTUM_LEADER_MAX ceiling investigation (~1h, premium-priced leaders are losers)
+            ↓
+[hidden infra fixes, ship anytime they're convenient:]
+Session 38d: Wire match_phase axis into dataset extractor  (~30min — Session 34 follow-up gap)
+Session 38e: Bucket report n column shows total + settled split (~30min — easy to misread today)
+```
+
+---
+
+### ☐ Session 38a — ATP main-tour disable re-evaluation (Apr 29+, planned)
+
+**Problem.** The Apr 29 night Investigation #1 surfaced a strong asymmetric-evidence pattern. `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, wta, wta_challenger}` was set Apr 20 in commit `b1f08ff`. The disable evidence at the time was:
+- `atp_challenger`: 17 terminal trades, **−$7.80**, 53% WR, 82% early-cut. Solid evidence.
+- `atp` (main tour): bundled in "precautionarily" — no direct trade evidence cited.
+- `wta`: 1 terminal trade (this is the +$3.20 1W/1L data point Session 30-followup later flagged)
+- `wta_challenger`: ditto — disabled by association.
+
+Tonight's re-run on settled CFs (post-Session-23 stratified sampling has accumulated ~2 weeks of real outcomes):
+
+| Sport | n settled | Mean CLV | +CLV% | n_pos / n_neg |
+|---|---|---|---|---|
+| **atp** (main tour) | **56** | **+11.32¢** | **82%** | **46 / 10** |
+| atp_challenger | 62 | -1.02¢ | 69% | 43 / 19 |
+| wta | 48 | -1.23¢ | 71% | 34 / 14 |
+| wta_challenger | 61 | -14.31¢ | 61% | 37 / 24 |
+
+**Main-tour ATP shows +$11.32¢ avg CLV across 56 settled rejected opportunities.** Same asymmetric-evidence pattern Session 30-followup flagged for wta_challenger — the disable was based on challenger evidence, not main-tour evidence, and the CFs say main-tour ATP would have been profitable.
+
+**Plan (mirror Session 30-followup discipline — investigate first, ship targeted change OR not).**
+
+1. **Verify the n=56 settled atp sample isn't survivorship-biased.** Specifically: how many are `yes_won` vs `no_won`? Session 30-followup wta_challenger looked positive at n=5 because all 5 were `yes_won`. Acceptance threshold: ≥30 settled with ≥10 `no_won` outcomes (leader losses). If the sample is mostly leader-wins, defer.
+2. **Verify per-skip_reason distribution.** What gates rejected these 56 opps? If they're dominantly `sport_disabled` (the disable gate firing), they're testing "what if we'd taken them" honestly. If they're dominantly other gates that fire BEFORE sport_disabled, the sample doesn't actually test the disable hypothesis.
+3. **Cross-check against Apr 9-19 historical paper trades for main-tour ATP.** Pre-disable, were there any actual main-tour atp trades? If yes, what was their P&L? Compare to the +11.32¢ CF prediction.
+4. **Decision branches:**
+   - **OUTCOME A (re-enable main-tour ATP):** sample passes survivorship + per-skip_reason + (if any) historical-trade checks AND the +11.32¢ holds. Ship: remove `"atp"` from `MOMENTUM_DISABLED_SPORTS` in `bot/config.py`. Keep all 3 challenger entries + main-tour wta. Update Apr 20 evidence comment with the Session 38a finding.
+   - **OUTCOME B (keep disabled, document why):** survivorship bias OR per-skip_reason confound OR historical-trade evidence contradicts. Document the rationale; mark wta_challenger and atp main-tour both as candidates needing more settled data.
+   - **OUTCOME C (split disable per-circuit):** evidence supports re-enabling main-tour atp AND main-tour wta but not the challenger circuits. Ship the surgical disable list.
+
+5. **Test discipline:** any production change comes with a 1-line comment in `bot/config.py` citing Session 38a evidence (n, mean CLV, n_pos/n_neg). Mirror the Session 19c MOMENTUM_LEADER_MIN comment style.
+
+6. **Schedule a +14 day re-validation routine** (analogous to Session 36 day-14) that re-runs the bucket report on the new live atp trades and verifies the +CLV signal holds in actual P&L, not just CFs.
+
+**Files (Outcome A only).**
+- `bot/config.py` — remove `"atp"` from `MOMENTUM_DISABLED_SPORTS` set; update comment.
+- `tests/test_live_watcher.py` — extend `MOMENTUM_DISABLED_SPORTS` test (if any) to assert atp NOT in the set.
+- `CLAUDE.md` — Session 38a ☑ block; update Money / live_momentum section to reflect the new disable scope.
+
+**Out of scope.** Touching wta_challenger / atp_challenger / wta disable status (separate per-sport evaluations). Re-tuning MOMENTUM_LEADER_MIN per-sport (Session 22+ candidate; needs sport-disambiguated re-validation). Ipl disable (Session 38b). Per-sport TickStrategy variants (Session 39).
+
+**Verify.**
+1. Survivorship check: `n_no_won >= 10` on settled atp CFs. Document the actual count.
+2. Skip_reason distribution on the 56 atp settled CFs. Document.
+3. If Outcome A ships: bot restart; within 2-3 days `tail bot/state/decisions.jsonl | jq 'select(.opp_type=="live_momentum") | .extra.sport'` shows new "atp" entries (no longer rejected by sport_disabled gate).
+4. After 14 days: scheduled routine re-runs the bucket report; main-tour atp settled CLV remains positive on the post-deploy cohort. If it flips, REVERT.
+
+**Severity / urgency.** Tier 2. Highest-confidence positive finding from Investigation #1 but the bot's primary risk is still Session 36's verdict on May 13. Ship 38a in the same week as Session 36 verification, not before — keeps attribution clean.
+
+---
+
+### ☐ Session 38b — IPL sport-disable (Apr 29+, planned)
+
+**Problem.** Investigation #1 settled-only sport breakdown shows **`sport=ipl` at -35.88¢ mean CLV across n=25 settled CFs, only 28% +CLV (7 / 18 — twice as many losers as winners).** This is the strongest negative signal in the entire bucket report. Session 30-followup-2 originally flagged ipl at -23.13¢; tonight's larger sample doubled down on the negative direction.
+
+**Mechanism (hypothesis).** IPL cricket has structurally different price dynamics than the other live_momentum sports — the 20-over format means most matches finish in ~3 hours with lots of momentum reversals (powerplay → middle → death overs). Live_momentum is a swing strategy that assumes leader prices ratchet upward; cricket prices oscillate more.
+
+**Plan (mirror Session 30-followup discipline).**
+
+1. **Verify the n=25 settled sample isn't survivorship-biased.** Confirm `n_no_won >= 5` (we have n=18 losses, so this is comfortable).
+2. **Pull the per-skip_reason distribution on the 25 settled ipl CFs.** Same hygiene as 38a.
+3. **Cross-check against any actual IPL trades that fired live (pre-disable).** If `paper_trades.json` shows any IPL trades, compute their realized P&L. If the realized P&L matches the CF prediction (deeply negative), Outcome A is solid. If it diverges, investigate why.
+4. **Decision branches:**
+   - **OUTCOME A (add IPL to disable list):** sample passes hygiene, CF signal is unambiguous. Ship: add `"ipl"` to `MOMENTUM_DISABLED_SPORTS` in `bot/config.py`. Document per Session 19c comment style.
+   - **OUTCOME B (keep enabled, investigate match_phase):** IPL might be net-negative overall but +EV in specific in-match phases (e.g., death overs). If the Session 38d match_phase axis fix has shipped, slice ipl by `match_phase` first. If a phase-specific positive emerges (e.g., `powerplay` is +EV, `death` is -EV), build a per-phase entry filter rather than a blanket disable.
+   - **OUTCOME C (defer):** sample passes hygiene but you want more settled data first. Set a watch-list trigger at n=50 settled ipl CFs.
+
+**Files (Outcome A only).**
+- `bot/config.py` — add `"ipl"` to `MOMENTUM_DISABLED_SPORTS`; cite Session 38b evidence.
+- `tests/test_live_watcher.py` — extend test to assert ipl IS in the set.
+- `CLAUDE.md` — Session 38b ☑ block; update Money section.
+
+**Out of scope.** Match-phase splitting (defer to Session 38d landing first). Re-investigation of any other sport. Per-sport TickStrategy variants.
+
+**Verify.**
+1. Survivorship: confirm n_no_won ≥ 5 (already satisfied at 18).
+2. If Outcome A ships: bot restart; within 1-2 days `decisions.jsonl` shows new ipl matches getting `sport_disabled` skip_reason instead of being entered.
+3. After 14 days: re-run bucket report, confirm no new IPL settled trades in `clv.json` (`paper_trades.json` should also have zero new IPL entries).
+
+**Severity / urgency.** Tier 2. Negative signal confirmed at meaningful sample. Ship anytime after 38a (no dependency).
+
+---
+
+### ☐ Session 38c — MOMENTUM_LEADER_MAX ceiling investigation (Apr 29+, planned)
+
+**Problem.** Investigation #1 leader_price bucket on settled-only sample:
+
+| Bucket | n | Mean CLV | +CLV% |
+|---|---|---|---|
+| 60-70 | 102 | +6.78¢ | 71% |
+| 70-80 | 66 | -2.42¢ | 71% |
+| 80-90 | 74 | -7.36¢ | 77% |
+| <60 | 57 | -8.51¢ | 47% |
+| **>=90** | **22** | **-28.23¢** | **64%** |
+
+**Premium-priced leaders (>=90¢) are dramatic money-losers in CFs (-28.23¢ mean at n=22).** This makes intuitive sense: at 90¢+ entry the upside is ≤10¢ and the downside is up to 90¢ on a leader-loss. Asymmetric R:R is structurally bad. There's currently no `MOMENTUM_LEADER_MAX` ceiling in `bot/config.py` — only a MIN (0.65 post-Session-19c).
+
+Session 18 documented this same pattern from the Apr 14 audit ("NO at 90-95¢ risk/reward — vig_stack's cheap NOs are often in the 89-95¢ range. That's 8:1 to 19:1 risk/reward against you" — Battle Scar #10). Filter F was the answer for vig_stack. **No equivalent filter exists for live_momentum.**
+
+**Plan.**
+
+1. **Verify the n=22 settled >=90 sample.** Per-skip_reason distribution. Survivorship (n_no_won >=5; with 64% +CLV that's 8 leader-loss settlements — passes the bar).
+2. **Pull the corresponding ENTRY-price distribution on actually-traded live_momentum positions** (not CFs). How many real live_momentum trades had entry_price >=90? If the answer is "0 or 1", this is largely a counterfactual question and the ceiling protects future entries that haven't happened yet.
+3. **Cross-check the [88-90) and [85-90) sub-bands** to find the inflection point. The 80-90 bucket as a whole is -7.36¢ at n=74; >=90 is -28.23¢ at n=22. Where's the cliff? If there's a clean cliff at e.g. 88¢, the ceiling can be precise. If it's gradual, picking a value is judgment.
+4. **Decision branches:**
+   - **OUTCOME A (ship a ceiling at 0.88-0.90):** ship `MOMENTUM_LEADER_MAX = 0.90` (or wherever the sub-band analysis points) in `bot/config.py`. Add the gate check in `bot/live_watcher.py` next to the existing MIN check. Same pattern as Battle Scar #10's Filter F.
+   - **OUTCOME B (defer, monitor):** sample is suggestive but not large enough. Set watch-list trigger at n=50 settled >=90 CFs.
+
+**Files (Outcome A only).**
+- `bot/config.py` — new `MOMENTUM_LEADER_MAX = 0.90` constant with comment + evidence.
+- `bot/live_watcher.py` — add `or current_yes_ask >= MOMENTUM_LEADER_MAX * 100` gate in the entry-eligibility check.
+- `tests/test_live_watcher.py` — new test asserting >=90 entries are rejected.
+- `CLAUDE.md` — Session 38c ☑ block.
+
+**Out of scope.** Per-sport ceiling variants. Re-tuning the lower MIN (just shipped in Session 19c). Vig_stack ceiling (Battle Scar #10 already covers this).
+
+**Verify.**
+1. Sub-band analysis: identify the cliff point or confirm gradual decline.
+2. If Outcome A ships: bot restart; within a week, `decisions.jsonl` shows new live_momentum entries getting rejected with a new `leader_price_too_high` skip_reason for `current_yes_ask >= 90`.
+3. After 14 days: re-run bucket report, confirm no new entries in the >=90 leader_price band.
+
+**Severity / urgency.** Tier 2. Lower confidence than 38a/38b due to thinner sample (n=22). Ship after 38a/38b, or defer to Session 39+ if those reveal more critical changes.
+
+---
+
+### ☐ Session 38d — Wire match_phase axis into dataset extractor (Apr 29+, planned, ~30 min)
+
+**Problem.** Session 34 added `match_phase` as a 5th regime axis in `bot/regime.py`. Per Session 34 commit message, "tools/live_momentum_dataset.py / live_momentum_buckets.py are key-agnostic; new axis works at next regeneration." **This was wrong.** Investigation #1 regenerated the dataset tonight; the CSV header still shows only 4 regime columns (no `regime_match_phase`). The bucket reports for tennis / UFC / IPL therefore still show `Unknown` for game_phase, defeating the entire purpose of Session 34.
+
+**Plan.**
+
+1. Read `tools/live_momentum_dataset.py` — find the regime extraction site (probably hard-codes the 4 axis names instead of iterating `bot.regime.REGIME_KEYS`).
+2. Refactor to iterate `REGIME_KEYS` so future axes added to `bot/regime.py` flow through automatically.
+3. Add `regime_match_phase` to the explicit column list (or generate it from REGIME_KEYS).
+4. Regenerate the dataset to confirm the new column populates.
+5. Verify `tools/live_momentum_buckets.py` picks up the new column without modification (it should, per its key-agnostic design).
+
+**Files.**
+- `tools/live_momentum_dataset.py` — extraction site refactor.
+- `tests/test_live_momentum_dataset.py` — assert all 5 REGIME_KEYS land in the CSV.
+
+**Out of scope.** Modifying `tools/live_momentum_buckets.py` if the new column flows through cleanly. Backfilling old datasets (regenerate on next run).
+
+**Verify.**
+1. Header of regenerated CSV contains `regime_match_phase`.
+2. Bucket report's game_phase / match_phase section shows non-Unknown buckets for tennis (`set_1` / `set_2` / etc.), UFC (`round_1` / `round_2` / etc.), IPL (`powerplay` / `middle` / `death`).
+3. Tests pass.
+
+**Severity / urgency.** Tier 3. Hidden gap; doesn't block other sessions. Ship anytime convenient — ideally before Session 38b's Outcome B path needs match_phase data for IPL.
+
+---
+
+### ☐ Session 38e — Bucket report shows total + settled n split (Apr 29+, planned, ~30 min)
+
+**Problem.** `tools/live_momentum_buckets.py` shows an `n` column that counts ALL rows in a bucket (including unsettled CFs without `outcome_clv_cents`). The `+CLV rate` and `avg CLV` columns only compute over rows where CLV is populated. So `dip=4-6 n=23 +CLV rate 0%` is actually 0/3 settled rows. Tonight's Investigation #1 almost mis-reported a striking dip-bucket U-shape that turned out to be n=2 vs n=3 settled rows.
+
+**Plan.**
+
+1. Refactor `tools/live_momentum_buckets.py` aggregation: compute `n_total` (all rows) AND `n_settled` (rows with outcome_clv_cents populated). Same for `n_with_fwd` (rows with fwd_return_120s populated, since that's a different filter).
+2. Render: `n` column becomes `n_total / n_settled`. `+CLV rate` and `avg CLV` based on n_settled. `avg fwd_120s` based on n_with_fwd.
+3. The "Findings" section's "n>=5" filter should apply to the relevant n (n_settled for outcome metrics; n_with_fwd for forward-return metrics).
+4. Update tests: assert the new column shape.
+
+**Files.**
+- `tools/live_momentum_buckets.py` — aggregation + rendering refactor.
+- `tests/test_live_momentum_buckets.py` — extend tests for the new column semantics.
+
+**Out of scope.** Changing the dataset schema. Adding new buckets.
+
+**Verify.**
+1. Re-run the bucket report; every cell shows `n_total/n_settled` instead of `n`.
+2. The dip=4-6 row should now read `n=23/3` instead of `n=23` so the small-sample reality is visible.
+3. Tests pass.
+
+**Severity / urgency.** Tier 3. Easy to misread today; one-time fix prevents future Tyler-or-Claude from drawing wrong conclusions from inflated n.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
