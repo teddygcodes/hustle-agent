@@ -351,8 +351,8 @@ If the bot crashed between placing an order and writing to `positions.json`, the
 ### 8. Same-game opposite-side block
 `_check_position_limits` blocks betting the opposing team if we already hold the other side in the same game (ticker prefix match on `GAME`). This is deliberate and catches a real failure mode where multiple scanners independently find "edge" on both sides of the same market.
 
-### 9. Vig stack edge flip exemption
-`recheck_open_edges` can auto-exit when live edge drops below entry edge. Vig stack positions are exempt (`opp_type in ("vig_stack_no", "vig_stack_series")`) because the edge is structural — individual contract prices moving doesn't invalidate the ladder math; only a collapse of the entire ladder's vig would.
+### 9. Vig stack auto-exit exemption (edge_flipped, take_profit, cut_loss)
+Vig stack positions (`opp_type in ("vig_stack_no", "vig_stack_series")`) are exempt from ALL three auto-exit paths in `bot/main.py`'s position-loop: `edge_flipped` (from `recheck_open_edges`), `take_profit`, and `cut_loss` (both from `update_positions` at TP=+50%/SL=-30% thresholds). Reason: the edge is structural — YES sum > 100¢ on the ladder. Individual contract prices moving doesn't invalidate the ladder math; only a collapse of the entire ladder's vig would. The single source of truth is the `_VIG_STACK_OPP_TYPES` tuple at the top of `bot/main.py`. Each branch logs `"<path> SKIPPED for <ticker> (vig_stack — structural, hold to settlement)"` and continues — `recheck_open_edges` and `update_positions` still compute the alerts; we just don't act on them. **Session 36 (2026-04-29)** extended the exemption to TP/SL after Session 35's first weekly report flagged `non_stable_below_weather_floor` as mis-tuned: floor gate was actually doing its job by blocking entries that would get killed by an inappropriate `cut_loss` path before settlement (paper data showed 32% early-exit rate at -$5 to -$10 mean P&L across ALL families including stable ones, with median hold 23h — slow drift exits, not snap kills). Same session also added `exit_reason` persistence on `paper_trades.json` records (via `executor._paper_record_exit(reason=...)`) so we can finally distinguish auto_take_profit / auto_cut_loss / edge_flipped / manual paths in audits.
 
 ### 10. NO at 90-95¢ risk/reward
 Vig_stack's cheap NOs are often in the 89-95¢ range. That's 8:1 to 19:1 risk/reward against you. Even at ~50% real WR on volatile ladders, the math collapsed — 43 trades net −$101 on paper. **Filter F (Apr 18)** is the answer: whitelist stable families (`VIG_STACK_STABLE_FAMILIES = {"KXHIGHMIA","KXHIGHAUS","KXINX"}`), and require NO ≥ 0.90 (`VIG_STACK_WEATHER_MIN_PRICE`) on anything else. Do not weaken these without 48h of post-filter data.
@@ -2249,6 +2249,48 @@ All extended records preserve their original 4 axis values byte-identical (regre
 **Watch list — Session 34-followup candidates (no session opened yet).**
 - If post-May-2 bucket analysis shows match_phase delivers signal but elapsed-time bucketing is too coarse (e.g., late tennis is materially different from early-late), open a session to wire ESPN tennis scoreboard / Kalshi cricket over-count into the state path.
 - If IPL bucketing surfaces a strong `death`-overs signal (we know IPL CLV is −23¢ overall — split would show whether early/middle/death drives it), the v1 elapsed-time fallback for tennis becomes more important too.
+
+---
+
+### ☑ Session 35 — Daily + weekly report generators (Apr 29, shipped)
+
+**Problem.** The bot collects 8 streams of state and has 9 analysis tools, but seeing "is everything healthy and what did the bot learn" required ad-hoc invocation of each tool. Session 24's `weekly_digest.py` (the only existing aggregator) covered 8 sections and the weekly cadence, but had no daily counterpart and didn't lead with a health-pulse summary. Without automation, the analysis ritual would happen at May 2 / May 18 and then drift.
+
+**What shipped.**
+- New `tools/_report_helpers.py` (~750 LOC) — shared utilities + 10 parameterized "shared section" renderers used by both daily and weekly. Migrated `_safe_section`, `_parse_iso`, `_demote_h1`, `_windows`, `section_pnl` (now `render_trade_activity`), `section_cf_coverage` (now `render_cf_coverage`) from the retired `weekly_digest.py`. New utilities: `parse_window` (ET → UTC), `iter_jsonl_tolerant` (skip malformed lines, ts filter), `tail_tracebacks` (rotated-log scan + dedupe by signature), `compute_health_pulse` (5-row table, fixed shape every report), `state_file_growth` (current vs ~1d ago via gzip-uncompressed-size on archives), `process_alive` (lockfile + PID + heartbeat). Sections are stored as **string names** in `SHARED_SECTIONS` so monkeypatching at test time takes effect — orchestrator looks up via `getattr(module, name)` at call time.
+- New `tools/daily_report.py` (~100 LOC) — CLI with `--date YYYY-MM-DD` (default = yesterday in ET), `--regime-by AXIS`. Calls the 10 shared sections with `window_days=1`. Output: `bot/state/reports/daily/daily_report_YYYY-MM-DD.md`.
+- New `tools/weekly_report.py` (~280 LOC) — replaces `weekly_digest.py`. Same 10 shared sections (window_days=7) plus 6 weekly-only: §11 week-over-week deltas (regex-extract headlines from prior weekly file; renders `_No baseline yet._` if none), §12 buckets (`live_momentum_buckets.render_report`), §13 dataset rebuild summary (`live_momentum_dataset.main` ~30s, captures stdout, reports row delta), §14 excursion + exit-replay (`excursion_report.generate_report` + `exit_replay.main` via `capture_main_stdout`), §15 calibration findings (mis-tuned (opp_type, gate) pairs: reject rate >50% AND mean rel-CLV >0, sorted desc), §16 retuning candidates (one bullet per §15 row, phrased as "Consider Session N+M to investigate..."). Output: `bot/state/reports/weekly/weekly_report_YYYY-WNN.md` (ISO week).
+- **Discipline:** first I/O writes the header so a partial report survives a mid-run crash. Each section wrapped in `_safe_section` — single source's failure renders `_[section unavailable: REASON]_` and the script continues. Read-only — no bot state mutation. Imports throughout (no subprocess) — every called tool exposes a clean render function.
+- **Spec deviations flagged in CLAUDE.md, not silently glossed:** §8 cadence `called_from` values are `_main_loop` and `_position_check_loop` (spec said `_scan_loop` — used the real names with a one-line note). Path corrections: `paper_trades.json` (not `trades_paper.json`), `bot/logs/bot.log` (not `bot.log`).
+- **Retired** `tools/weekly_digest.py` and `tests/test_weekly_digest.py`. Output path moved from `bot/state/weekly_digest_YYYY-MM-DD.md` to `bot/state/reports/weekly/weekly_report_YYYY-WNN.md`. Existing weekly_digest_*.md archives stay where they are (historical artifacts; not migrated).
+
+**Tests (63 new across 3 files).**
+- `tests/test_report_helpers.py` (21 cases): JSONL tolerance + window filter, parse_window/yesterday_in_et/last_sunday_in_et with ET-DST-aware date math, health pulse rows-per-branch, state file growth (gzip ISIZE-footer comparison + no-baseline path), traceback dedupe + window filter, process_alive (missing/dead-PID/stale), `_safe_section` (success/exception/non-string), prior weekly report lookup.
+- `tests/test_daily_report.py` (9 cases): smoke (10 sections render against real state), 11 H1 lines (1 title + 10 sections), invalid date arg → exit 2, default date = yesterday in ET, **crash invariant** (one section raising → output file exists with §X marked unavailable + other 9 render), partial-file-survives-mid-run (header on disk before sections run), empty-data sentinels, footer ISO timestamp parses, stdout/file parity.
+- `tests/test_weekly_report.py` (12 cases): migrated 6 from `test_weekly_digest.py` (smoke, single + multi-section crash recovery, regime-by passthrough, file/stdout parity, structural counts) + 6 new (§11 no-baseline marker, §11 with synthesized prior file extracts deltas, §15 filters to mis-tuned only, §15 sorts by CLV desc, §16 renders one bullet per finding, §16 empty marker). The §15 unit test injects synthetic cohort_report bins via in-test monkeypatch — drives the math directly without depending on live decisions/CFs.
+
+**Live verification.**
+- `python3 tools/daily_report.py --date 2026-04-29` → 10/10 sections rendered with real numbers (2,754 decisions, 18 trades, 0 errors, all 5 health pulse rows green). Bot alive ✅, scanner cursor_rows median=2031 over 17 scans (well above 500 threshold), 100% partial-rate (the documented Session 28-followup state).
+- `python3 tools/weekly_report.py --week-end 2026-04-26` → 16/16 sections rendered. **§15 surfaced 2 real mis-tuned gates** with non-trivial samples: `vig_stack_series.non_stable_below_weather_floor` (100% reject, +0.2438 mean rel-CLV, n=95 settled CFs) and `vig_stack_series.edge_below_threshold` (100% reject, +0.0350 mean rel-CLV, n=68). Those are real Session 36+ retuning candidates surfaced automatically. §11 rendered `_No baseline yet._` since this is the first weekly_report file.
+- **Crash test passed** — renamed `tools/cohort_report.py` to force §3 ImportError, daily report still wrote the file with §3 showing `[section unavailable: ImportError: cannot import name 'cohort_report'...]` and the other 9 sections rendering normally. Footer: "Sections rendered: 9/10 — skipped: 3. Decision audit (...)".
+
+**State-files table additions.**
+
+| File | Purpose |
+|---|---|
+| `bot/state/reports/daily/daily_report_*.md` | Daily comprehensive report (Session 35). Health pulse + 9 data sections over 24h ET window. Generated by `tools/daily_report.py`. |
+| `bot/state/reports/weekly/weekly_report_*.md` | Weekly synthesis (Session 35). The 10 daily-shape sections at 7-day window + 6 cross-cutting sections (week-over-week deltas, buckets, dataset rebuild, excursion + exit-replay, calibration findings, retuning candidates). Generated by `tools/weekly_report.py`. |
+
+**Out of scope (per spec).** Scheduling the recurring chats / Telegram push (separate handoff, the calendar file `REPORT_CALENDAR.md`); any bot-side scheduler integration; new analysis logic (every section uses existing tools or trivial aggregations).
+
+**Verify.**
+1. `python3 -m pytest tests/test_report_helpers.py tests/test_daily_report.py tests/test_weekly_report.py -v` → 42 pass.
+2. `python3 tools/daily_report.py --date 2026-04-29` → real report file at `bot/state/reports/daily/`. All 10 sections, no `[unavailable]` markers.
+3. `python3 tools/weekly_report.py --week-end 2026-04-26` → real report file at `bot/state/reports/weekly/`. §11 = `_No baseline yet._`, §§12–16 contain real numbers.
+4. `head -50 bot/state/reports/daily/daily_report_2026-04-29.md` → health-pulse table renders cleanly.
+5. Crash test (named above) restores cleanly.
+
+**Bot restart NOT required** (read-only tools, not imported by `bot/main.py`).
 
 ---
 
