@@ -16,7 +16,9 @@ All times are in Eastern Time. The bot wall clock and ET match.
 | Routine | Fires | Status | Output | Why |
 |---|---|---|---|---|
 | Cursor stability re-check | 2026-04-30 5:00 PM ET | scheduled | inline + `bot/state/reports/cursor_stability_2026-04-30.md` | Apr 29 9:07 AM routine died at n=4; tomorrow's larger sample confirms STABLE branch |
+| Session 39 day-1 spot check | 2026-05-01 9:00 AM ET | scheduled | `bot/state/reports/session_39_day_1_2026-05-01.md` | Verify asyncio executor wrapping holds across one full normal-day. Heartbeat lag, _position_check_loop cadence, partial rate. HEALTHY / DEGRADED / WEDGED-AGAIN. |
 | Session 36 day-7 hold-to-settlement check | 2026-05-06 9:00 AM ET | scheduled | `bot/state/reports/vig_stack_holds_2026-05-06.md` | Did vig_stack early-exit % drop from 32% baseline after Session 36 TP/SL exemption shipped? |
+| Session 39 day-7 flaky-Kalshi stress check | 2026-05-07 9:00 AM ET | scheduled | `bot/state/reports/session_39_day_7_2026-05-07.md` | Did Session 39 fix hold through any flaky-Kalshi windows during the week? Per-day partial rate, wedge events (heartbeat gaps > 5min), cadence p95. HOLD / REGRESSED / NO-STRESS-OCCURRED. |
 | Weekly digest spot-check | 2026-05-12 9:00 AM ET | scheduled | inline | 2-week vs Apr 28 baseline; pre-readiness for May 18 Session 22 auto-fire |
 | Session 36 day-14 floor signal recheck | 2026-05-13 9:00 AM ET | scheduled | `bot/state/reports/session_36_day_14_weekly_2026-05-13.md` | Did `non_stable_below_weather_floor` mean CLV diminish from +0.2438? If yes, Session 37 floor-tune becomes a candidate. |
 | Session 38a ATP re-validation | 2026-05-13 9:00 AM ET | scheduled | inline | +14d post-deploy: re-runs bucket report on post-Session-38a cohort. CONFIRM/REVERT main-tour ATP re-enable per Session 38a evidence rule. Mirrors Session 22 pattern. |
