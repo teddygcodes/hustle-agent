@@ -64,6 +64,15 @@ class LiveMomentumStrategy:
         max_entries: int = MOMENTUM_MAX_ENTRIES,
         reentry_cooldown: int = MOMENTUM_REENTRY_COOLDOWN,
         dqs_threshold: float = MOMENTUM_DQS_THRESHOLD,
+        # Session 42: per-sport TP/SL overrides for the back-tester's
+        # per-sport sweep mode. Keyed by sport name (e.g. "ufc", "nba").
+        # Each value is a partial dict — only "take_profit" and
+        # "stop_loss" keys are honored at the gate site; other keys are
+        # silently ignored (Plan-agent revision #1: scope-limited to
+        # TP+SL this session). When None, resolution falls through to
+        # SPORT_PROFILES then to the strategy default — i.e. pre-Session-42
+        # behavior is preserved byte-identical.
+        sport_overrides: Optional[dict[str, dict]] = None,
     ) -> None:
         self._leader_min = leader_min
         self._dip_buy = dip_buy
@@ -76,6 +85,7 @@ class LiveMomentumStrategy:
         self._max_entries = max_entries
         self._reentry_cooldown = reentry_cooldown
         self._dqs_threshold = dqs_threshold
+        self._sport_overrides = sport_overrides
 
     def init_state(
         self,
@@ -274,8 +284,13 @@ class LiveMomentumStrategy:
                 d["peak_values"][ticker] = current_value
                 prev_peak = current_value
 
-            sport_tp = sport_profile.get("take_profit", self._take_profit_cents)
-            sport_sl = sport_profile.get("stop_loss", self._stop_loss_cents)
+            # Session 42: per-sport TP/SL override layer. Resolves
+            # override → sport_profile → strategy default. Override is
+            # partial-only (only take_profit / stop_loss honored;
+            # trail_stop and other keys remain profile-then-default).
+            override = self._sport_overrides.get(d["sport"], {}) if self._sport_overrides else {}
+            sport_tp = override.get("take_profit", sport_profile.get("take_profit", self._take_profit_cents))
+            sport_sl = override.get("stop_loss", sport_profile.get("stop_loss", self._stop_loss_cents))
             sport_trail = sport_profile.get("trail_stop", self._trail_stop_cents)
 
             should_exit = False

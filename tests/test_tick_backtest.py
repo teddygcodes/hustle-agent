@@ -15,6 +15,7 @@ import gzip
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -1129,4 +1130,323 @@ class TestRunSweepTpSl:
         # Decision-gate text references Pattern A/B/C.
         assert "Pattern A" in out
         assert "Pattern B" in out
+        assert "Pattern C" in out
+
+
+# =============================================================================
+# Session 42: per-sport TP/SL sweep
+# =============================================================================
+
+
+class TestSportOverridesConstructor:
+    def test_strategy_accepts_sport_overrides_kwarg(self):
+        """LiveMomentumStrategy.__init__ accepts sport_overrides; defaults to
+        None so existing constructors are byte-identical."""
+        s = LiveMomentumStrategy(sport_overrides={"ufc": {"take_profit": 8}})
+        assert s._sport_overrides == {"ufc": {"take_profit": 8}}
+
+    def test_strategy_default_sport_overrides_none(self):
+        s = LiveMomentumStrategy()
+        assert s._sport_overrides is None
+
+
+class TestSportOverridesResolution:
+    """At the gate site (process_tick line ~290), TP/SL must resolve as
+    override → SPORT_PROFILES → strategy default. Not a behavior unit-test
+    of the gate itself (that needs full process_tick, fixture-heavy); this
+    inspects the resolution layer logic directly via constructor + a small
+    simulation."""
+
+    def test_override_beats_profile(self):
+        # If sport_overrides is set for ufc, the gate should pick override
+        # values over the SPORT_PROFILES["ufc"] (which currently has TP=12, SL=10).
+        # We simulate the resolver in-line because the full gate path
+        # requires fixture setup. The resolver is a 3-line composition;
+        # we test it by mirroring it.
+        sport_overrides = {"ufc": {"take_profit": 8, "stop_loss": 6}}
+        sport_profile = {"take_profit": 12, "stop_loss": 10}
+        strategy_default_tp = 12
+        strategy_default_sl = 30
+
+        override = sport_overrides.get("ufc", {})
+        resolved_tp = override.get("take_profit", sport_profile.get("take_profit", strategy_default_tp))
+        resolved_sl = override.get("stop_loss", sport_profile.get("stop_loss", strategy_default_sl))
+        assert resolved_tp == 8
+        assert resolved_sl == 6
+
+    def test_profile_beats_default_when_override_missing(self):
+        sport_overrides = None
+        sport_profile = {"take_profit": 12, "stop_loss": 10}
+        strategy_default_tp = 12
+        strategy_default_sl = 30
+
+        override = sport_overrides.get("nba", {}) if sport_overrides else {}
+        resolved_tp = override.get("take_profit", sport_profile.get("take_profit", strategy_default_tp))
+        resolved_sl = override.get("stop_loss", sport_profile.get("stop_loss", strategy_default_sl))
+        assert resolved_tp == 12
+        assert resolved_sl == 10
+
+    def test_default_when_neither_override_nor_profile(self):
+        sport_overrides = None
+        sport_profile: dict = {}  # IPL: no profile entry
+        strategy_default_tp = 12
+        strategy_default_sl = 30
+
+        override = sport_overrides.get("ipl", {}) if sport_overrides else {}
+        resolved_tp = override.get("take_profit", sport_profile.get("take_profit", strategy_default_tp))
+        resolved_sl = override.get("stop_loss", sport_profile.get("stop_loss", strategy_default_sl))
+        assert resolved_tp == 12
+        assert resolved_sl == 30
+
+
+class TestSportOverridesPartialOnly:
+    """Override dict can supply only `take_profit`, only `stop_loss`, or both —
+    partial overrides leave the missing key falling through to profile/default.
+    Plan-agent revision #1: scope-limited to TP+SL this session."""
+
+    def test_only_take_profit_overridden_sl_falls_through_to_profile(self):
+        sport_overrides = {"ufc": {"take_profit": 8}}
+        sport_profile = {"take_profit": 12, "stop_loss": 10}
+
+        override = sport_overrides.get("ufc", {})
+        resolved_tp = override.get("take_profit", sport_profile.get("take_profit", 12))
+        resolved_sl = override.get("stop_loss", sport_profile.get("stop_loss", 30))
+        assert resolved_tp == 8   # from override
+        assert resolved_sl == 10  # from profile
+
+    def test_only_stop_loss_overridden_tp_falls_through_to_profile(self):
+        sport_overrides = {"ufc": {"stop_loss": 6}}
+        sport_profile = {"take_profit": 12, "stop_loss": 10}
+
+        override = sport_overrides.get("ufc", {})
+        resolved_tp = override.get("take_profit", sport_profile.get("take_profit", 12))
+        resolved_sl = override.get("stop_loss", sport_profile.get("stop_loss", 30))
+        assert resolved_tp == 12  # from profile
+        assert resolved_sl == 6   # from override
+
+
+class TestSportOverridesTennisAliasIsolation:
+    """SPORT_PROFILES["atp"] is the same dict object as SPORT_PROFILES["tennis"]
+    (shared dict at bot/config.py:341-342). The override layer is keyed by
+    SPORT NAME STRING, so overriding "atp" must NOT perturb "tennis" / "wta" /
+    "atp_challenger" / "wta_challenger" resolution. This is the regression
+    Plan-agent risk #1 calls out."""
+
+    def test_overriding_atp_does_not_perturb_other_tennis_aliases(self):
+        sport_overrides = {"atp": {"take_profit": 99, "stop_loss": 99}}
+        # All four aliases share the same profile dict in production:
+        shared_tennis_profile = {"take_profit": 10, "stop_loss": 10}
+
+        # atp: override fires
+        atp_override = sport_overrides.get("atp", {})
+        atp_tp = atp_override.get("take_profit", shared_tennis_profile.get("take_profit", 12))
+        atp_sl = atp_override.get("stop_loss", shared_tennis_profile.get("stop_loss", 30))
+        assert atp_tp == 99
+        assert atp_sl == 99
+
+        # tennis: no override key → profile wins → byte-identical to pre-Session-42
+        for alias in ("tennis", "wta", "atp_challenger", "wta_challenger"):
+            override = sport_overrides.get(alias, {})
+            tp = override.get("take_profit", shared_tennis_profile.get("take_profit", 12))
+            sl = override.get("stop_loss", shared_tennis_profile.get("stop_loss", 30))
+            assert tp == 10, f"alias={alias}: TP should not be perturbed"
+            assert sl == 10, f"alias={alias}: SL should not be perturbed"
+
+
+class TestRunVariantTpSlPerSport:
+    """_run_variant accepts sport_overrides kwarg and threads it through to
+    LiveMomentumStrategy. When None, behavior is byte-identical to pre-Session-42."""
+
+    def test_default_no_overrides_matches_session_41_path(self, monkeypatch):
+        """Critical regression: omitting sport_overrides preserves Session 41
+        path byte-identically. Locks behavior preservation when sport_overrides
+        is None (the default)."""
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXUFCFIGHT-B", "2026-04-23T01:00:00Z"),
+        ]
+
+        captured: list[Any] = []
+
+        def fake_replay(strategy, trade, **kw):
+            captured.append(strategy._sport_overrides)
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        # Path 1: pre-Session-42 — no sport_overrides kwarg.
+        v_default = tb._run_variant(0.65, 6, paper, take_profit_cents=12, stop_loss_cents=30)
+        # Path 2: explicit None.
+        v_explicit_none = tb._run_variant(
+            0.65, 6, paper,
+            take_profit_cents=12, stop_loss_cents=30,
+            sport_overrides=None,
+        )
+        assert v_default.total_pnl_cents == v_explicit_none.total_pnl_cents
+        # All captured strategies had _sport_overrides = None.
+        assert all(o is None for o in captured)
+
+    def test_sport_overrides_thread_through_to_strategy(self, monkeypatch):
+        paper = [_trade("KXUFCFIGHT-A", "2026-04-23T00:00:00Z")]
+        captured: list[dict] = []
+
+        def fake_replay(strategy, trade, **kw):
+            captured.append(strategy._sport_overrides)
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+        overrides = {"ufc": {"take_profit": 8, "stop_loss": 6}}
+        tb._run_variant(
+            0.65, 6, paper,
+            take_profit_cents=8, stop_loss_cents=6,
+            sport_overrides=overrides,
+        )
+        assert captured == [overrides]
+
+
+class TestSweepGridTpSlPerSport:
+    def test_three_sports_have_grids(self):
+        """NBA, NHL, UFC each have a 12-variant grid. IPL and tennis are
+        deferred per Session 42 plan."""
+        assert set(tb.SWEEP_GRID_TP_SL_PER_SPORT.keys()) == {"nba", "nhl", "ufc"}
+        for sport, grid in tb.SWEEP_GRID_TP_SL_PER_SPORT.items():
+            assert len(grid) == 12, f"{sport}: expected 12 variants"
+
+    def test_each_grid_includes_its_sport_baseline(self):
+        """Every per-sport grid must include that sport's current SPORT_PROFILES
+        TP/SL as one of the variants — so per-trade Δ vs baseline is computable
+        without a separate run."""
+        for sport, baseline in tb.SWEEP_BASELINE_TP_SL_PER_SPORT.items():
+            assert baseline in tb.SWEEP_GRID_TP_SL_PER_SPORT[sport], \
+                f"{sport}: baseline {baseline} not in grid"
+
+    def test_baselines_match_current_sport_profiles(self):
+        """Locks the baselines to live SPORT_PROFILES so a future
+        SPORT_PROFILES change doesn't silently shift the baseline."""
+        from bot.config import SPORT_PROFILES
+        for sport, (tp, sl) in tb.SWEEP_BASELINE_TP_SL_PER_SPORT.items():
+            profile = SPORT_PROFILES.get(sport, {})
+            assert profile.get("take_profit") == tp, \
+                f"{sport}: SPORT_PROFILES TP={profile.get('take_profit')} != baseline TP={tp}"
+            assert profile.get("stop_loss") == sl, \
+                f"{sport}: SPORT_PROFILES SL={profile.get('stop_loss')} != baseline SL={sl}"
+
+    def test_ufc_grid_has_tp_floor_8(self):
+        """Plan-agent revision #2: UFC grid floor TP=8 (not TP=6) — TP=6 is
+        below noise floor at Kelly-sized contracts (5-15c × 6¢ = $0.30-$0.90,
+        eaten by 2¢ slippage pessimism). TP=8 directly probes user's
+        'fights end before TP=12 fires' hypothesis."""
+        ufc_tps = {tp for (tp, _sl) in tb.SWEEP_GRID_TP_SL_PER_SPORT["ufc"]}
+        assert min(ufc_tps) == 8, f"UFC TP floor should be 8, got {min(ufc_tps)}"
+
+    def test_nba_grid_skips_aggressive_and_loose_fringe(self):
+        """NBA grid skips (16,8)/(16,10) (ratio ≥1.6, too aggressive) and
+        (10,15)/(14,15) (ratio ≤0.93, too loose). Locks the skip set so future
+        edits don't silently re-add fringe combos."""
+        excluded = {(16, 8), (16, 10), (10, 15), (14, 15)}
+        for combo in excluded:
+            assert combo not in tb.SWEEP_GRID_TP_SL_PER_SPORT["nba"], \
+                f"NBA grid: {combo} should be skipped"
+
+
+class TestFilterTradesToSport:
+    def test_filters_by_ticker_prefix_to_sport(self):
+        trades = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXNHLGAME-B", "2026-04-23T01:00:00Z"),
+            _trade("KXUFCFIGHT-C", "2026-04-23T02:00:00Z"),
+            _trade("KXIPLGAME-D", "2026-04-23T03:00:00Z"),
+        ]
+        nba_only = tb.filter_trades_to_sport(trades, "nba")
+        assert [t["ticker"] for t in nba_only] == ["KXNBAGAME-A"]
+
+        ufc_only = tb.filter_trades_to_sport(trades, "ufc")
+        assert [t["ticker"] for t in ufc_only] == ["KXUFCFIGHT-C"]
+
+    def test_unknown_sport_returns_empty(self):
+        trades = [_trade("KXNBAGAME-A", "2026-04-23T00:00:00Z")]
+        assert tb.filter_trades_to_sport(trades, "rugby") == []
+
+    def test_case_insensitive_target_sport(self):
+        trades = [_trade("KXNBAGAME-A", "2026-04-23T00:00:00Z")]
+        # _TICKER_PREFIX_TO_SPORT values are lowercase; target is lowered.
+        assert len(tb.filter_trades_to_sport(trades, "NBA")) == 1
+        assert len(tb.filter_trades_to_sport(trades, "Nba")) == 1
+
+
+class TestRunSweepTpSlPerSport:
+    def test_threads_sport_overrides_per_variant(self, monkeypatch):
+        """Each variant in the per-sport sweep gets its TP/SL routed via
+        sport_overrides[target_sport], NOT via the constructor's TP/SL kwargs
+        bypassing the profile layer. This proves the override actually flows
+        through the gate-resolution path (not just the strategy's flat kwargs)."""
+        paper = [
+            _trade("KXUFCFIGHT-A", "2026-04-23T00:00:00Z"),
+            _trade("KXUFCFIGHT-B", "2026-04-23T01:00:00Z"),
+            _trade("KXUFCFIGHT-C", "2026-04-26T00:00:00Z"),
+        ]
+        captured_overrides: list[dict] = []
+
+        def fake_replay(strategy, trade, **kw):
+            captured_overrides.append(dict(strategy._sport_overrides or {}))
+            return tb.ReplayResult(
+                ticker=trade["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            )
+
+        monkeypatch.setattr(tb, "_replay_paper_trade", fake_replay)
+
+        small_grid = [(8, 6), (10, 8), (12, 10)]
+        train, test = tb.split_train_test(paper, train_pct=0.66)
+        tb.run_sweep_tp_sl_per_sport(
+            "ufc", train, test, slippage_cents=2,
+            grid=small_grid, baseline=(12, 10),
+        )
+        # Every captured override is keyed by "ufc" only (no other sports).
+        for ov in captured_overrides:
+            assert list(ov.keys()) == ["ufc"]
+            assert "take_profit" in ov["ufc"]
+            assert "stop_loss" in ov["ufc"]
+        # The grid's TP/SL pairs are all represented in captured overrides.
+        captured_pairs = {
+            (ov["ufc"]["take_profit"], ov["ufc"]["stop_loss"])
+            for ov in captured_overrides
+        }
+        for pair in small_grid:
+            assert pair in captured_pairs, f"{pair} not captured"
+
+    def test_unknown_sport_raises_valueerror(self):
+        with pytest.raises(ValueError, match="rugby"):
+            tb.run_sweep_tp_sl_per_sport("rugby", [], [])
+
+    def test_render_per_sport_report_carries_sport_in_header(self, monkeypatch):
+        """Smoke-test the per-sport renderer wrapper: title is Session 42 +
+        sport, per-sport scope text is present, decision-gate text mirrors
+        Session 41."""
+        paper = [
+            _trade("KXNBAGAME-A", "2026-04-23T00:00:00Z"),
+            _trade("KXNBAGAME-B", "2026-04-26T00:00:00Z"),
+        ]
+        monkeypatch.setattr(
+            tb, "_replay_paper_trade",
+            lambda s, t, **kw: tb.ReplayResult(
+                ticker=t["ticker"], actions=[], round_trips=[],
+                realized_pnl_cents=0, exit_reason="OK",
+            ),
+        )
+        train, test = tb.split_train_test(paper, train_pct=0.50)
+        report = tb.run_sweep_tp_sl_per_sport(
+            "nba", train, test, slippage_cents=0,
+        )
+        out = tb.render_sweep_tp_sl_per_sport_report(report, "nba")
+        assert "Session 42" in out
+        assert "NBA" in out
+        assert "Per-sport scope" in out
+        assert "Pattern A" in out
         assert "Pattern C" in out

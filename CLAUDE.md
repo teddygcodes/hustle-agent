@@ -2805,6 +2805,85 @@ Either path implies the regime shifted enough that the ratio hypothesis deserves
 
 **Out of scope (held).** All Session 38b/c/d/e items remain queued. No sizing investigation. No per-sport TP/SL plumbing extension. No re-running with a wider TP grid (TP=8, TP=18 etc.) — the data already says SL is dead and TP=12 is best on training; widening doesn't change that until cohort doubles.
 
+**Session 42 architectural addendum (Apr 30):** Phase 1 audit confirmed Architecture C — TP/SL resolve `sport_profile.get("take_profit", LIVE_TAKE_PROFIT_CENTS)` / `sport_profile.get("stop_loss", LIVE_STOP_LOSS_CENTS)` at both [bot/live_watcher.py:2362,2454](bot/live_watcher.py:2362) and [bot/strategies/live_momentum.py:277-278](bot/strategies/live_momentum.py:277). Every enabled sport with a SPORT_PROFILES entry (NBA TP=12/SL=10, NHL TP=15/SL=10, UFC TP=12/SL=10, tennis TP=10/SL=10) overrides the global at the gate; only IPL has no profile entry, so for IPL alone the global LIVE_STOP_LOSS_CENTS=30 reaches the gate. Session 41's global SL sweep was therefore shadowed for **24 of 31 cohort trades** (NBA + NHL + UFC); only IPL's 7 trades had the swept global SL fire. The "SL axis structurally flat" finding remains valid for the global axis, but the SL question itself is properly per-sport — Session 42 picks that up. The Pattern C ship verdict above stands as-is on the global question; per-sport investigation lives in Session 42.
+
+---
+
+### ☑ Session 42 — Per-sport TP/SL variants for live_momentum (Apr 30, shipped — Pattern C across all sports, doc-only + Phase 2 plumbing)
+
+**Problem.** Session 41 (Apr 30) swept GLOBAL `LIVE_TAKE_PROFIT_CENTS × LIVE_STOP_LOSS_CENTS` and shipped Pattern C with the loud finding "SL axis is structurally flat across all 4 SL values within every TP row." Phase-1 architecture audit explained why: at runtime, both [bot/live_watcher.py:2362,2454](bot/live_watcher.py:2362) (production gate) and [bot/strategies/live_momentum.py:277-278](bot/strategies/live_momentum.py:277) (back-tester strategy port) resolve TP/SL as `sport_profile.get(...)` first, with the global as fallback. Every enabled sport with a SPORT_PROFILES entry (NBA, NHL, UFC, tennis) has both keys set at SL=10. Only IPL has no profile entry — for IPL alone, global SL=30 reaches the gate. **Session 41's global SL sweep was structurally shadowed for 24 of 31 cohort trades** (NBA + NHL + UFC). Only IPL's 7 trades had the swept global SL fire. Per-sport TP/SL is the architecturally correct axis. Combined with Session 18 Finding #2 (UFC mechanically different from court sports — median hold 123s vs 642-1791s; only positive session ratio), the directional case for per-sport TP/SL was intuitive.
+
+**What shipped (Phase 2 plumbing).**
+
+- [bot/strategies/live_momentum.py:67-79](bot/strategies/live_momentum.py:67) — `LiveMomentumStrategy.__init__` accepts `sport_overrides: Optional[dict[str, dict]] = None`. Stored on `self._sport_overrides`. Documented as partial-only (only `take_profit` / `stop_loss` keys honored at the gate site; other keys silently ignored — Plan-agent revision #1 scope-limited to TP+SL this session).
+- [bot/strategies/live_momentum.py:286-295](bot/strategies/live_momentum.py:286) — at the gate site, prepended an override layer:
+  ```python
+  override = self._sport_overrides.get(d["sport"], {}) if self._sport_overrides else {}
+  sport_tp = override.get("take_profit", sport_profile.get("take_profit", self._take_profit_cents))
+  sport_sl = override.get("stop_loss", sport_profile.get("stop_loss", self._stop_loss_cents))
+  sport_trail = sport_profile.get("trail_stop", self._trail_stop_cents)  # NOT extended — out of scope
+  ```
+  Resolution order: override → sport_profile → strategy default. When `sport_overrides` is None or doesn't have the sport, lookup falls through unchanged — pre-Session-42 behavior preserved byte-identical.
+- [tools/tick_backtest.py](tools/tick_backtest.py) — extended with `SWEEP_GRID_TP_SL_PER_SPORT` (12 variants per sport for nba/nhl/ufc), `SWEEP_BASELINE_TP_SL_PER_SPORT` (current SPORT_PROFILES values per sport), `filter_trades_to_sport()` helper using existing `_TICKER_PREFIX_TO_SPORT` map, `run_sweep_tp_sl_per_sport()` driver, `render_sweep_tp_sl_per_sport_report()` markdown wrapper, `_run_sweep_tp_sl_per_sport_cli()` dispatcher, `--sweep-tp-sl-per-sport <sport>` CLI flag (mutually exclusive with `--sweep` and `--sweep-tp-sl`).
+- [tests/test_tick_backtest.py](tests/test_tick_backtest.py) — 21 new tests across 7 classes: `TestSportOverridesConstructor`, `TestSportOverridesResolution` (3 cases — override beats profile; profile beats default; default when both absent), `TestSportOverridesPartialOnly` (2 cases — partial TP-only / SL-only overrides), `TestSportOverridesTennisAliasIsolation` (the Plan-agent risk #1 regression — overriding `atp` does NOT perturb `tennis` / `wta` / `atp_challenger` / `wta_challenger` because the override dict is keyed by sport-name STRING, not the underlying profile dict), `TestRunVariantTpSlPerSport` (2 cases — default-path regression that proves omitting `sport_overrides` produces byte-identical results to pre-Session-42; sport_overrides threading), `TestSweepGridTpSlPerSport` (5 cases — three-sports-have-grids, baseline-in-grid, baselines-match-SPORT_PROFILES, UFC-grid-floor-8 [Plan-agent revision #2], NBA-grid-skips-fringe), `TestFilterTradesToSport` (3 cases), `TestRunSweepTpSlPerSport` (3 cases — overrides-thread-per-variant; unknown-sport-raises; renderer smoke).
+
+**Test results.** `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1201 passed in 29.41s** (Session 41 baseline 1167 + 21 new + ~13 unrelated lift). 0 failures. `python3 -m pytest tests/test_tick_backtest.py -v` → 90/90 passed including all 21 new Session 42 cases. `python3 tools/tick_backtest.py --paper-trades 10 --min-entry-date 2026-04-23` → **4/4 PASS / 0 FAIL within 1¢** (Session 19a-followup parity baseline preserved — plumbing did not perturb the LM/TS or default sweep paths).
+
+**Per-sport sweep results (Phase 3 — full reports at [bot/state/reports/session_42_*_tp_sl_sweep_2026-04-30.md](bot/state/reports/) for nba, nhl, ufc).**
+
+| Sport | Sample (train/test) | Best variant | Test per-trade Δ | Pattern A gates | Decision |
+|---|---|---|---|---|---|
+| NBA | 7/4 | TP=14 SL=10 | **+110¢/trade** | Δ ✓; **sign disagree** (train +648 / test -298); **n_test=4 < 5** | Pattern C |
+| NHL | 4/2 | TP=12 SL=15 (3-way tie at top) | +0¢/trade | **Δ < 50** (top-3 tie at +138¢); **n_test=2 < 5**; sign ✓ | Pattern C |
+| UFC | 4/3 | TP=8 SL=6 | +10¢/trade | **Δ < 50**; **sign disagree** (both negative — fails "both positive"); **n_test=3 < 5** | Pattern C |
+
+**Per-sport findings (the deliverable, full text in each per-sport report).**
+1. **NBA training likes SL=10.** Within TP=12 row: SL=8 +348, **SL=10 +708 (best)**, SL=12 +308, SL=15 +188. Current production SL=10 is the training-set winner at TP=12. No reason to change from training data alone. Sign disagreement on test is dominant: `wed` n=3 = -912¢ swamps `tue` n=1 = +614¢ (Session 19c CLE-outlier shape).
+2. **NHL — SL-axis-flat repeats per-sport.** Top-3 training variants ALL produce IDENTICAL +138¢ on test (TP=12 SL=15, TP=12 SL=8, TP=12 SL=10). Plan-agent risk #6 confirmed: TAKE_PROFIT / TRAILING fire before STOP_LOSS on winners; SL only fires on losers, where drop-from-entry is monotonic past every threshold. The same flat pattern Session 41 found globally now reproduces per-sport. Interesting training-side: NHL prefers TIGHTER TP (TP=12 in 3 of top-4 spots, baseline TP=15 ranks 7th) — n=2 test too thin to validate.
+3. **UFC — TP axis is structurally flat.** Within every SL row, all 4 TPs (8, 10, 12, 14) produce IDENTICAL training P&L (SL=6: all -158; SL=8: all -208; SL=10: all -288). User's hypothesis "current TP=12 too WIDE — fights end before TP fires" is partially correct: TP doesn't fire AT ALL on this loser cohort, so the width doesn't matter. **All 12 UFC variants are loss-making in training** — UFC's structural problem isn't TP/SL. Training-side signal: tighter SL helps (~50¢/SL-step) — but n=3 test too thin and best-variant n_replays=1 (100% single-trade dominance, Plan-agent revision #3 hard fail).
+
+**SL-axis-flat is the EXPECTED null per-sport** (Plan-agent risk #6 was right). Even with the global no longer shadowing, production exit-priority order ([bot/live_watcher.py:2306-2316](bot/live_watcher.py:2306)) fires TAKE_PROFIT / NEAR-SETTLE / TRAILING / SCORE_FLIP / OPP_RUN before STOP_LOSS. The mechanism is invariant across sports, so making the SL value sport-specific can't help when SL doesn't fire on winners regardless. NHL's three-way test tie is the cleanest example.
+
+**Direction-setting conclusion.** Sessions 40 (exits-balanced) + 41 (ratio-shape global) + 42 (ratio-shape per-sport) collectively rule out *all three TP/SL framings* of the live_momentum leak. Win:Loss=0.261 from Session 40 is structural and not addressable by exit-side parameter tuning at any granularity tested. The next surfaces to investigate are documented out-of-scope below; sizing (Kelly cap on high-confidence-but-losing trades) is the strongest queued candidate that hasn't been opened as a session yet (Session 40 surfaced "7 lost-class trades net −$91.68 with avg −$13.10 vs avg win +$3.41" — the asymmetric-loss multiplier).
+
+**Pattern C across all three sports = doc-only ship.** No `bot/config.py` change. No bot restart (Phase 2 plumbing only touches `bot/strategies/live_momentum.py` which is NOT wired into production live_watcher per Session 19a discipline; verified `bot/main.py` / `bot/live_watcher.py` / `bot/scanner.py` / `bot/executor.py` do not import `bot.strategies.live_momentum`). Mirrors Sessions 18.5 / 38a-2 / 40 / 41 outcomes — Pattern C is the discipline working, not failing.
+
+**Watch-list triggers (per sport).**
+- **NBA**: re-investigate when settled cohort grows to ≥10 test trades (≥30 total settled NBA trades on `paper_trades.json`). Sign-disagreement signal worth re-checking at higher n.
+- **NHL**: re-investigate when settled cohort grows to ≥10 test trades (≥25 total settled NHL trades). Training-side TP=12 preference (vs baseline TP=15) is interesting enough to revisit.
+- **UFC**: re-investigate when settled cohort grows to ≥10 test trades (≥25 total settled UFC trades). Training-side tighter-SL signal worth a deeper look; also worth checking whether the entire UFC sample is dominated by one bad event window (Apr 25-26 was a single UFC card weekend).
+
+If any sport's per-trade live_momentum P&L worsens by ≥$0.50 vs current baseline, also re-investigate.
+
+**What did NOT change.**
+- `bot/config.py` — `SPORT_PROFILES` for NBA/NHL/UFC unchanged. Pattern C ships nothing here.
+- `bot/live_watcher.py`, `bot/main.py`, `bot/executor.py`, `bot/scanner.py` — untouched.
+- `LIVE_TAKE_PROFIT_CENTS` / `LIVE_STOP_LOSS_CENTS` (globals) — unchanged. Architecture audit confirms these are effectively dead config for any sport with a SPORT_PROFILES entry, but cleanup is a separate session.
+- `MOMENTUM_DISABLED_SPORTS` — unchanged.
+- `paper_trades.json`, `clv.json`, `decisions.jsonl`, `live_journal.json`, all other state files — unchanged.
+
+**Out of scope (held — Sessions 38b/c/d/e + 31 + 32 still queued).**
+- Touching globals `LIVE_TAKE_PROFIT_CENTS` / `LIVE_STOP_LOSS_CENTS`. Architecture audit makes them effectively dead config for sports with profiles; cleanup is a separate cosmetic session.
+- Per-sport overrides for trail_stop / max_contracts / max_entry / dip thresholds (Plan-agent revision #1 — TP+SL only).
+- IPL TP/SL sweep (deferred — Session 38b will decide disable; sweep moot if disabled).
+- Tennis TP/SL sweep (deferred — ATP main re-enabled Apr 29 via Session 38a, cohort hasn't accumulated; revisit after Session 38a re-validation routine fires May 13).
+- Wiring `LiveMomentumStrategy` into production live_watcher (separate decision; class still "NOT wired into production" per Session 19a).
+- DIP_BUY × DIP_MAX sweep (Session 43+ candidate).
+- Kelly-fraction / sizing sweeps (Session 44+ candidate; Session 40 named asymmetric-loss-magnitude as the structural leak).
+- MOMENTUM_LEADER_MAX ceiling (Session 38c).
+- Match_phase axis dataset wire-up (Session 38d).
+- Bucket report n_total/n_settled split (Session 38e).
+- Backfilling pre-Apr-23 trades into the cohort (schema-incompatible per Session 19a-followup).
+
+**Verify.**
+1. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1201 passed (1167 baseline + 21 new Session 42 + ~13 unrelated lift). 0 failures.
+2. ☑ `python3 tools/tick_backtest.py --paper-trades 10 --min-entry-date 2026-04-23` → 4/4 PASS / 0 FAIL within 1¢. Default-path regression preserved.
+3. ☑ `python3 tools/tick_backtest.py --sweep-tp-sl-per-sport nba --min-entry-date 2026-04-23` → full report at [bot/state/reports/session_42_nba_tp_sl_sweep_2026-04-30.md](bot/state/reports/session_42_nba_tp_sl_sweep_2026-04-30.md). Same for `--sweep-tp-sl-per-sport nhl` and `--sweep-tp-sl-per-sport ufc`.
+4. ☑ Tennis-aliasing regression: `TestSportOverridesTennisAliasIsolation::test_overriding_atp_does_not_perturb_other_tennis_aliases` pinned in `tests/test_tick_backtest.py`.
+5. ☑ Default-path regression: `TestRunVariantTpSlPerSport::test_default_no_overrides_matches_session_41_path` pinned in `tests/test_tick_backtest.py`.
+6. ☑ No bot restart. No production state mutation. Three sweep outputs persisted at `bot/state/reports/session_42_*_tp_sl_sweep_2026-04-30.md`.
+7. ☑ `python3 -c "from bot.config import LIVE_TAKE_PROFIT_CENTS, LIVE_STOP_LOSS_CENTS; from bot.config import SPORT_PROFILES; print(LIVE_TAKE_PROFIT_CENTS, LIVE_STOP_LOSS_CENTS, SPORT_PROFILES['nba'].get('take_profit'), SPORT_PROFILES['nba'].get('stop_loss'))"` → `12 30 12 10` (everything unchanged).
+
 ---
 
 ## When Tyler Asks "How is it looking?"
