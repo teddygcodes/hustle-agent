@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .context import DEFAULT_REPO, DiscoveryContext
 from .findings import Finding, classify_findings, load_prior_findings, write_findings_jsonl
+from .heuristics.cadence_outcome import CadenceOutcome
 from .heuristics.cohort_emergence import CohortEmergence
 from .heuristics.counterfactual_hotspots import CounterfactualHotspots
 from .heuristics.live_tick_anomalies import LiveTickAnomalies
@@ -22,6 +23,7 @@ DEFAULT_HEURISTICS = [
     CounterfactualHotspots(),
     UniverseGap(),
     LiveTickAnomalies(),
+    CadenceOutcome(),
 ]
 SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
 
