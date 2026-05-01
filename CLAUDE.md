@@ -2475,6 +2475,10 @@ CHECK 3: WTA main-tour historical paper trades (paper_trades.json, 228 entries)
 3. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1167 passed (Session 39 baseline). Comment-only changes don't move this.
 4. ☑ No bot restart. No state change. No CLV churn. No new behavior in `bot/state/decisions.jsonl`.
 
+**Session 44 follow-up (May 1) — no_leader/wta agent finding does NOT support re-enable.** Discovery agent (Session 43b) surfaced `no_leader/wta` +20¢ mean CLV on n=15 settled CFs as a HIGH severity finding, initially read as a candidate to revisit this disable decision. Pre-check of `bot/live_watcher.py` gate flow shows: `no_leader` fires in the OUTER `scan_live_matches` loop (line 2978) BEFORE `sport_disabled` is checked in `_tick_momentum` (line 1179). Per `bot/clv.py:213` `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS`, `sport_disabled` is NOT in the CF allowlist — the n=48 WTA evidence above is ENTIRELY from outer-loop tunable rejections, none from sport_disabled. Decomposing: of those 48, 15 are no_leader at +20¢ (sum +300¢), 33 are other (low_volume + no_vol_growth_*) at sum -359¢ (mean -10.88¢). **The +20¢ on no_leader is offset by strongly-negative signal on every OTHER bucket, and re-enabling WTA would not change the no_leader CFs at all** (they'd still hit no_leader regardless of disable status). The actual lever the agent points at is leader-detection tuning for WTA — separate from the disable decision. Outcome B (held disabled) remains correct; Session 38a-2 stands. Watch-list trigger updated below.
+
+**Watch-list trigger (May 1 update):** in addition to the Apr 30 trigger ("re-evaluate when settled wta CFs reach n=80 OR if mean CLV turns positive"), also re-evaluate **per-sport `MOMENTUM_LEADER_MIN` for WTA** if the no_leader/wta sub-cohort reaches n=30 with sustained +mean CLV at 14d (then the lever becomes per-sport leader-detection, not the disable list).
+
 ---
 
 ### ☐ Session 38b — IPL sport-disable (Apr 29+, planned)
@@ -2953,9 +2957,10 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 **Operating Posture observation.** The discovery agent did exactly what it was supposed to: surfaced a pattern within hours of going live. The investigation took the lead seriously but DID NOT lock anything in. Result: SFPHI mechanism dismissed as singleton (correct) AND a separate real lead surfaced (`non_stable_below_weather_floor` on futures). This is the workflow we want — surface, investigate, decide. Defensive instinct ("preserve SFPHI's mechanism") would have produced zero new value AND missed the floor-on-futures finding.
 
 **Candidate next sessions surfaced.**
-- **Session 44 candidate:** `non_stable_below_weather_floor` on sports futures — is the 0.93 floor sport-agnostic correctly, or sport-specific? Pull all 417 rejected opportunities, check `no_ask_prob` distribution per sport, decide whether to make the floor sport-keyed. ~1h analysis + small config change if directional.
-- **Session 45 candidate:** vig_stack outlier dependence — strategy is structurally outlier-dependent (-$187 without 2 outliers). Investigate whether outlier shape is real EV (keep variance) or noise we should filter (tighter entry, fewer trades, lower variance, possibly higher mean). ~1.5h analysis.
-- **Session 43b refinement (folded into the existing planned 43b):** cohort_emergence should report trade-count alongside decision-count, OR accept-rate-weighted decision count, so future cohort emergences distinguish "huge scanner activity, 0 trades" from "small scanner activity, real trades."
+- ~~**Session 44 candidate:** `non_stable_below_weather_floor` on sports futures — is the 0.93 floor sport-agnostic correctly, or sport-specific?~~ **WEAKENED May 1.** Discovery agent's `threshold_proximity` heuristic (Session 43b, May 1 6 AM run) drilled into the near-miss cluster on this gate per-sport: 12 mlb_futures + 9 nba_futures + 18 nhl_futures rejects within 5% of floor. **0 of those near-miss tickers subsequently appeared in `clv` with positive CLV.** Combined with the agent's STABLE finding `non_stable_below_weather_floor/None: n=149 +8.5¢` (the original Session 35 weekly-report signal that triggered Session 36's vig_stack TP/SL exemption), the picture clarifies: the +8.5¢ aggregate signal is from the vig_stack-NO at 95¢ being mis-killed by cut_loss (Session 36 territory), NOT from the floor being too tight on futures. The gate is doing its job for futures. Demoted to background watch — re-evaluate only if the threshold_proximity finding ever flips to "+CLV present on near-miss tickers."
+- **Session 45 candidate (May 1):** `no_vol_growth_first_seen` global tuning evaluation — discovery agent surfaced cross-cohort signal across atp (n=20 +9.6¢ 85% +CLV STABLE), atp_challenger (n=21 +10.4¢ 85% +CLV NEW), nhl_game (n=14 +5.9¢ 78% +CLV NEW). Combined n=55 mean ~+8.6¢. Single most actionable lever the agent has surfaced — direct retuning candidate mirroring Session 38a methodology. PRIORITIZED OVER the original Session 45 candidate below.
+- ~~**Session 45 candidate (original):** vig_stack outlier dependence~~ — DEFERRED to Session 46+ in favor of the no_vol_growth_first_seen lever above. Strategy is structurally outlier-dependent (-$187 without 2 outliers); investigation worthwhile but lower-priority than acting on agent-surfaced retunable gates.
+- **Session 43b refinement (shipped May 1):** cohort_emergence now reports trade-count alongside decision-count + accept-count + futures-vs-per-game distinction. SHIPPED.
 
 ---
 
@@ -3036,6 +3041,33 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 - Re-enabling WTA based on the +20¢ finding (needs Session 44 investigation mirroring Session 38a methodology)
 - Investigating NHL `no_leader` (needs Session 45)
 - Re-running threshold_proximity on a longer lookback window to surface the `non_stable_below_weather_floor` lead
+
+---
+
+### ☑ Session 44 — Discovery agent housekeeping: gate-flow analysis + IPL spot-check + lead reprioritization (May 1, doc-only ~30min)
+
+**Why.** Session 43b's day-2 e2e produced 3 HIGH counterfactual_hotspots findings, the most prominent being `no_leader/wta` +20¢ CLV n=15 — initially read as a candidate to revisit the Session 38a-2 WTA disable. Pre-check of the gate flow (mirror Session 19a's "audit the back-tester before shipping a code change against its claims" discipline) revealed the agent's evidence does NOT actually support the disable lever. Same pre-check produced a corrected interpretation of the Session 43-investigate "real lead" on `non_stable_below_weather_floor` (now weakened by today's threshold_proximity drill-down). Plus a quick spot-check on the IPL cohort the agent flagged via cohort_emergence (7 paper trades, prior 30d=0). All read-only; no code change; no bot restart.
+
+**Three findings.**
+
+1. **The no_leader/wta agent finding is a leader-detection signal, not a sport-disable signal.** Gate-flow walk: `no_leader` fires in OUTER `scan_live_matches` loop (`bot/live_watcher.py:2978`) BEFORE any watcher spawns. `sport_disabled` fires in INNER `_tick_momentum` (line 1179) only AFTER a watcher is spawned. They're mutually exclusive on the same market. Per `bot/clv.py:213` `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS`, sport_disabled is NOT in the CF emission allowlist (Session 23 design choice — sport_disabled CFs would have no market to poll for settlement). So the entire Session 38a-2 WTA evidence set (n=48 mean -1.23¢) is from outer-loop tunable rejections; the agent's `no_leader/wta` n=15 is the no_leader subset. Decomposing: 15 no_leader at +20¢ = +300¢, 33 other (low_volume + no_vol_growth_*) = -359¢ (mean -10.88¢). Removing WTA from `MOMENTUM_DISABLED_SPORTS` would NOT change the no_leader CFs at all (they'd still hit no_leader in the outer loop). Outcome B (held disabled) per Session 38a-2 stands. Inline addendum added to Session 38a-2 entry; watch-list trigger updated to include "re-evaluate per-sport `MOMENTUM_LEADER_MIN` for WTA if no_leader/wta sub-cohort reaches n=30 with sustained +CLV."
+
+2. **The non_stable_below_weather_floor "real lead" from Session 43-investigate is weakened by today's agent run.** Session 43-investigate (Apr 30) flagged this gate based on 417 rejections in 2 days on sports futures with KXNBA-26-OKC at edge=+11.48¢ rejected on no_ask_prob=0.48 vs floor=0.93. Today's `threshold_proximity` heuristic drilled into the near-miss cluster (within 5% of floor) per-sport: 12 mlb_futures + 9 nba_futures + 18 nhl_futures rejects, **0 of which subsequently printed +CLV.** The aggregate counterfactual_hotspots STABLE finding (`non_stable_below_weather_floor/None: n=149 +8.5¢`) remains real but it's the vig_stack series cut_loss-bug signal from Session 35/36, not a futures-side floor signal. **The futures-side floor is doing its job.** Demoted to background watch in the Session 43-investigate candidate list.
+
+3. **IPL spot-check on the 7-trade cohort the agent surfaced.** Discovery agent (May 1 6 AM) STABLE finding: `cohort_emergence: live_momentum/ipl in paper_trades (7 records, 6 tickers, 7 accepts, 7 trades; prior 30d=0)`. Pulled the realized P&L: **n=7 settled, total -$3.12, mean -$0.45, 57% WR (4W/3L), 6 of 7 EE'd.** Session 38b's queued IPL disable was based on n=25 settled CFs at -35.88¢ avg CLV. The CF evidence pointed strongly negative; the realized-trade evidence on n=7 is mildly negative. Sample n=7 is way too thin to act on (Session 38a bar was n=56). Session 38b stays QUEUED — no acceleration, no de-prioritization. The discovery agent will continue to track this cohort; revisit when n>=20.
+
+**Updated candidate session list (post-Session-44):**
+- **Session 45 (~1.5h coder, prompt drafted May 1):** `no_vol_growth_first_seen` global tuning evaluation. Cross-cohort agent signal (n=55 across 3 sports, mean ~+8.6¢). Single most actionable lever. PRIORITIZED.
+- **Session 46+ (deferred):** `no_vol_growth_idle` retuning (separate but adjacent gate; STABLE +5.3¢ on wta), per-sport `MOMENTUM_LEADER_MIN` for WTA (wait for n>=30), vig_stack outlier dependence (Session 45 original — deprioritized).
+
+**What did NOT change.**
+- `bot/config.py` — untouched.
+- All bot code — untouched.
+- Discovery agent code — untouched (working as designed; produced both the WTA finding AND the threshold_proximity self-correction that weakened the prior lead — exactly the workflow we built it for).
+- Bot state — untouched.
+- Bot still running under launchd; no restart.
+
+**Operating Posture observation.** This session is the agent investigating itself — counterfactual_hotspots produced the lead, threshold_proximity contextualized it, gate-flow code walk confirmed the lever. The discovery → investigate → decide loop completed end-to-end without a coder cycle. First "the agent told us what to think" session.
 
 ---
 
