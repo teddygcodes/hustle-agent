@@ -1312,6 +1312,15 @@ Expected: 53 tests pass; 4/4 (or 8/8) PASS / 0 FAIL with coverage gaps named; +0
 
 **REGRESSION NOTE — Session 19c shipped MOMENTUM_LEADER_MIN=0.65 (was 0.70).** Back-tested on n=6 effective test trades (n=22 total post-Apr-23), projected delta = +488¢ vs baseline (paper P&L). Effect dominated by one trade (CLE flip); fragile until larger-sample re-validation. Trail-stop axis showed no signal — kept TS=6. Re-evaluate by mid-May 2026 once `paper_trades.json` carries ≥40 post-Apr-27 settled trades; Session 22+ candidate to also resweep with the new live data and consider per-sport TickStrategy variants (UFC test result was −234¢ at LM=0.65 vs −132¢ at baseline — UFC may need a higher LEADER_MIN floor than court-sports).
 
+**APR 30 DIRECTIONAL WARNING (n=9 too thin to act, but flagged for May 18 Session 22).** Diagnostic on 3.9 days of post-Session-19c data:
+
+| Cohort | n | Per-trade P&L |
+|---|---|---|
+| Pre-19c (LM=0.70) | 64 | −$0.13 |
+| Post-19c (LM=0.65) | 9 | **−$3.55 (27× worse)** |
+
+Post-19c bleed is dominated by 3 outlier trades (2 in the new [65-70¢) bucket at −$13.40/trade; 1 in the 85+¢ bucket at −$13.92). Without those 3, post-19c is +$1.46/trade across 6 trades. Sample is too thin (n=9 with 3 outliers) to revert tonight. **But the [65-70¢) bucket — the EXACT bucket Session 19c argued was +EV — is currently 0/2 wins, −$13.40/trade (opposite direction of Session 19c's hypothesis).** n=2 isn't statistical but it's directional warning pointed AGAINST the hypothesis. Session 22 routine (May 18) updated with explicit per-bucket check: REVERT if [65-70¢) per-trade < $0 on n>=10 settled, regardless of broader sweep result. Diagnostic preserved for future-Claude reading the May 18 outcome.
+
 **Verify (post-restart).**
 1. `python3 -m pytest tests/test_tick_backtest.py -v` — 35/35 pass.
 2. `python3 tools/tick_backtest.py --sweep` — markdown report includes baseline row in test validation table.
