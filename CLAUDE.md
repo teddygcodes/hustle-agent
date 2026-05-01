@@ -2895,6 +2895,44 @@ If any sport's per-trade live_momentum P&L worsens by ≥$0.50 vs current baseli
 
 ---
 
+## Operating Posture: Always Search for New Possibilities (read FIRST)
+
+**The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
+
+**The trigger that wrote this section:** Apr 30 the bot made +$172 on a vig_stack_futures trade (KXMLBGAME-26APR291840SFPHI-PHI). Investigation revealed two cancelling bugs (scanner mis-classifying per-game MLB winners as `vig_stack_futures` + Session 36's exemption-set missing `vig_stack_futures`) that together produce correct behavior on a misunderstood market type. Claude's first instinct was "lock in current behavior with a docs note." Tyler's correct instinct was "investigate the mechanism, find more like it, lean into it." This section exists so future-Claude doesn't repeat the defensive reflex.
+
+**Rules of operating posture:**
+
+1. **Unexpected profit is a LEAD, not a fact.** When the bot makes money via a path the docs don't fully describe, the FIRST move is to investigate the mechanism. Do NOT propose changes that "lock in" the behavior before understanding it. Do NOT propose docs notes that prevent future fixes — those become future-cement.
+
+2. **Bug-pairs that produce profit are FINDINGS.** If two bugs cancel out into correct behavior, the question isn't "how do we preserve the bug-pair." The question is: "what's the actual mechanism, and can we trigger it intentionally / find more of it?"
+
+3. **When something works, ask 'where else could this work?' BEFORE asking 'how do we lock it in?'** Example: if vig is being found in MLB per-game winners, check whether NHL/NBA per-game winners have the same pattern but aren't being scanned.
+
+4. **Defensive instincts ('don't break what's working') are weaker than investigative instincts.** "Don't change anything" is the wrong default. The right default is "understand it, then decide whether to lean in OR fix it OR leave alone, in that priority order."
+
+5. **The bot has a search frontier — keep it active.** At any given time, there are markets we don't scan, opp_types we haven't tried, parameters we haven't swept, and outcomes we haven't measured. Treat each one as a potential edge until proven otherwise. Session 12's universe log + Session 13's hypothetical strategy framework + Session 19's tick-replay back-tester exist specifically to make this cheap. USE THEM.
+
+6. **Negative findings ARE findings.** Three Pattern C "no fix" outcomes in 24h (Sessions 40 / 41 / 42) ruled out exit-side framings. That's progress, not failure — it narrows the search. The discipline is what made those Pattern Cs honest. But don't stop searching just because one direction was ruled out.
+
+7. **When daily/weekly reports surface unexpected P&L, STOP and investigate the mechanism before doing anything else.** A vig_stack_futures trade making +$172 on a misclassified market type is a 5-minute investigation that could surface a real edge. The report won't tell you what's interesting — you have to look.
+
+**Concrete behaviors this implies:**
+
+- When you see a trade in `paper_trades.json` whose outcome is much better/worse than expected, run a counterfactual: "what would have happened on the OTHER decision (held to settlement / different exit / different entry)?"
+- When the daily report shows P&L attribution by strategy, also pull the BREAKDOWN BY TICKER and check for outliers.
+- When a sweep returns Pattern C, ask: "is the parameter axis we swept the right one? are there orthogonal axes we haven't tried?"
+- When you draft a session prompt, include the "lean in" branch alongside the standard A/B/C decision tree: "Outcome D — find more opportunities like this one, expand the scanner / strategy."
+- Maintain a mental "search frontier" list. When CLAUDE.md gets updated, add to it: ignored market families from universe_report, undocumented opp_types, parameters never swept, sport-specific behaviors not yet investigated.
+
+**Counter-example (when defense IS the right move):**
+
+Battle Scar exemptions (#9 vig_stack auto-exit, #5 edge price basis, #12 settlement idempotency) preserve EXPLICITLY-DOCUMENTED known-correct behavior against accidental regression. Defense is correct when there's a paper trail showing WHY the current behavior is correct. Defense is WRONG when the current behavior just happens to work and we don't know why — that's where investigation belongs.
+
+**Tyler's frame (his words, paraphrased):** "Always look for new possibilities, don't be stuck and tied to what we are doing." This is the prime directive. Every session should ask "what new edge could I find?" before asking "what should I preserve?"
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
