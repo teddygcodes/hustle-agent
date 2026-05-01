@@ -39,12 +39,40 @@ Declared but not currently on disk (skip cleanly with a load_warnings entry):
 A future heuristic that requires either will skip with a "skipped: missing
 sources [...]" entry in the report's errors section.
 
-## Heuristics shipped (Session 43a)
+## Heuristics shipped
+
+### Session 43a (May 1)
 
 | Name | What it catches | Tunables (constants at top of file) |
 | --- | --- | --- |
 | `outlier_pnl` | Single trade dominating its `(type, sport)` cohort over the last 30d | `OUTLIER_DOLLAR_THRESHOLD=$75`, `OUTLIER_PCT_OF_COHORT=30%`, `HIGH_SEVERITY_PCT=50%`, `LOOKBACK_DAYS=30` |
 | `cohort_emergence` | A `(opp_type, sport, source)` cohort appearing in last 7d but absent in prior 30d | `EMERGENCE_WINDOW_DAYS=7`, `PRIOR_WINDOW_DAYS=30`, `MIN_NEW_OPP_COUNT=3` |
+
+### Session 43b (May 1)
+
+| Name | What it catches | Tunables (constants at top of file) |
+| --- | --- | --- |
+| `threshold_proximity` | Reject-gates where many recent rejects fell within 5% of their threshold (alpha potentially surrendered); cross-references near-miss tickers to clv +CLV records | `THRESHOLD_REASONS` (3 reasons: edge_below_threshold, non_stable_below_weather_floor, no_price_below_floor), `PROXIMITY_BAND_PCT=0.05`, `MIN_REJECTS_PER_BUCKET=5`, `LOOKBACK_DAYS=14` |
+| `counterfactual_hotspots` | `(skipped_by_gate, sport)` buckets with high mean +CLV on settled CFs (Session 38a manual ATP query, automated) | `MIN_CF_COUNT=10`, `MIN_MEAN_CLV_CENTS=5.0`, `MIN_POSITIVE_CLV_RATE=0.60`, `MIN_NO_WON_COUNT=3` (survivorship guard), `LOOKBACK_DAYS=30`, `HIGH_SEVERITY_MEAN_CENTS=15.0` |
+| `universe_gap` | `(sport, market_type)` pairs decisions log touched ≥5×/7d but absent from latest universe snapshot — scanner regression / Kalshi delisting | `LOOKBACK_DAYS=7`, `MIN_DECISION_COUNT=5` |
+| `live_tick_anomalies` | Tickers with ≥3 price jumps of ≥15¢ vs rolling median (window=5 ticks); cross-checks open positions + paper trade overlap. **Streaming**, peak memory <50MB | `JUMP_THRESHOLD_CENTS=15`, `WINDOW_TICKS=5`, `MIN_JUMPS_PER_TICKER=3` |
+| `cadence_outcome` | `tracker_cadence._position_check_loop` median ms-buckets where mean P&L lands ≥1 std dev below global mean — quantifies "exits firing late when loop is slow" | `CADENCE_BUCKETS_MS=[10000, 20000, 35000, 60000, 120000]`, `MIN_TRADES_PER_BUCKET=10`, `WINDOW_BEFORE_EXIT_HOURS=1`, `ALERT_STD_DEVS_BELOW_MEAN=1.0` |
+| `log_error_spike` | bot.log error-message fingerprints with ≥3× recent-rate / baseline-rate (24h vs 168h windows). **Streaming**, peak memory <50MB. Would have flagged the Apr 30 12-hour wedge | `BASELINE_WINDOW_HOURS=168`, `RECENT_WINDOW_HOURS=24`, `SPIKE_RATIO=3.0`, `MIN_RECENT_COUNT=5`, `HIGH_SEVERITY_RATIO=10.0`, `HIGH_SEVERITY_MIN_COUNT=20`, `FINGERPRINT_PREFIX_LEN=80` |
+
+### `cohort_emergence` refinement (Session 43b, May 1)
+
+Per the Session 43-investigate finding: the original heuristic over-stated the
+SFPHI lead because it counted decisions records, not unique tickers or accepts.
+Refinement adds:
+
+- `unique_tickers_recent`, `accepts_recent`, `paper_trades_recent` to evidence
+- Severity demotes to `info` when `accepts_recent == 0 AND paper_trades_recent == 0` —
+  a cohort with thousands of decisions but zero accepts is interesting context
+  but not actionable
+- Sport classification distinguishes futures from per-game via
+  `tools/discovery_agent/_sport_classifier.py` (KXMLB-* → `mlb_futures`,
+  KXMLBGAME-* → `mlb_game`, etc.). Wrapper is local to discovery_agent — does
+  NOT modify `bot/regime.py:SPORT_PREFIXES` (canonical for 5 regime-axis writers)
 
 **Vocabulary policy.** `decisions.opp_type` and `paper_trades.type` are kept
 SEPARATE — the `cohort_emergence` cohort key includes the source name. The
