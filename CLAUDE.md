@@ -3095,6 +3095,72 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 
 ---
 
+### ☑ Session 45 — `no_vol_growth_first_seen` retuning HELD (May 1, doc-only, Outcome C)
+
+**Trigger.** May 1 6:00 AM ET discovery-agent run flagged `counterfactual_hotspots` on `no_vol_growth_first_seen` across atp / atp_challenger / nhl_game. The session brief proposed a 10–20% global threshold relaxation in `bot/config.py`, mirroring Session 38a methodology.
+
+**Disqualified at three independent layers in Phase-1 verification, before any retuning math ran.**
+
+1. **The gate is not a tunable threshold — it's a binary cycle-delay.** [bot/live_watcher.py:3099-3137](bot/live_watcher.py:3099) shows `no_vol_growth_first_seen` fires when `_prev_scan_volumes.get(ticker, 0) == 0` — i.e., the first time the bot ever sees a ticker in the running process. There is no constant in `bot/config.py` driving this branch. The CF emit at [live_watcher.py:3127-3136](bot/live_watcher.py:3127) records `threshold_value=0.0` (implicit baseline). Verified empirically: all 130 settled CFs in `clv.json` carry `threshold_value=0.0`. The `no_vol_growth_idle` gate immediately below it ([live_watcher.py:3140](bot/live_watcher.py:3140)) IS a real threshold (`if vol_growth < 500` — hardcoded magic number, not in config), but that's a different skip_reason and out of scope per the brief. Session 23's inclusion of `no_vol_growth_first_seen` in `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS` ([bot/clv.py:213](bot/clv.py:213)) is what triggers CF emission for measurement, NOT what makes the gate threshold-tunable. Instrumentation ≠ knob.
+
+2. **Schema-field mismatch in the brief's Step-2 script.** Brief instructs `r.get('skip_reason')` on `clv.json` records; canonical CF field is `r.get('skipped_by_gate')` (per Session 43b correction at the head of CLAUDE.md). Verified directly: 0 records with `skip_reason`, 2,274 CF records with `skipped_by_gate`. Running the brief's script verbatim returns n=0 and looks like the data is missing.
+
+3. **Survivorship floor hard-fails: `n_no_won = 0` across every cohort.** Brief's Step-3 hygiene check requires `n_no_won >= 5` combined / `>= 3` per cohort. Actual count is 0 for every sport. Mechanism: this gate fires *before* a watcher is spawned, so no entry side is committed; `market_result` stays null on the CF record. Same failure mode that killed Session 30-followup's wta_challenger probe.
+
+**Corrected cross-cohort numbers (`skipped_by_gate == 'no_vol_growth_first_seen' AND clv_cents IS NOT NULL`):**
+
+| Sport | n | Mean CLV | Median | +CLV% | n_no_won | n_yes_won |
+|---|---|---|---|---|---|---|
+| wta_challenger | 24 | +0.17¢ | +11.00¢ | 83% | 0 | 0 |
+| atp_challenger | 24 | +12.88¢ | +22.00¢ | 88% | 0 | 0 |
+| nba | 20 | -13.10¢ | +17.00¢ | 65% | 0 | 0 |
+| atp | 20 | +9.55¢ | +25.00¢ | 85% | 0 | 0 |
+| wta | 20 | +0.60¢ | +30.50¢ | 75% | 0 | 0 |
+| nhl | 14 | +5.86¢ | +28.50¢ | 79% | 0 | 0 |
+| ipl | 8 | -42.88¢ | -71.00¢ | 38% | 0 | 0 |
+| **Combined** | **130** | **-0.05¢** | **+19¢** | **77%** | **0** | **0** |
+| Outlier-trimmed (drop top-1 + bottom-1) | 128 | +0.40¢ | — | 77% | — | — |
+
+**Reconciliation with the discovery-agent finding.** atp / nhl numbers match within rounding. atp_challenger drifted (agent: n=21 +10.4¢ 85% n_no_won=3 → actual: n=24 +12.88¢ 88% n_no_won=0); n drift is consistent with continued accumulation, but the agent's `n_no_won=3` claim does not reproduce. The headline "+EV across 3 cohorts" was sport-selection-biased: nba (-13¢), ipl (-43¢), and to a lesser extent wta/wta_challenger pull the combined signal flat once you don't pre-select. Cross-cohort distribution is heavily bimodal — 30 records cluster in [-93¢, -65¢]; 100 cluster in [+6¢, +35¢]. Mean masks this; median (+19¢) isn't the right summary either.
+
+**Decision: Outcome C (HOLD, doc-only).** Outcomes A and B are structurally N/A (no threshold to relax, no per-sport override surface — gate is in the OUTER `scan_live_matches` loop *before* `SPORT_PROFILES` lookup applies). Outcome D applies on the 3 agent-flagged cohorts at n=58, but the broader n=130 cross-cohort flatness is the more informative signal — it's not a sample-thinness problem, it's a "the heuristic surfaced a true cluster but the cluster has no actionable shape" problem.
+
+**Possible future re-designs (NOT this session's scope, NOT actioned).** The only practical relaxations are:
+- (a) Eliminate the wait by allowing entry on first-sight (binary 100% relaxation — high-risk, no volume baseline).
+- (b) Persist `_prev_scan_volumes` across bot restarts so churn / restarts don't invalidate observed volumes.
+- (c) Lower `LIVE_SCAN_INTERVAL` (currently 120s per [bot/config.py:52](bot/config.py:52)) so the wait is shorter.
+
+None are 10–20% threshold tweaks. Each is its own session-sized re-design with its own evidence requirements.
+
+**Out-of-scope mechanism note for Session 46 candidate (`no_vol_growth_idle`).** Brief explicitly held the idle gate out of this session. Verified anyway: `no_vol_growth_idle` n=98 also has `n_no_won=0` everywhere — same survivorship problem. When Session 46 opens, it'll need a different lens than the Session 38a CLV-distribution methodology to clear the floor. Filed here to save that future session a lap.
+
+**Discovery-agent refinement candidate (filed for the existing 43b refinement queue, NOT actioned this session).** `counterfactual_hotspots` should require `n_no_won >= 1` per cohort (not just total CF count) before flagging severity NOTABLE. Gates that fire before any leader-side commit (like `no_vol_growth_first_seen`) can't accumulate `no_won` settlements by construction, so the heuristic should down-weight or carve them out — otherwise it surfaces directionally meaningless +CLV clusters and burns retuning sessions on them.
+
+**Watch-list trigger (re-investigate when ALL of):**
+- A future session has shipped a structural change to the cycle-delay (e.g., `_prev_scan_volumes` persistence across restarts, OR a first-sight entry path) — then there's something to actually back-test.
+- AND cross-cohort settled-CF count grows past **n=300** AND `n_no_won >= 30` materializes (i.e., settlements actually attribute to the gate).
+- AND cross-cohort mean CLV is `>= +5¢` AND outlier-trimmed mean stays `>= +3¢` (the bimodal distribution doesn't collapse).
+
+Until all three fire, it's not a candidate.
+
+**What did NOT change.**
+- `bot/config.py` — untouched.
+- [bot/live_watcher.py](bot/live_watcher.py) — untouched (the gate, `_prev_scan_volumes`, `LIVE_SCAN_INTERVAL`, anything adjacent).
+- `bot/clv.py` `LIVE_MOMENTUM_TUNABLE_SKIP_REASONS` — untouched.
+- Discovery agent code — untouched (refinement candidate filed for 43b queue).
+- Bot state (paper_trades, positions, decisions, clv) — untouched.
+- Tests — untouched (no behavior change to lock).
+- No bot restart.
+
+**Verify.**
+1. ☑ `git diff bot/` empty (only `CLAUDE.md` edited).
+2. ☑ Phase-2 query reproduces: `n=130, mean=-0.05¢, n_no_won=0`.
+3. ☑ No bot restart. PID and `bot.lock` mtime cadence unchanged.
+
+**Commit:** `docs(claude.md): session 45 — no_vol_growth_first_seen retuning HELD; gate is binary cycle-delay not a tunable threshold; survivorship n_no_won=0 across all cohorts; cross-cohort mean ≈ 0¢ once non-cherry-picked sports included`
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
