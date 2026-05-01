@@ -10,6 +10,7 @@ All times are in Eastern Time. The bot wall clock and ET match.
 |---|---|---|---|---|---|---|
 | Daily report | Daily 3:00 AM ET | (after first fire) | 2026-04-30T16:41Z | `bot/state/reports/daily/daily_report_YYYY-MM-DD.md` | Verify bot health + capture every metric we collect | Health pulse on top (5 rows) + 9 data sections below |
 | Weekly report | Sundays 6:00 AM ET | (after first fire) | — | `bot/state/reports/weekly/weekly_report_YYYY-WNN.md` | Synthesis layer: calibration findings + retuning candidates | Daily content + 6 weekly-only sections (week-over-week deltas, bucket analysis, dataset rebuild, excursion + exit-replay, calibration findings, retuning candidates) |
+| Discovery agent | Daily 6:00 AM ET | (after first fire) | — | `bot/state/discovery/discovery_report_YYYY-MM-DD.md` | Heuristic scan for new patterns, outliers, and emergent cohorts across all bot data | Session 43a framework + 2 SFPHI-catching heuristics (outlier_pnl, cohort_emergence). NEW/STABLE/RESOLVED dedup across runs. Pure stdlib, no LLM, no API. |
 
 ## One-off routines
 
