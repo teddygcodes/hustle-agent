@@ -3226,6 +3226,44 @@ Until all three fire, it's not a candidate.
 
 ---
 
+### ☑ Session 47 — `counterfactual_hotspots` cross-cohort context refinement (May 1, ~1h coder, discovery agent only)
+
+**Trigger.** Sessions 45 + 46 both shipped Outcome C HOLD on `counterfactual_hotspots`-surfaced findings for the same root failure mode: per-cohort flag positive, cross-cohort distribution flat-or-negative, strongest positive sports often in `MOMENTUM_DISABLED_SPORTS` (gate-tuning structurally neutralized). Two consecutive sessions burned ~3h coder time re-deriving the same cross-cohort math the heuristic could compute once. Refinement moves that math into the heuristic so future findings surface the cherry-pick context inline.
+
+**What shipped (4 files, all in `tools/discovery_agent/` + `tests/`).**
+
+1. [tools/discovery_agent/heuristics/counterfactual_hotspots.py](tools/discovery_agent/heuristics/counterfactual_hotspots.py) — added cross-cohort pre-pass per gate, 8 new evidence keys (`cross_cohort_total_n`, `cross_cohort_n_sports`, `cross_cohort_mean_clv_cents`, `cross_cohort_trimmed_mean_clv_cents`, `cross_cohort_n_positive_sports`, `cross_cohort_n_negative_sports`, `cross_cohort_breakdown`, `n_disabled_sport_cohorts_in_top3`, `this_cohort_is_disabled_sport`), severity demotion ladder (3 demotion triggers: cross-cohort mean < 0, trimmed mean < 3¢ AND raw <= 0, this cohort's sport in MOMENTUM_DISABLED_SPORTS), `MOMENTUM_DISABLED_SPORTS` imported from `bot.config` (single source of truth) + sport-vocab normalizer mapping discovery agent's distinguished classifier output back to the bot's flat vocabulary.
+2. [tools/discovery_agent/main.py](tools/discovery_agent/main.py) — `_render_cross_cohort_context()` helper + hook in NEW-section per-finding block (between summary and suggested_action).
+3. [tests/test_discovery_counterfactual_hotspots.py](tests/test_discovery_counterfactual_hotspots.py) — 12 new tests: context presence, severity demotion (cross-cohort negative / disabled sport / not-demoted-when-aligned), Session 45 + 46 replays, single-sport degenerate, single-source-of-truth import (asserts `MOMENTUM_DISABLED_SPORTS` from `bot.config`, not hardcoded), vocab normalizer, `n<3` trimmed-mean fallback, helper smoke tests.
+4. [tools/discovery_agent/README.md](tools/discovery_agent/README.md) — heuristics-table tunables row extended; Session 47 refinement subsection mirroring 43b's structure.
+
+**Verification.**
+
+1. ☑ Targeted: 23/23 (11 existing + 12 new) tests pass on `tests/test_discovery_counterfactual_hotspots.py`.
+2. ☑ Full discovery suite: 120/120 green.
+3. ☑ Full repo: **1321 passed** (1309 baseline + 12 new), 0 failures.
+4. ☑ Real-data agent re-run: 3 NEW, 21 STABLE, 0 RESOLVED, 0 errors. `discovery_findings_2026-05-01.jsonl` overwritten with the new evidence keys.
+5. ☑ Demotion math fired correctly on real data:
+   - **Session 45 cohort** (`no_vol_growth_first_seen/atp_challenger`): per-cohort +12.88¢ → cross-cohort raw −0.05¢ (−1) + trimmed +0.40¢ (no extra demote) + this-cohort disabled (−1) → **INFO** (was NOTABLE pre-47).
+   - **Session 46 cohort** (`no_vol_growth_idle/wta`): per-cohort +5.26¢ → cross-cohort raw −1.34¢ (−1) + trimmed −0.76¢ AND raw <= 0 (−1) + this-cohort disabled (−1) → **INFO** (was NOTABLE pre-47).
+   - **Session 45 enabled-sport cohort** (`no_vol_growth_first_seen/atp`): per-cohort +9.55¢ → cross-cohort raw −0.05¢ (−1) → **INFO** (cross-cohort drag still demotes even though `atp` itself is enabled — verification check #6 confirms the refinement isn't disable-only).
+   - **BONUS catch — Session 44 trigger** (`no_leader/wta`, the WTA-disable-revisit candidate that drove the Session 44 gate-flow walk): per-cohort +20¢ → demoted **HIGH → INFO** under the new ladder. Refinement covers the broader cherry-pick + disabled-sport pattern, not just the immediate Sessions 45/46 triggers.
+6. ☑ Markdown sub-block render verbatim-matches Session 46's CLAUDE.md numbers: *"Gate fires across 5 sports (n=98 combined). 3 cohorts positive (atp_challenger +9.2¢, wta +5.3¢, atp +4.0¢), 2 negative. Cross-cohort mean −1.34¢, outlier-trimmed −0.76¢. 2 of top-3 positive cohorts are in MOMENTUM_DISABLED_SPORTS…"* — no schema drift, no rounding error.
+7. ☑ `git diff bot/` empty. Bot still running under launchd (single process, PID unchanged). No production change, no restart.
+
+**What did NOT change.**
+- Per-cohort entry criteria (`MIN_CF_COUNT=10`, `MIN_MEAN_CLV_CENTS=5.0`, `MIN_POSITIVE_CLV_RATE=0.60`, `MIN_NO_WON_COUNT=3`) — untouched. Refinement is about cross-cohort CONTEXT, not per-cohort BAR.
+- Other heuristics (outlier_pnl, cohort_emergence, threshold_proximity, universe_gap, live_tick_anomalies, cadence_outcome, log_error_spike) — untouched. Each has different cherry-pick exposure; refine when pattern emerges.
+- SFPHI regression test — untouched, still green (separate heuristic, `outlier_pnl`).
+- `bot/config.py`, `bot/live_watcher.py`, all bot code — untouched.
+- Bot state, scheduling, launchd plists — untouched.
+
+**Tomorrow's 6 AM agent run is the natural validator.** It will reclassify these fingerprints based on today's overwritten `discovery_findings_2026-05-01.jsonl` as the prior, surfacing the new INFO severities + cross-cohort sub-blocks for any cohorts that flip into the NEW section. The expected pattern: counterfactual_hotspots NEW findings (if any) will arrive pre-contextualized; cherry-picks no longer waste session cycles.
+
+**Operating Posture observation.** This is the second discovery-agent self-improvement session (after Session 43b's cohort_emergence refinement, also driven by an investigation finding). Agent → investigates itself → refines itself. Sessions 44/45/46 each produced ~1.5h of reactive work; Session 47 makes that reactive work non-recurring for this specific failure mode. Compounding observability gain.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.

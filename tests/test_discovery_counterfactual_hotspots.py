@@ -8,6 +8,11 @@ from types import SimpleNamespace
 from tools.discovery_agent.heuristics.counterfactual_hotspots import (
     CounterfactualHotspots,
     MIN_CF_COUNT,
+    MOMENTUM_DISABLED_SPORTS,
+    _compute_cross_cohort,
+    _normalize_sport_for_disabled_check,
+    _severity,
+    _trimmed_mean,
 )
 
 
@@ -136,3 +141,217 @@ def test_counterfactual_hotspots_groups_by_gate_and_sport():
 def test_counterfactual_hotspots_missing_source_returns_empty():
     findings = CounterfactualHotspots().run(_ctx())
     assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# Session 47: cross-cohort context + severity demotion
+# ---------------------------------------------------------------------------
+
+
+def _build_cohort(prefix: str, gate: str, mean_clv: float, n_no: int, n_yes: int):
+    """Helper: emit n_no + n_yes uniform-clv records for a single cohort."""
+    rows = []
+    for i in range(n_no):
+        rows.append(_cf(f"{prefix}-N{i}", gate, mean_clv, market_result="no"))
+    for i in range(n_yes):
+        rows.append(_cf(f"{prefix}-Y{i}", gate, mean_clv, market_result="yes"))
+    return rows
+
+
+def test_cross_cohort_context_present():
+    """Multi-sport gate fires; new evidence keys populated with correct values."""
+    rows = []
+    # atp cohort firing (NOT in MOMENTUM_DISABLED_SPORTS): mean +10¢, +CLV=100% uniform.
+    rows += _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    # nba_game cohort: mean +5¢ (won't fire — n=8 < MIN_CF_COUNT, but contributes to context).
+    rows += _build_cohort("KXNBAGAME", "no_leader", 5.0, n_no=2, n_yes=6)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    assert len(findings) == 1  # only atp cohort clears entry bar
+    ev = findings[0].evidence
+    # cross-cohort total = atp(10) + nba_game(8) = 18
+    assert ev["cross_cohort_total_n"] == 18
+    assert ev["cross_cohort_n_sports"] == 2
+    # raw cross-cohort mean = (10*10 + 8*5)/18 = 140/18 ≈ 7.78
+    assert ev["cross_cohort_mean_clv_cents"] == 7.78
+    assert ev["cross_cohort_n_positive_sports"] == 2
+    assert ev["cross_cohort_n_negative_sports"] == 0
+    breakdown = ev["cross_cohort_breakdown"]
+    assert ("atp", 10, 10.0) in breakdown
+    assert ("nba_game", 8, 5.0) in breakdown
+    assert ev["n_disabled_sport_cohorts_in_top3"] == 0
+    assert ev["this_cohort_is_disabled_sport"] is False
+
+
+def test_severity_demotion_cross_cohort_negative():
+    """Per-cohort positive but cross-cohort raw < 0 → severity demoted to info."""
+    rows = []
+    # atp cohort firing at +10¢ (notable base): n=10, mean=+10, +CLV=100%, n_no=3.
+    rows += _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    # nba_game cohort dragging cross-cohort mean negative: 12 records at -20¢.
+    rows += _build_cohort("KXNBAGAME", "no_leader", -20.0, n_no=4, n_yes=8)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    # atp cohort fires (entry bar); nba_game cohort does NOT fire (mean < 5¢ floor).
+    atp_findings = [f for f in findings if f.evidence["sport"] == "atp"]
+    assert len(atp_findings) == 1
+    f = atp_findings[0]
+    # Cross-cohort raw mean = (10*10 + 12*-20)/22 ≈ -6.36 → < 0 → demote 1.
+    # Trimmed mean drops one +10 and one -20 → (9*10 + 11*-20)/20 = -130/20 = -6.5
+    # → < 3 AND raw <= 0 → demote 1 more. atp not disabled → no third demote.
+    # base notable + 2 demotes → info.
+    assert f.severity == "info"
+    assert f.evidence["cross_cohort_mean_clv_cents"] < 0
+
+
+def test_severity_demotion_disabled_sport():
+    """Single-sport positive on wta (disabled): demote ONLY via disabled-sport rule."""
+    # 7 yes at +15, 3 no at +5. mean=+12¢, +CLV=100%, n_no=3.
+    rows = []
+    for i in range(7):
+        rows.append(_cf(f"KXWTAMATCH-Y{i}", "no_leader", 15, market_result="yes"))
+    for i in range(3):
+        rows.append(_cf(f"KXWTAMATCH-N{i}", "no_leader", 5, market_result="no"))
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.evidence["sport"] == "wta"
+    assert f.evidence["this_cohort_is_disabled_sport"] is True
+    # Cross-cohort raw mean = 12 (all positive) — no raw demote.
+    # Trimmed mean (drop +15 and +5) = (6*15 + 2*5)/8 = 100/8 = 12.5 — no trimmed demote.
+    # wta IN MOMENTUM_DISABLED_SPORTS → 1 demote. notable + 1 → info.
+    assert f.severity == "info"
+
+
+def test_severity_NOT_demoted_when_cross_cohort_aligned():
+    """Per-cohort AND cross-cohort positive AND sport NOT disabled → stays at notable."""
+    # atp cohort, mean +10¢ uniform: notable base, no demotion conditions fire.
+    rows = _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.severity == "notable"
+    assert f.evidence["this_cohort_is_disabled_sport"] is False
+
+
+def test_session_45_replay():
+    """Session 45 no_vol_growth_first_seen / atp_challenger demoted to info.
+
+    Reproduces the n=130 cross-cohort distribution from CLAUDE.md Session 45 entry.
+    Per-cohort atp_challenger (+12.88¢ at n=24) clears entry bar; cross-cohort
+    raw mean ≈ -0.05¢ + atp_challenger ∈ disabled set → notable + 3 demotes → info.
+    """
+    rows = []
+    # 7 cohorts as documented in CLAUDE.md Session 45 corrected table:
+    rows += _build_cohort("KXATPCHALLENGERMATCH", "no_vol_growth_first_seen", 12.88, n_no=3, n_yes=21)
+    rows += _build_cohort("KXWTACHALLENGERMATCH", "no_vol_growth_first_seen", 0.17, n_no=4, n_yes=20)
+    rows += _build_cohort("KXNBAGAME", "no_vol_growth_first_seen", -13.10, n_no=7, n_yes=13)
+    rows += _build_cohort("KXATPMATCH", "no_vol_growth_first_seen", 9.55, n_no=3, n_yes=17)
+    rows += _build_cohort("KXWTAMATCH", "no_vol_growth_first_seen", 0.60, n_no=5, n_yes=15)
+    rows += _build_cohort("KXNHLGAME", "no_vol_growth_first_seen", 5.86, n_no=3, n_yes=11)
+    rows += _build_cohort("KXIPL", "no_vol_growth_first_seen", -42.88, n_no=5, n_yes=3)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    by_sport = {f.evidence["sport"]: f for f in findings}
+    assert "atp_challenger" in by_sport
+    f = by_sport["atp_challenger"]
+    assert f.severity == "info"
+    # Cross-cohort raw mean is approximately -0.05 (allowing for fixture rounding).
+    assert f.evidence["cross_cohort_mean_clv_cents"] < 0
+    # The cohort itself is in disabled set.
+    assert f.evidence["this_cohort_is_disabled_sport"] is True
+    # All 5 cohorts that clear entry bar should also be demoted to info or lower.
+    # atp main is NOT disabled but cross-cohort still drags it down.
+    if "atp" in by_sport:
+        assert by_sport["atp"].severity == "info"
+
+
+def test_session_46_replay():
+    """Session 46 no_vol_growth_idle / wta demoted to info.
+
+    Reproduces the n=98 cross-cohort distribution from CLAUDE.md Session 46 entry.
+    Per-cohort wta (+5.26¢ at n=19) just clears entry bar; cross-cohort raw mean
+    ≈ -1.34¢ + wta ∈ disabled set + 2 of top-3 sports disabled → info.
+    """
+    rows = []
+    rows += _build_cohort("KXATPCHALLENGERMATCH", "no_vol_growth_idle", 9.17, n_no=4, n_yes=20)
+    rows += _build_cohort("KXWTAMATCH", "no_vol_growth_idle", 5.26, n_no=4, n_yes=15)
+    rows += _build_cohort("KXATPMATCH", "no_vol_growth_idle", 4.05, n_no=4, n_yes=15)
+    rows += _build_cohort("KXWTACHALLENGERMATCH", "no_vol_growth_idle", -12.80, n_no=8, n_yes=17)
+    rows += _build_cohort("KXNBAGAME", "no_vol_growth_idle", -18.91, n_no=5, n_yes=6)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    by_sport = {f.evidence["sport"]: f for f in findings}
+    assert "wta" in by_sport
+    f = by_sport["wta"]
+    assert f.severity == "info"
+    assert f.evidence["cross_cohort_mean_clv_cents"] < 0
+    assert f.evidence["this_cohort_is_disabled_sport"] is True
+    # Top-3 by per-cohort mean: atp_challenger (+9.17), wta (+5.26), atp (+4.05).
+    # 2 of those 3 (atp_challenger + wta) are in MOMENTUM_DISABLED_SPORTS.
+    assert f.evidence["n_disabled_sport_cohorts_in_top3"] == 2
+
+
+def test_single_sport_degenerate():
+    """Gate fires on only one sport (non-disabled) → cross-cohort = per-cohort, no demotion."""
+    # atp cohort only, mean +10¢: clears entry bar, no contradiction, atp not disabled.
+    rows = _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.severity == "notable"  # no demotion
+    assert f.evidence["cross_cohort_n_sports"] == 1
+    assert f.evidence["cross_cohort_total_n"] == 10
+    assert f.evidence["cross_cohort_mean_clv_cents"] == 10.0
+    # No NaN / divide-by-zero — value is finite.
+    assert f.evidence["cross_cohort_trimmed_mean_clv_cents"] == 10.0
+
+
+def test_disabled_sport_set_imported_from_bot_config():
+    """Single source of truth: heuristic's MOMENTUM_DISABLED_SPORTS IS bot.config's."""
+    from bot.config import MOMENTUM_DISABLED_SPORTS as bot_set
+    assert MOMENTUM_DISABLED_SPORTS is bot_set
+
+
+def test_normalize_sport_for_disabled_check():
+    """Helper strips _game / _futures suffixes; passes other sports through."""
+    assert _normalize_sport_for_disabled_check("nba_game") == "nba"
+    assert _normalize_sport_for_disabled_check("nba_futures") == "nba"
+    assert _normalize_sport_for_disabled_check("mlb_game") == "mlb"
+    assert _normalize_sport_for_disabled_check("nhl_futures") == "nhl"
+    assert _normalize_sport_for_disabled_check("atp_challenger") == "atp_challenger"
+    assert _normalize_sport_for_disabled_check("wta") == "wta"
+    assert _normalize_sport_for_disabled_check("ufc") == "ufc"
+    assert _normalize_sport_for_disabled_check("weather_high") == "weather_high"
+    assert _normalize_sport_for_disabled_check(None) is None
+
+
+def test_trimmed_mean_with_n_lt_3():
+    """Trimmed mean falls back to raw mean when n < 3 (no slice crash)."""
+    assert _trimmed_mean([5.0, 10.0]) == 7.5  # n=2, raw mean
+    assert _trimmed_mean([8.0]) == 8.0        # n=1, raw mean
+    assert _trimmed_mean([]) == 0.0           # empty, no crash
+    # n=3 trims to single middle value.
+    assert _trimmed_mean([1.0, 5.0, 9.0]) == 5.0
+
+
+def test_compute_cross_cohort_helper_directly():
+    """Direct unit test on _compute_cross_cohort for shape correctness."""
+    rows = []
+    rows += _build_cohort("KXATPMATCH", "g", 10.0, n_no=2, n_yes=8)
+    rows += _build_cohort("KXNBAGAME", "g", -5.0, n_no=2, n_yes=8)
+    ctx_data = _compute_cross_cohort("g", rows)
+    assert ctx_data["cross_cohort_total_n"] == 20
+    assert ctx_data["cross_cohort_n_sports"] == 2
+    # mean = (10*10 + 10*-5)/20 = 50/20 = 2.5
+    assert ctx_data["cross_cohort_mean_clv_cents"] == 2.5
+    assert ctx_data["cross_cohort_n_positive_sports"] == 1
+    assert ctx_data["cross_cohort_n_negative_sports"] == 1
+
+
+def test_severity_helper_clamps_at_info():
+    """Severity helper clamps to 'info' even with more demotions than ladder steps."""
+    ctx_data = {
+        "cross_cohort_mean_clv_cents": -10.0,
+        "cross_cohort_trimmed_mean_clv_cents": -5.0,
+    }
+    # Notable base + 3 demote conditions all fire → clamps at info.
+    assert _severity(per_cohort_mean=10.0, ctx_data=ctx_data, this_cohort_disabled=True) == "info"
+    # High base + 3 demote conditions → high → notable → info → clamps at info.
+    assert _severity(per_cohort_mean=20.0, ctx_data=ctx_data, this_cohort_disabled=True) == "info"

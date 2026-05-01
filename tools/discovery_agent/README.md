@@ -164,7 +164,7 @@ futures. Don't conflate. Discovery agent always uses
 | Name | What it catches | Tunables (constants at top of file) |
 | --- | --- | --- |
 | `threshold_proximity` | Reject-gates where many recent rejects fell within 5% of their threshold (alpha potentially surrendered); cross-references near-miss tickers to clv +CLV records | `THRESHOLD_REASONS` (3 reasons: edge_below_threshold, non_stable_below_weather_floor, no_price_below_floor), `PROXIMITY_BAND_PCT=0.05`, `MIN_REJECTS_PER_BUCKET=5`, `LOOKBACK_DAYS=14` |
-| `counterfactual_hotspots` | `(skipped_by_gate, sport)` buckets with high mean +CLV on settled CFs (Session 38a manual ATP query, automated) | `MIN_CF_COUNT=10`, `MIN_MEAN_CLV_CENTS=5.0`, `MIN_POSITIVE_CLV_RATE=0.60`, `MIN_NO_WON_COUNT=3` (survivorship guard), `LOOKBACK_DAYS=30`, `HIGH_SEVERITY_MEAN_CENTS=15.0` |
+| `counterfactual_hotspots` | `(skipped_by_gate, sport)` buckets with high mean +CLV on settled CFs (Session 38a manual ATP query, automated) | `MIN_CF_COUNT=10`, `MIN_MEAN_CLV_CENTS=5.0`, `MIN_POSITIVE_CLV_RATE=0.60`, `MIN_NO_WON_COUNT=3` (survivorship guard), `LOOKBACK_DAYS=30`, `HIGH_SEVERITY_MEAN_CENTS=15.0`, `CROSS_COHORT_MEAN_DEMOTION_FLOOR=0.0¢`, `CROSS_COHORT_TRIMMED_MEAN_FLOOR=3.0¢`, `DISABLED_SPORT_DEMOTION=True` (Session 47) |
 | `universe_gap` | `(sport, market_type)` pairs decisions log touched ≥5×/7d but absent from latest universe snapshot — scanner regression / Kalshi delisting | `LOOKBACK_DAYS=7`, `MIN_DECISION_COUNT=5` |
 | `live_tick_anomalies` | Tickers with ≥3 price jumps of ≥15¢ vs rolling median (window=5 ticks); cross-checks open positions + paper trade overlap. **Streaming**, peak memory <50MB | `JUMP_THRESHOLD_CENTS=15`, `WINDOW_TICKS=5`, `MIN_JUMPS_PER_TICKER=3` |
 | `cadence_outcome` | `tracker_cadence._position_check_loop` median ms-buckets where mean P&L lands ≥1 std dev below global mean — quantifies "exits firing late when loop is slow" | `CADENCE_BUCKETS_MS=[10000, 20000, 35000, 60000, 120000]`, `MIN_TRADES_PER_BUCKET=10`, `WINDOW_BEFORE_EXIT_HOURS=1`, `ALERT_STD_DEVS_BELOW_MEAN=1.0` |
@@ -189,6 +189,41 @@ Refinement adds:
 SEPARATE — the `cohort_emergence` cohort key includes the source name. The
 vocabulary mismatch (e.g. `vig_stack_futures` in decisions vs `vig_stack` in
 paper_trades) IS the signal we want to surface, not noise to normalize away.
+
+### `counterfactual_hotspots` refinement (Session 47, May 1)
+
+Per Sessions 45 + 46 — both shipped Outcome C HOLD on the same failure mode:
+per-cohort flag positive, cross-cohort distribution flat-or-negative,
+strongest positive sports in `MOMENTUM_DISABLED_SPORTS` (gate-tuning
+structurally neutralized — relaxing the gate produces zero new actual trades
+for them). Each session burned ~1.5h re-deriving the same cross-cohort math
+the heuristic could have computed once. Refinement adds:
+
+- Cross-cohort context to every Finding's evidence (`cross_cohort_total_n`,
+  `cross_cohort_n_sports`, `cross_cohort_mean_clv_cents`,
+  `cross_cohort_trimmed_mean_clv_cents`,
+  `cross_cohort_n_positive_sports` / `n_negative_sports`,
+  `cross_cohort_breakdown` (top-10 by n desc), plus the gate-flow caveat keys
+  `n_disabled_sport_cohorts_in_top3` and `this_cohort_is_disabled_sport`).
+- Severity demotion ladder. Base = `high` if per-cohort mean ≥
+  `HIGH_SEVERITY_MEAN_CENTS` else `notable`. Demote one step per condition:
+  (a) cross-cohort raw mean < `CROSS_COHORT_MEAN_DEMOTION_FLOOR`, (b) trimmed
+  mean < `CROSS_COHORT_TRIMMED_MEAN_FLOOR` AND raw ≤ 0, (c) cohort sport in
+  `MOMENTUM_DISABLED_SPORTS` (with normalization — `nba_game` / `nba_futures`
+  → `nba` for the comparison since the bot's set has flat names).
+- Report rendering shows the cross-cohort context inline as a separate
+  paragraph between summary and suggested_action. Block fires regardless of
+  severity — even `high` findings benefit from the full picture.
+
+Net effect: per-cohort flags are still emitted (data preserved), but the
+report's NEW/HIGH section no longer surfaces cherry-picked-positive cohorts
+as actionable candidates when cross-cohort context contradicts. Sessions 45
+and 46 retroactively demote to `info` under this logic.
+
+Single source of truth: `MOMENTUM_DISABLED_SPORTS` is imported from
+`bot.config` (NOT hardcoded in the heuristic). Tunables live at the top of
+`counterfactual_hotspots.py`: `CROSS_COHORT_MEAN_DEMOTION_FLOOR`,
+`CROSS_COHORT_TRIMMED_MEAN_FLOOR`, `DISABLED_SPORT_DEMOTION`.
 
 ## How to add a heuristic (Session 43b and beyond)
 

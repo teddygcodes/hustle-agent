@@ -50,6 +50,66 @@ def _render_evidence(ev: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_cross_cohort_context(f: Finding) -> str | None:
+    """Session 47: render the 'Cross-cohort context' sub-block for counterfactual_hotspots
+    findings. Returns None for any other heuristic OR when the cross-cohort keys are
+    not present (defensive — older fingerprints from a different agent version)."""
+    if f.heuristic != "counterfactual_hotspots":
+        return None
+    ev = f.evidence
+    required = (
+        "cross_cohort_total_n",
+        "cross_cohort_n_sports",
+        "cross_cohort_mean_clv_cents",
+        "cross_cohort_trimmed_mean_clv_cents",
+        "cross_cohort_n_positive_sports",
+        "cross_cohort_n_negative_sports",
+        "cross_cohort_breakdown",
+        "n_disabled_sport_cohorts_in_top3",
+    )
+    if any(k not in ev for k in required):
+        return None
+
+    breakdown = ev["cross_cohort_breakdown"] or []
+    top3_positive = sorted(
+        [(sport, n, mean) for sport, n, mean in breakdown if mean > 0],
+        key=lambda t: -t[2],
+    )[:3]
+    top3_str = (
+        ", ".join(f"{sport} {mean:+.1f}¢" for sport, _n, mean in top3_positive)
+        if top3_positive
+        else "none"
+    )
+
+    raw = ev["cross_cohort_mean_clv_cents"]
+    trimmed = ev["cross_cohort_trimmed_mean_clv_cents"]
+    n_disabled = ev["n_disabled_sport_cohorts_in_top3"]
+
+    raw_aligns = raw >= 0 and trimmed >= 0
+    if raw_aligns and n_disabled == 0:
+        verdict = "treat as actionable"
+        align_phrase = "aligns with"
+    else:
+        verdict = "investigate gate-flow caveats before treating as actionable"
+        align_phrase = "does NOT clear"
+
+    disabled_clause = (
+        f" **{n_disabled} of top-3 positive cohorts are in MOMENTUM_DISABLED_SPORTS** "
+        f"(relaxing the gate produces zero new actual trades for them)."
+        if n_disabled > 0
+        else ""
+    )
+
+    return (
+        f"**Cross-cohort context:** Gate fires across {ev['cross_cohort_n_sports']} sports "
+        f"(n={ev['cross_cohort_total_n']} combined). "
+        f"{ev['cross_cohort_n_positive_sports']} cohorts positive ({top3_str}), "
+        f"{ev['cross_cohort_n_negative_sports']} negative. "
+        f"Cross-cohort mean **{raw:+.2f}¢**, outlier-trimmed {trimmed:+.2f}¢."
+        f"{disabled_clause} Per-cohort signal {align_phrase} cross-cohort hygiene — {verdict}."
+    )
+
+
 def _sort_findings(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (SEVERITY_RANK.get(f.severity, 99), f.heuristic, f.title))
 
@@ -83,6 +143,11 @@ def _write_markdown(
             "",
             f.summary,
             "",
+        ]
+        cross_cohort = _render_cross_cohort_context(f)
+        if cross_cohort:
+            lines += [cross_cohort, ""]
+        lines += [
             f"**Suggested action:** {f.suggested_action or '—'}",
             "",
             "**Evidence:**",
