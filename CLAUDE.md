@@ -2640,6 +2640,8 @@ Session 18 documented this same pattern from the Apr 14 audit ("NO at 90-95¢ ri
 4. After ~10 min: Tyler sees live_watcher notifications resuming on Telegram (first new bet entry / status card edit since 23:54:36 ET Apr 29).
 5. If any of those fail, do NOT restart-as-band-aid — open Session 39-followup to audit other synchronous-call sites in async paths.
 
+**Day-1 spot check (May 1).** ☑ HEALTHY — heartbeat 20s, lock 20s, `_position_check_loop` cadence median 31.3s / p95 31.6s / max 32.4s over 41 samples (24h window), 47 universe snapshots. Event loop stayed responsive across one full day. Report: [bot/state/reports/session_39_day_1_2026-05-01.md](hustle-agent/bot/state/reports/session_39_day_1_2026-05-01.md).
+
 ---
 
 ### ☑ Session 40 — Live_momentum EE-rate investigation (Apr 30, shipped — Outcome C, doc-only)
