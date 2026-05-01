@@ -12,12 +12,14 @@ from .heuristics.cohort_emergence import CohortEmergence
 from .heuristics.counterfactual_hotspots import CounterfactualHotspots
 from .heuristics.outlier_pnl import OutlierPnl
 from .heuristics.threshold_proximity import ThresholdProximity
+from .heuristics.universe_gap import UniverseGap
 
 DEFAULT_HEURISTICS = [
     OutlierPnl(),
     CohortEmergence(),
     ThresholdProximity(),
     CounterfactualHotspots(),
+    UniverseGap(),
 ]
 SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
 
