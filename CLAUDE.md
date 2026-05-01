@@ -3136,7 +3136,7 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 
 None are 10–20% threshold tweaks. Each is its own session-sized re-design with its own evidence requirements.
 
-~~**Out-of-scope mechanism note for Session 46 candidate (`no_vol_growth_idle`).** Brief explicitly held the idle gate out of this session. Verified anyway: `no_vol_growth_idle` n=98 also has `n_no_won=0` everywhere — same survivorship problem. When Session 46 opens, it'll need a different lens than the Session 38a CLV-distribution methodology to clear the floor. Filed here to save that future session a lap.~~ **[FALSIFIED post-session — same `'no_won'` vs `'no'` schema-value error. `no_vol_growth_idle` survivorship needs re-verification when Session 46 opens; the original "everywhere n_no_won=0" claim is unreliable.]**
+~~**Out-of-scope mechanism note for Session 46 candidate (`no_vol_growth_idle`).** Brief explicitly held the idle gate out of this session. Verified anyway: `no_vol_growth_idle` n=98 also has `n_no_won=0` everywhere — same survivorship problem. When Session 46 opens, it'll need a different lens than the Session 38a CLV-distribution methodology to clear the floor. Filed here to save that future session a lap.~~ **[FALSIFIED post-session — same `'no_won'` vs `'no'` schema-value error. Re-verified by Session 46 on canonical schema: `no_vol_growth_idle` actual combined `n_no = 25` (per-cohort `n_no` in [3, 8]) — survivorship PASSES at every cohort. Session 46 disqualified the retuning move on different grounds: cross-cohort cherry-pick (combined mean −1.34¢), gate-flow neutralization (top 2 positive cohorts are disabled sports), and bimodal distribution shape. See Session 46 entry below for full forensic.]**
 
 ~~**Discovery-agent refinement candidate (filed for the existing 43b refinement queue, NOT actioned this session).** `counterfactual_hotspots` should require `n_no_won >= 1` per cohort (not just total CF count) before flagging severity NOTABLE. Gates that fire before any leader-side commit (like `no_vol_growth_first_seen`) can't accumulate `no_won` settlements by construction, so the heuristic should down-weight or carve them out — otherwise it surfaces directionally meaningless +CLV clusters and burns retuning sessions on them.~~ **[RETRACTED post-session.]** The heuristic ALREADY requires `n_no_won >= 3` ([counterfactual_hotspots.py:24,65](tools/discovery_agent/heuristics/counterfactual_hotspots.py:24)) and is doing so correctly with the right schema-value check (`market_result == 'no'`). The agent is NOT buggy here. The genuine refinement candidate this session surfaced is different: **`counterfactual_hotspots` should report cross-cohort context alongside per-cohort flags** — when 3 of 7 cohorts on a given gate are positive but the cross-cohort mean is flat, the report should show that context so future sessions don't act on cherry-picked signal. Filed for the 43b refinement queue.
 
@@ -3162,6 +3162,67 @@ Until all three fire, it's not a candidate.
 3. ☑ No bot restart. PID and `bot.lock` mtime cadence unchanged.
 
 **Commit:** `docs(claude.md): session 45 — no_vol_growth_first_seen retuning HELD; gate is binary cycle-delay not a tunable threshold; survivorship n_no_won=0 across all cohorts; cross-cohort mean ≈ 0¢ once non-cherry-picked sports included`
+
+---
+
+### ☑ Session 46 — `no_vol_growth_idle` retuning HELD (May 1, doc-only, Outcome C)
+
+**Trigger.** May 1 discovery-agent run flagged `counterfactual_hotspots: no_vol_growth_idle/wta n=19 +5.3¢ 78% +CLV STABLE` ([discovery_report_2026-05-01.md:180](bot/state/discovery/discovery_report_2026-05-01.md)). The companion gate to Session 45's `no_vol_growth_first_seen`. Brief proposed a 10–20% global threshold relaxation (`500 → 400` at [bot/live_watcher.py:3140](bot/live_watcher.py:3140)) mirroring Session 38a methodology, with Outcome A (relax) structurally on the table this time because — unlike Session 45 — the gate IS a tunable magic-number, not a binary cycle-delay.
+
+**Step 1 — gate IS tunable (confirmed).** [bot/live_watcher.py:3140](bot/live_watcher.py:3140): `if vol_growth < 500`. Hardcoded magic, single occurrence, no `bot/config.py` indirection. Outcome A is structurally feasible IF evidence holds. (Session 45's first-seen gate had no knob; this one does.)
+
+**Step 2 — cross-cohort evidence (canonical schema, per-Session-45-correction).** Filter: `status == 'counterfactual_settled' AND skipped_by_gate == 'no_vol_growth_idle' AND clv_cents IS NOT NULL`. Sport via [tools/discovery_agent/_sport_classifier.sport_from_ticker_distinguished()](tools/discovery_agent/_sport_classifier.py).
+
+| Sport | n | Mean CLV | Median | +CLV% | n_no | n_yes | Survivorship |
+|---|---|---|---|---|---|---|---|
+| atp_challenger | 24 | **+9.17¢** | +22.0¢ | 83% | 4 | 20 | PASS |
+| wta | 19 | **+5.26¢** | +31.0¢ | 79% | 4 | 15 | PASS |
+| atp | 19 | **+4.05¢** | +25.0¢ | 79% | 4 | 15 | PASS |
+| wta_challenger | 25 | **−12.80¢** | +12.0¢ | 68% | 8 | 17 | PASS |
+| nba_game | 11 | **−18.91¢** | +19.0¢ | 55% | 5 | 6 | PASS |
+| **Combined** | **98** | **−1.34¢** | +20.0¢ | 74% | **25** | **73** | **PASS** |
+| Outlier-trimmed (drop top-1 + bottom-1) | 96 | **−0.76¢** | — | — | — | — | — |
+
+Agent's wta finding reproduces (n=19 +5.26¢ at 79%). Per-cohort n_no clears Session 30-followup floor of 3 everywhere; combined n_no=25.
+
+**Disqualified at three independent layers.**
+
+1. **Cross-cohort cherry-pick (Session 45 shape).** 3 cohorts positive, 2 strongly negative. Combined mean is NEGATIVE: −1.34¢ raw, −0.76¢ outlier-trimmed. Outcome A's "+5¢ combined floor" + "outlier-trimmed >= +3¢" criteria fail by a wide margin. The agent's `+5.3¢/wta` headline is real signal at the per-cohort level, but the combined picture is flat-to-negative once non-cherry-picked sports are included.
+
+2. **Gate-flow neutralizes the wta headline.** Gate fires in OUTER [scan_live_matches](bot/live_watcher.py:2829) at line 3140, BEFORE [sport_disabled](bot/live_watcher.py:1179) check in INNER `_tick_momentum`. Per current `MOMENTUM_DISABLED_SPORTS = {atp_challenger, wta, wta_challenger}` (Session 38a/38a-2), wta is disabled. Relaxing 500→400 would let wta markets pass this OUTER gate, but they'd still hit `sport_disabled` downstream — zero actual WTA trades produced. Same neutralization shape as Session 44's `no_leader/wta` finding. The two strongest positive cohorts (atp_challenger +9.17¢, wta +5.26¢) are BOTH currently disabled and not addressable via this lever. The one positive ENABLED cohort is atp at +4.05¢/n=19 — below Session 38a's +5¢ floor at n=56.
+
+3. **Distribution is structurally bimodal, not threshold-tunable.** Histogram on combined CLV: 25 records in [−100, −50] (loss cluster), 73 records in [+0, +50] (win cluster), **nothing between −50 and 0**. CLV here measures "leader bet settled correctly (~+30¢) vs blew up (~−85¢)" — a function of underlying confidence, not vol_growth. Lowering the threshold admits more markets at the same bimodal split; the +CLV signal is structurally a settlement-success signal, not a "we're rejecting near-the-line good markets" signal.
+
+**Outcome B (per-sport variant) — also not actionable.** Brief's bar: "ONE sport carrying the entire signal AND a believable per-sport mechanism." Three sports show varying-strength positive (atp_chall +9.17¢, wta +5.26¢, atp +4.05¢); not concentrated in one. AND the two strongest positives are disabled (gate-flow caveat #2 above). atp main-tour at n=19 is below Session 38a's evidence bar. Adding per-sport override surface to a magic-number-in-code is a bigger change than tuning the magic number, and the evidence shape doesn't support either direction.
+
+**Decision: Outcome C (HOLD, doc-only).** Same outcome as Session 45 but on different rationale: Session 45 was Layer-1 disqualified (no knob existed); Session 46 has a knob but the cross-cohort evidence + gate-flow neutralization + bimodal distribution all argue against turning it.
+
+**Reconciliation with the agent finding.** Discovery agent surfaced wta in isolation and the per-cohort number is real. The agent's `counterfactual_hotspots` heuristic is doing what it's designed to: flag positive per-cohort clusters that clear survivorship. **The cross-cohort context that disqualifies the lever isn't visible in the agent output yet** — same gap Session 45 flagged. The 43b refinement candidate filed by Session 45 ("`counterfactual_hotspots` should report cross-cohort context alongside per-cohort flags") would have surfaced this Outcome-C-shaped finding at agent-time and saved a session lap. **Reinforces that refinement priority — same shape, second instance.**
+
+**Session 45 correction (post-session by this session).** Session 45's strikethrough'd "Out-of-scope mechanism note for Session 46 candidate" claimed `no_vol_growth_idle` n=98 had `n_no_won=0` everywhere as a survivorship problem. **Verified false on canonical schema this session: n_no=25 combined, per-cohort n_no in [3, 8] — survivorship PASSES.** The original claim came from the same `'no_won'` vs `'no'` schema-value error. Session 45's correction block flagged this for re-verification; this session is the re-verification. The actual disqualifications for `no_vol_growth_idle` are cross-cohort cherry-pick + gate-flow neutralization + bimodal-distribution structural shape — NOT survivorship.
+
+**Watch-list trigger (re-investigate when ALL of):**
+- A future session removes wta and/or atp_challenger from `MOMENTUM_DISABLED_SPORTS` (e.g., Session 38a-2 watch-list trigger fires). Then the +5.26¢ wta and +9.17¢ atp_challenger signals become actionable via this gate's relaxation, instead of being neutralized downstream.
+- AND combined cross-cohort mean (post-disable-change) is `>= +5¢` raw AND `>= +3¢` outlier-trimmed.
+- AND the bimodal distribution shape softens — i.e., records appear in the [−50, 0] gap, indicating the gate is rejecting marginal-quality markets that would settle near the line, not just well-structured high-confidence bets.
+
+Until all three fire, it's not a candidate.
+
+**What did NOT change.**
+- [bot/live_watcher.py:3140](bot/live_watcher.py:3140) — `if vol_growth < 500` untouched.
+- `bot/config.py` — untouched.
+- `MOMENTUM_DISABLED_SPORTS` — untouched.
+- Discovery agent — untouched (cross-cohort context refinement filed for 43b queue, second instance reinforcing priority).
+- Bot state — untouched. No bot restart.
+- Tests — untouched.
+
+**Verify.**
+1. ☑ `git diff bot/ tests/ tools/` empty (only `CLAUDE.md` edited).
+2. ☑ Step-2 query reproduces: combined n=98, mean −1.34¢, n_no=25.
+3. ☑ Survivorship PASS verified directly (counters Session 45's strikethrough'd lookahead).
+4. ☑ No bot restart. PID and `bot.lock` mtime cadence unchanged.
+
+**Commit:** `docs(claude.md): session 46 — no_vol_growth_idle retuning HELD; gate IS tunable (line 3140 magic 500) but cross-cohort mean is −1.34¢, top 2 positive cohorts (atp_chall, wta) disabled downstream, distribution structurally bimodal — Outcome C; Session 45 lookahead n_no_won=0 claim falsified, survivorship actually PASSES`
 
 ---
 
