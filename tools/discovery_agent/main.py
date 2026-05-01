@@ -10,8 +10,9 @@ from .context import DEFAULT_REPO, DiscoveryContext
 from .findings import Finding, classify_findings, load_prior_findings, write_findings_jsonl
 from .heuristics.cohort_emergence import CohortEmergence
 from .heuristics.outlier_pnl import OutlierPnl
+from .heuristics.threshold_proximity import ThresholdProximity
 
-DEFAULT_HEURISTICS = [OutlierPnl(), CohortEmergence()]
+DEFAULT_HEURISTICS = [OutlierPnl(), CohortEmergence(), ThresholdProximity()]
 SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
 
 
