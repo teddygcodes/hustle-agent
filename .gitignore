@@ -10,5 +10,6 @@ __pycache__/
 .pytest_cache/
 *.tmp
 .DS_Store
-tools/
+tools/*
+!tools/discovery_agent/
 output/
