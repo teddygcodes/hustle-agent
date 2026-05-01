@@ -3105,23 +3105,25 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 
 2. **Schema-field mismatch in the brief's Step-2 script.** Brief instructs `r.get('skip_reason')` on `clv.json` records; canonical CF field is `r.get('skipped_by_gate')` (per Session 43b correction at the head of CLAUDE.md). Verified directly: 0 records with `skip_reason`, 2,274 CF records with `skipped_by_gate`. Running the brief's script verbatim returns n=0 and looks like the data is missing.
 
-3. **Survivorship floor hard-fails: `n_no_won = 0` across every cohort.** Brief's Step-3 hygiene check requires `n_no_won >= 5` combined / `>= 3` per cohort. Actual count is 0 for every sport. Mechanism: this gate fires *before* a watcher is spawned, so no entry side is committed; `market_result` stays null on the CF record. Same failure mode that killed Session 30-followup's wta_challenger probe.
+3. ~~**Survivorship floor hard-fails: `n_no_won = 0` across every cohort.**~~ **[FALSIFIED — post-session correction May 1.]** This claim was a verification-query error: the brief's Step-3 script checked `r.get('market_result') == 'no_won'` but the canonical schema enum in `clv.json` is `'no'` / `'yes'` (1005 + 865 records — verified directly). The discovery agent's heuristic ([counterfactual_hotspots.py:64](tools/discovery_agent/heuristics/counterfactual_hotspots.py:64)) checks `== 'no'` and is **correct**. **Survivorship actually PASSES for every cohort.** Layers 1 and 2 alone still kill the retuning move (see corrected table below) — the Outcome C HOLD remains the right decision, but on Layer 1 (no tunable threshold) alone, not on three independent layers as originally written.
 
-**Corrected cross-cohort numbers (`skipped_by_gate == 'no_vol_growth_first_seen' AND clv_cents IS NOT NULL`):**
+**Corrected cross-cohort numbers (`skipped_by_gate == 'no_vol_growth_first_seen' AND clv_cents IS NOT NULL`, `market_result == 'no'/'yes'` per actual schema):**
 
-| Sport | n | Mean CLV | Median | +CLV% | n_no_won | n_yes_won |
-|---|---|---|---|---|---|---|
-| wta_challenger | 24 | +0.17¢ | +11.00¢ | 83% | 0 | 0 |
-| atp_challenger | 24 | +12.88¢ | +22.00¢ | 88% | 0 | 0 |
-| nba | 20 | -13.10¢ | +17.00¢ | 65% | 0 | 0 |
-| atp | 20 | +9.55¢ | +25.00¢ | 85% | 0 | 0 |
-| wta | 20 | +0.60¢ | +30.50¢ | 75% | 0 | 0 |
-| nhl | 14 | +5.86¢ | +28.50¢ | 79% | 0 | 0 |
-| ipl | 8 | -42.88¢ | -71.00¢ | 38% | 0 | 0 |
-| **Combined** | **130** | **-0.05¢** | **+19¢** | **77%** | **0** | **0** |
-| Outlier-trimmed (drop top-1 + bottom-1) | 128 | +0.40¢ | — | 77% | — | — |
+| Sport | n | Mean CLV | Median | +CLV% | n_no | n_yes | Survivorship (n_no >= 3)? |
+|---|---|---|---|---|---|---|---|
+| wta_challenger | 24 | +0.17¢ | +11.0¢ | 83% | **4** | 20 | PASS |
+| atp_challenger | 24 | +12.88¢ | +22.0¢ | 88% | **3** | 21 | PASS |
+| nba_game | 20 | −13.10¢ | +17.0¢ | 65% | **7** | 13 | PASS |
+| atp | 20 | +9.55¢ | +25.0¢ | 85% | **3** | 17 | PASS |
+| wta | 20 | +0.60¢ | +30.5¢ | 75% | **5** | 15 | PASS |
+| nhl_game | 14 | +5.86¢ | +28.5¢ | 79% | **3** | 11 | PASS |
+| ipl | 8 | −42.88¢ | −71.0¢ | 38% | **5** | 3 | PASS |
+| **Combined** | **130** | **−0.05¢** | **+19¢** | **77%** | **30** | **100** | **PASS** |
+| Outlier-trimmed (drop top-1 + bottom-1) | 128 | +0.40¢ | — | — | — | — | — |
 
-**Reconciliation with the discovery-agent finding.** atp / nhl numbers match within rounding. atp_challenger drifted (agent: n=21 +10.4¢ 85% n_no_won=3 → actual: n=24 +12.88¢ 88% n_no_won=0); n drift is consistent with continued accumulation, but the agent's `n_no_won=3` claim does not reproduce. The headline "+EV across 3 cohorts" was sport-selection-biased: nba (-13¢), ipl (-43¢), and to a lesser extent wta/wta_challenger pull the combined signal flat once you don't pre-select. Cross-cohort distribution is heavily bimodal — 30 records cluster in [-93¢, -65¢]; 100 cluster in [+6¢, +35¢]. Mean masks this; median (+19¢) isn't the right summary either.
+**Reconciliation with the discovery-agent finding (corrected).** Agent's per-cohort numbers reproduce within rounding/sample-drift on the corrected schema (atp_challenger agent n_no_won=3 → actual n_no=3 — match). The "+EV across 3 cohorts" headline was real signal at the per-cohort level — atp_challenger n=24 +12.88¢ at 88% +CLV with n_no=3 actually CLEARS Session 38a's evidence shape. **What disqualifies the retuning move is Layer 1 (no tunable threshold) and the cross-cohort cherry-pick observation, NOT survivorship.** Cross-cohort distribution is heavily bimodal — 30 records cluster in [−93¢, −65¢]; 100 cluster in [+6¢, +35¢]. The 3 agent-flagged cohorts (atp +9.55¢, atp_challenger +12.88¢, nhl_game +5.86¢) sit on the positive side; nba_game (−13¢), ipl (−43¢), wta (+0.60¢), wta_challenger (+0.17¢) sit on the flat-or-negative side. Combined mean: −0.05¢ raw / +0.40¢ trimmed.
+
+**Defense-in-depth observation.** Layer 1 saved the right outcome from a wrong-rationale path. If the gate HAD been tunable, the falsified Layer 3 disqualification would have produced a HOLD on bad evidence — better than shipping a wrong tune, but worse than a HOLD on the correct rationale. The structural disqualification in Layer 1 made the verification error harmless this time. Future sessions touching `clv.json` MUST cross-reference the new "Canonical Data Schema Reference" section (added below by post-session correction) to prevent this from masking a real signal.
 
 **Decision: Outcome C (HOLD, doc-only).** Outcomes A and B are structurally N/A (no threshold to relax, no per-sport override surface — gate is in the OUTER `scan_live_matches` loop *before* `SPORT_PROFILES` lookup applies). Outcome D applies on the 3 agent-flagged cohorts at n=58, but the broader n=130 cross-cohort flatness is the more informative signal — it's not a sample-thinness problem, it's a "the heuristic surfaced a true cluster but the cluster has no actionable shape" problem.
 
@@ -3132,9 +3134,9 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 
 None are 10–20% threshold tweaks. Each is its own session-sized re-design with its own evidence requirements.
 
-**Out-of-scope mechanism note for Session 46 candidate (`no_vol_growth_idle`).** Brief explicitly held the idle gate out of this session. Verified anyway: `no_vol_growth_idle` n=98 also has `n_no_won=0` everywhere — same survivorship problem. When Session 46 opens, it'll need a different lens than the Session 38a CLV-distribution methodology to clear the floor. Filed here to save that future session a lap.
+~~**Out-of-scope mechanism note for Session 46 candidate (`no_vol_growth_idle`).** Brief explicitly held the idle gate out of this session. Verified anyway: `no_vol_growth_idle` n=98 also has `n_no_won=0` everywhere — same survivorship problem. When Session 46 opens, it'll need a different lens than the Session 38a CLV-distribution methodology to clear the floor. Filed here to save that future session a lap.~~ **[FALSIFIED post-session — same `'no_won'` vs `'no'` schema-value error. `no_vol_growth_idle` survivorship needs re-verification when Session 46 opens; the original "everywhere n_no_won=0" claim is unreliable.]**
 
-**Discovery-agent refinement candidate (filed for the existing 43b refinement queue, NOT actioned this session).** `counterfactual_hotspots` should require `n_no_won >= 1` per cohort (not just total CF count) before flagging severity NOTABLE. Gates that fire before any leader-side commit (like `no_vol_growth_first_seen`) can't accumulate `no_won` settlements by construction, so the heuristic should down-weight or carve them out — otherwise it surfaces directionally meaningless +CLV clusters and burns retuning sessions on them.
+~~**Discovery-agent refinement candidate (filed for the existing 43b refinement queue, NOT actioned this session).** `counterfactual_hotspots` should require `n_no_won >= 1` per cohort (not just total CF count) before flagging severity NOTABLE. Gates that fire before any leader-side commit (like `no_vol_growth_first_seen`) can't accumulate `no_won` settlements by construction, so the heuristic should down-weight or carve them out — otherwise it surfaces directionally meaningless +CLV clusters and burns retuning sessions on them.~~ **[RETRACTED post-session.]** The heuristic ALREADY requires `n_no_won >= 3` ([counterfactual_hotspots.py:24,65](tools/discovery_agent/heuristics/counterfactual_hotspots.py:24)) and is doing so correctly with the right schema-value check (`market_result == 'no'`). The agent is NOT buggy here. The genuine refinement candidate this session surfaced is different: **`counterfactual_hotspots` should report cross-cohort context alongside per-cohort flags** — when 3 of 7 cohorts on a given gate are positive but the cross-cohort mean is flat, the report should show that context so future sessions don't act on cherry-picked signal. Filed for the 43b refinement queue.
 
 **Watch-list trigger (re-investigate when ALL of):**
 - A future session has shipped a structural change to the cycle-delay (e.g., `_prev_scan_volumes` persistence across restarts, OR a first-sight entry path) — then there's something to actually back-test.
@@ -3196,6 +3198,110 @@ Until all three fire, it's not a candidate.
 Battle Scar exemptions (#9 vig_stack auto-exit, #5 edge price basis, #12 settlement idempotency) preserve EXPLICITLY-DOCUMENTED known-correct behavior against accidental regression. Defense is correct when there's a paper trail showing WHY the current behavior is correct. Defense is WRONG when the current behavior just happens to work and we don't know why — that's where investigation belongs.
 
 **Tyler's frame (his words, paraphrased):** "Always look for new possibilities, don't be stuck and tied to what we are doing." This is the prime directive. Every session should ask "what new edge could I find?" before asking "what should I preserve?"
+
+---
+
+## Canonical Data Schema Reference (read SECOND — before any session that touches state files)
+
+**Why this section exists.** Two schema mistakes in 24 hours (May 1):
+- Session 43b plan-time fix: `outcome_clv_cents` → `clv_cents`, `outcome_settlement` → `market_result`, `skip_reason` → `skipped_by_gate` for `clv.json`
+- Session 45 verification error: `market_result == 'no_won'` → actual canonical is `'no'` (n_no_won counter returned 0 across all cohorts; correct count is 30/130). Falsified Layer-3 disqualification; Layer-1 saved the right outcome on a different rationale than documented. See Session 45 entry above for full forensic.
+
+If a third instance happens, the next decision could ride on falsified evidence. This reference is the single source of truth.
+
+### `bot/state/clv.json` records
+
+```python
+{
+  "trade_id": str,                     # 'PAPER-...' for real trades; 'CF-{scan_id}-{ticker}' for counterfactuals
+  "ticker": str,                       # full Kalshi ticker
+  "side": "yes" | "no",                # the side our bot WOULD have / DID enter on
+  "entry_price": float,                # cents 0-100, intended entry price
+  "fair_value": float,                 # cents 0-100, our model's fair value at scan time
+  "recorded_at": str,                  # ISO 8601 UTC, when CF/trade was recorded
+  "settled_at": str | None,            # ISO 8601 UTC, when market settled (null until settlement)
+  "status": "open" | "settled" | "counterfactual_open" | "counterfactual_settled",
+  "skipped_by_gate": str | None,       # reject reason (CFs only — real trades don't carry this). Canonical name; NOT 'skip_reason'.
+  "clv_cents": float | None,           # CLV at settlement, signed. Canonical; NOT 'outcome_clv_cents'.
+  "market_result": "yes" | "no" | None,  # which side actually won. Canonical values 'yes'/'no'; NOT 'yes_won'/'no_won'. None until settlement.
+  "sport": str | None,                 # sport family from ticker prefix
+  "regime": dict,                      # 5-axis: time_of_day, day_of_week, sport_phase, event_horizon_hr, match_phase
+  "extra": dict,                       # gate-specific: distance-from-threshold, no_ask_prob, floor, etc.
+}
+```
+
+**Counterfactual filter pattern (canonical):**
+```python
+cfs = [r for r in clv if r.get("status") == "counterfactual_settled"
+       and r.get("skipped_by_gate") is not None
+       and r.get("clv_cents") is not None]
+```
+
+**Survivorship n_no count (canonical):**
+```python
+n_no = sum(1 for r in cfs if r.get("market_result") == "no")
+```
+NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_no=0 across every cohort. Actual is n_no=30/130 on the no_vol_growth_first_seen cohort.
+
+### `bot/state/decisions.jsonl` records
+
+```python
+{
+  "ts": str,                           # ISO 8601 UTC; canonical timestamp field for decisions (not 'timestamp')
+  "ticker": str,
+  "opp_type": str,                     # rich vocabulary: vig_stack_series, vig_stack_futures, live_momentum, etc.
+  "edge": float,                       # signed
+  "gates": dict,                       # per-gate boolean pass/fail
+  "decision": "accept" | "reject",     # canonical values; NOT 'take' / 'skip'
+  "reason": str,                       # reject reason (when decision='reject'); NOT 'skip_reason'
+  "extra": dict,                       # gate-specific context
+  "regime": dict,                      # 5-axis tag
+}
+```
+
+### `bot/state/paper_trades.json` records
+
+```python
+{
+  "id": str,                           # 'PAPER-...'
+  "ticker": str,
+  "type": str,                         # canonical opp_type field on paper_trades; NOT 'opp_type'. Vocabulary is COARSER than decisions.opp_type — only 'vig_stack' / 'live_momentum' (no series/futures distinction). Vocabulary mismatch is intentional (Session 43b finding).
+  "side": "yes" | "no",
+  "entry_price": float,                # 0.0-1.0 dollars (NOT cents)
+  "exit_price": float | None,
+  "contracts": int,
+  "edge_at_entry": float,
+  "confidence": float,                 # 0.0-1.0
+  "pnl": float | None,                 # dollars, signed
+  "status": "open" | "won" | "lost" | "exited_early" | "cancelled_stale",
+  "exit_reason": str | None,           # 'auto_take_profit' | 'auto_cut_loss' | 'edge_flipped' | 'manual' | etc. Persisted forward-only since Session 36.
+  "timestamp": str,                    # ISO 8601 UTC, entry time. Canonical for paper_trades (NOT 'ts' which decisions.jsonl uses)
+  "resolved_at": str | None,           # settlement time
+  # Note: paper_trades.json has NO 'sport' field — derive from ticker prefix
+}
+```
+
+### Ticker prefix → sport map (extend the bot's `_TICKER_PREFIX_TO_SPORT` if you need granularity)
+
+| Prefix | Sport (per-game) | Prefix | Sport (futures) |
+|---|---|---|---|
+| `KXMLBGAME-` | mlb_game | `KXMLB-` | mlb_futures |
+| `KXNBAGAME-` | nba_game | `KXNBA-` | nba_futures |
+| `KXNHLGAME-` | nhl_game | `KXNHL-` | nhl_futures |
+| `KXATPMATCH-` | atp | `KXATPCHALLENGERMATCH-` | atp_challenger |
+| `KXWTAMATCH-` | wta | `KXWTACHALLENGERMATCH-` | wta_challenger |
+| `KXUFC` | ufc | `KXIPL` | ipl |
+| `KXHIGH*` | weather_high | `KXLOW*` | weather_low |
+| `KXINX*` | index | | |
+
+**Discovery agent uses `tools/discovery_agent/_sport_classifier.sport_from_ticker_distinguished()` for the per-game vs futures distinction. Bot code uses `bot/scanner.py`/`bot/live_watcher.py` `_TICKER_PREFIX_TO_SPORT` (coarser — doesn't distinguish per-game from futures). Don't conflate; reuse the right one for the layer.**
+
+### How to use this section
+
+- **Every session prompt that reads/writes any state file MUST cross-reference this section as Step 0.**
+- If you need a field name or value enum and you're tempted to guess, STOP and check here.
+- If this section disagrees with what you find on disk, the disk wins — but flag the discrepancy in your session entry so this reference can be corrected.
+- When a new session ships a schema change, that session's entry must include the corresponding update to this section.
 
 ---
 
