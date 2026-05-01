@@ -2997,7 +2997,49 @@ The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decis
 
 ---
 
-### Session 43b — Discovery Agent: 6 additional heuristics (planned, ~2.5h coder, AFTER 43a ships)
+### ☑ Session 43b — Discovery Agent: 6 additional heuristics + cohort_emergence refinement (May 1, shipped — 3 HIGH counterfactual findings on day-2 run)
+
+**Shipped:** 8 commits pushed to origin/main. Heuristics added: `threshold_proximity`, `counterfactual_hotspots`, `universe_gap` (reframed: decisions vs current universe, no archive dir needed), `live_tick_anomalies` (streaming + memory-safety verified), `cadence_outcome`, `log_error_spike` (streaming + memory-safety verified). Plus the `cohort_emergence` refinement folded in from Session 43-investigate (`unique_tickers_recent` + `accepts_recent` + `paper_trades_recent` evidence; severity demotes to `info` when accepts==0 AND trades==0; futures-vs-per-game sport classification via new `_sport_classifier.py` wrapper, `mlb_game` vs `mlb_futures` etc.).
+
+**Tests:** 1309 full repo tests pass (was 1235 baseline + 74 new). 108 discovery tests. 0 regressions. SFPHI founding-example regression test extended for the new evidence keys, still green.
+
+**Real-data e2e (May 1 run):**
+
+| Heuristic | Findings | Notes |
+|---|---|---|
+| `threshold_proximity` | 0 | post-rotation; 12 `non_stable_below_weather_floor` rejects spread across multiple sports — below MIN_REJECTS_PER_BUCKET threshold within the 14d window. The 417-rejection lead from Session 43-investigate doesn't fire here yet because the bucketing is per-sport — once volume per sport accumulates this should surface. |
+| `counterfactual_hotspots` | **6 real findings, 3 HIGH** | see breakdown below |
+| `universe_gap` | 0 | universe + decisions in sync today |
+| `live_tick_anomalies` | 0 | no anomalies in current ticks; 100k-tick fixture <50MB peak memory |
+| `cadence_outcome` | skipped cleanly | tracker_cadence rotated; schema-aware skip working |
+| `log_error_spike` | 0 | clean operational state; 100k-line fixture <50MB peak memory |
+
+**The 3 HIGH counterfactual_hotspots findings (day-2 run):**
+
+1. **`no_leader / wta` +20¢ mean CLV (n=15)** — **THE big lead.** WTA is currently DISABLED per Session 38a-2 (Outcome B, doc-only). The discovery agent is now showing measurable +EV on the WTA `no_leader` skip bucket on a non-thin sample. Session 38a-2 explicitly deferred re-enable pending stronger evidence; this is exactly that. Mirrors the Session 38a ATP re-enable evidence shape (mean CLV + sample threshold). **Candidate Session 44.**
+2. **`no_leader / nhl_game` +22¢ mean CLV (n=19)** — `no_leader` is the live_momentum scanner-side gate that fires when the bot can't identify a clear leader in a market. +22¢ on n=19 means we're rejecting NHL-game opportunities where, in hindsight, the closing line moved favorably. Two possible mechanisms: (a) leader-detection logic is too strict for NHL games specifically, or (b) the `no_leader` bucket itself is signal we're misreading. Production code touch, not just config. **Candidate Session 45.**
+3. **`no_leader / atp` +9¢ mean CLV** — consistent with Session 38a's ATP re-enable direction. Session 38a re-validation already scheduled May 13; this finding adds independent corroboration. **No new session needed; folded into Session 38a re-validation evidence.**
+
+**The 3 cohort_emergence INFO findings (day-2 run)** confirm the refinement works as designed: cohorts with high decision counts but zero accepts/trades correctly demoted from `notable` to `info` (preventing the over-stated-lead failure mode that triggered Session 43-investigate yesterday).
+
+**Schema corrections caught at plan-time (NOT in code — saved a debug cycle):** `clv_cents` not `outcome_clv_cents`; `market_result` not `outcome_settlement`; `skipped_by_gate` is the canonical decision form; `no_price_below_floor` not `price_floor`; `low_volume` and `price_floor` reasons absent from real data; `bot.log` format is `[YYYY-MM-DD HH:MM:SS]` not ISO-T; `live_ticks` has no volume field (live_tick_anomalies tunable adjusted from MIN_VOLUME=100 → drop the volume gate). Good Phase-1 verification discipline.
+
+**What did NOT change.**
+- `bot/config.py` — untouched. `MOMENTUM_DISABLED_SPORTS` still `{"atp_challenger", "wta", "wta_challenger"}` (the 43b finding on WTA is a CANDIDATE for Session 44, not an auto-revert).
+- All bot code — untouched.
+- Bot state (paper_trades, positions, decisions, etc.) — untouched.
+- Bot still running under launchd; no restart needed (no production change).
+
+**Operating Posture observation (3rd time in 48h).** Day 1: SFPHI found, investigation showed it's a singleton + surfaced `non_stable_below_weather_floor` lead. Day 2: counterfactual_hotspots surfaces 3 HIGH findings, 1 of which directly contradicts a current production disable (WTA). The discovery agent is now consistently producing real leads on first-class production decisions. This is the search frontier the Operating Posture section called for. Investigations queued (44, 45) before defaulting to "build more heuristics."
+
+**Out of scope for this session — held for Session 44+:**
+- Re-enabling WTA based on the +20¢ finding (needs Session 44 investigation mirroring Session 38a methodology)
+- Investigating NHL `no_leader` (needs Session 45)
+- Re-running threshold_proximity on a longer lookback window to surface the `non_stable_below_weather_floor` lead
+
+---
+
+### Session 43b — Discovery Agent: 6 additional heuristics (original spec preserved)
 
 **Why.** 43a proves the framework with the 2 heuristics that catch SFPHI. 43b adds operational + correlation + streaming heuristics on the same chassis. Each is ~30 lines + a unit test — mostly mechanical once the framework exists.
 
