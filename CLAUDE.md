@@ -2895,6 +2895,132 @@ If any sport's per-trade live_momentum P&L worsens by ≥$0.50 vs current baseli
 
 ---
 
+### ☑ Session 43a — Discovery Agent framework + 2 SFPHI-catching heuristics (May 1, shipped — first real run produced unexpected lead)
+
+**Shipped commits** (7, all on origin/main): c3ecd19 findings, 500ff3f context+protocol, befb709 outlier_pnl, 487f51b cohort_emergence, fa38a04 main orchestrator, 41863c6 SFPHI regression test (P0), c731413 README + REPORT_CALENDAR row.
+
+**Tests:** 34/34 discovery tests pass; 1235/1235 full repo tests pass (no regressions).
+
+**First real-data run:** `python3 -m tools.discovery_agent.main` → 13 NEW findings, 0 errors, 0 skips. Outputs at [bot/state/discovery/discovery_report_2026-05-01.md](bot/state/discovery/discovery_report_2026-05-01.md) + `.jsonl`.
+
+**Headline findings:**
+1. **[HIGH] outlier_pnl: PAPER-4A16F5D2 dominates vig_stack/mlb cohort (97% of $177).** SFPHI surfaced exactly as the regression test asserts. Founding-example value-prop test passes on real data.
+2. **[NOTABLE] cohort_emergence: vig_stack_futures emerged across mlb (867 records), nba (599), nhl (583) in decisions.jsonl.** Plus 11 MORE emergent cohorts across other sports. **The bug-pair surface is broader than the SFPHI investigation suggested** — this is a real lead, not just a test pass. Followup: count unique trades (not decisions) per cohort and compute realized P&L per cohort to see whether the SFPHI mechanism (+$172 from broken-exemption × scanner-mis-classification) generalizes or is mlb-specific.
+
+**Scheduling:** launchd plist `com.hustle-agent.discovery` registered, daily 6:00 AM ET, RunAtLoad=false. First scheduled fire: May 2 6:00 AM ET.
+
+**Architecture proven:** Framework (DiscoveryContext loading 14 sources, Findings dataclass with fingerprint dedup, Heuristic Protocol with isolation, JSONL + markdown outputs) is solid enough that Session 43b is now mechanical — plug in 6 more heuristic files on the same chassis.
+
+**Caveat surfaced during plan-mode:** `tools/` is gitignored (preserves Session 22 / tick_backtest.py local-only discipline); discovery_agent ships via `.gitignore` exception (`!tools/discovery_agent/` + `!tools/discovery_agent/**`). Confirmed `tick_backtest.py` and other tools/ artifacts remain ignored as before.
+
+---
+
+### ☑ Session 43-investigate — vig_stack_futures cross-sport lead (May 1, doc-only, follow-up to Session 43a finding)
+
+**Why.** Session 43a discovery agent's first run flagged `cohort_emergence: vig_stack_futures emerged across mlb (867), nba (599), nhl (583)` plus 11 more emergent cohorts. Initial reading was "the SFPHI bug-pair surface is broader than thought." Operating Posture said: investigate the mechanism before leaning in. Read-only, no code change, no bot restart. Done in ~30 min directly via Python on bot/state/.
+
+**Methodology.** Pulled all `opp_type startswith 'vig_stack'` decisions from `bot/state/decisions.jsonl` (window 2026-04-29 → 2026-05-01, n=6379 total). Cross-referenced with `bot/state/paper_trades.json` (n=156 vig_stack trades) by ticker. Re-classified sport-from-ticker to disambiguate `KXMLB-*` (futures, 2028 settlement) from `KXMLBGAME-*` (per-game, this-week settlement) — the cohort_emergence finding had collapsed both into "mlb" because the original heuristic's `_TICKER_PREFIX_TO_SPORT` map didn't distinguish them.
+
+**Findings.**
+
+1. **The cohort_emergence finding was a TRUE-positive at the finding level but its raw counts were misleading.** Decomposing the 867 mlb decisions:
+   - `KXMLB-*` (long-dated MLB futures, settle 2028+): **862 decisions, 0% accept rate.** Correctly classified as vig_stack_futures, correctly all rejected by `edge_below_threshold` (716) and `non_stable_below_weather_floor` (140).
+   - `KXMLBGAME-*` (per-game MLB, the actual SFPHI bug-pair surface): **5 decisions, 1 accept = SFPHI itself.** Mechanism does NOT generalize.
+   - Same shape for nba (599 decisions = all KXNBA-* futures) and nhl (583 = all KXNHL-* futures). 0% accept, 0 trades produced.
+
+2. **The SFPHI mechanism is a SINGLETON.** Total trade-side population on the bug-pair surface (KXMLBGAME classified as vig_stack_futures): 1 settled trade (PAPER-4A16F5D2 = SFPHI itself, +$172.52). There is no broader cohort to lean into. Operating Posture asks "where else could this work?" — answer here: nowhere measurable. The +$172 stands as a fortunate one-off.
+
+3. **REAL NEW LEAD — `non_stable_below_weather_floor` is rejecting +EV opportunities on sports futures.** Example: `KXNBA-26-OKC` (Thunder championship futures) at **edge=+0.1148** (huge!) rejected because `no_ask_prob=0.48 < floor=0.93`. The gate's NAME suggests weather-original-intent (Session 36/37 territory) but the LOGIC is generic — it applies the 0.93 floor to every vig_stack opportunity regardless of sport. **417 such rejections across mlb/nba/nhl futures in 2 days** (140 mlb + 129 nba + 148 nhl). Hard to back-test directly because the futures don't settle until 2028, but the question is real: is the 0.93 floor sport-agnostic correctly, or is it leaving high-edge opportunities on the table specifically on sports futures where the no_ask_prob distribution is structurally different from weather? **Candidate Session 44.**
+
+4. **vig_stack as a strategy survives on outliers.** 125 settled vig_stack trades net **+$67.06 total / +$0.54 mean per-trade.** Per-sport rollup:
+   - mlb (KXMLBGAME): n=2, +$177.29 / +$88.65 mean — DOMINATED by SFPHI (+$172.52). Without SFPHI: n=1, +$4.77.
+   - weather_high (KXHIGHAUS/CHI/DEN/MIA/NY): n=106, **−$184.37 total / −$1.74 mean.** Net NEGATIVE.
+   - index (KXINX): n=17, +$83.05 / +$4.89 mean — dominated by 1 trade at +$81.49.
+   - Without the 2 outliers (SFPHI +$172 + KXINX-81): vig_stack would be **−$187 net across 123 trades, mean −$1.52.** Strategy is structurally outlier-dependent. **Candidate Session 45** — investigate whether the outlier shape is a real EV signal (we want to keep the variance) or whether we'd net higher EV by tightening entry to bet more selectively.
+
+5. **decisions.jsonl is windowed (~2 days back).** Coverage of vig_stack trades with decision records: 100% within window (20/20 post-2026-04-29 trades), 0% outside (0/136 pre-window trades). Benign — explains the "41 of 155 have decision records" observation. No phantom code path; just rotation.
+
+**What this changes about Session 43a's discovery agent.**
+
+The cohort_emergence heuristic correctly flagged a NEW cohort. But its raw decision-count metric (867/599/583) over-stated the lead because the same `vig_stack_futures` opp_type covers both legitimate long-dated futures (huge volume, 0% accept) AND the SFPHI-style mis-classifications (tiny volume, 1 trade). For Session 43b or a later refinement: **add a secondary signal to cohort_emergence — accept-rate-weighted decision count, OR trade-count alongside decision-count**. A cohort with 867 decisions / 0 trades is a different beast than a cohort with 5 decisions / 1 trade; the heuristic should distinguish them in the report.
+
+**What did NOT change.**
+- `bot/config.py` — untouched.
+- All bot code — untouched.
+- Discovery agent code — untouched (Session 43b will refine cohort_emergence; this finding logged for that session to incorporate).
+- Bot state (paper_trades, positions, decisions, etc.) — untouched.
+
+**Operating Posture observation.** The discovery agent did exactly what it was supposed to: surfaced a pattern within hours of going live. The investigation took the lead seriously but DID NOT lock anything in. Result: SFPHI mechanism dismissed as singleton (correct) AND a separate real lead surfaced (`non_stable_below_weather_floor` on futures). This is the workflow we want — surface, investigate, decide. Defensive instinct ("preserve SFPHI's mechanism") would have produced zero new value AND missed the floor-on-futures finding.
+
+**Candidate next sessions surfaced.**
+- **Session 44 candidate:** `non_stable_below_weather_floor` on sports futures — is the 0.93 floor sport-agnostic correctly, or sport-specific? Pull all 417 rejected opportunities, check `no_ask_prob` distribution per sport, decide whether to make the floor sport-keyed. ~1h analysis + small config change if directional.
+- **Session 45 candidate:** vig_stack outlier dependence — strategy is structurally outlier-dependent (-$187 without 2 outliers). Investigate whether outlier shape is real EV (keep variance) or noise we should filter (tighter entry, fewer trades, lower variance, possibly higher mean). ~1.5h analysis.
+- **Session 43b refinement (folded into the existing planned 43b):** cohort_emergence should report trade-count alongside decision-count, OR accept-rate-weighted decision count, so future cohort emergences distinguish "huge scanner activity, 0 trades" from "small scanner activity, real trades."
+
+---
+
+### Session 43a — Discovery Agent framework + 2 SFPHI-catching heuristics (original spec preserved)
+
+**Why.** Direct response to the SFPHI investigation: the +$172 vig_stack_futures trade only got investigated because Tyler pinged me about a Telegram notification. A daily heuristic scanner over all bot data would surface that class of pattern (cohort-of-1 outlier, brand-new opp_type emerging) automatically. Operating Posture section above codifies the prime directive ("always search for new possibilities"); this session builds the search loop. Pure heuristic Python — NO LLM in the loop, NO API calls (Tyler veto on cost + plugin/Claude-Agent-SDK route).
+
+**Architecture.** Three layers under `tools/discovery_agent/`:
+- `context.py` — `DiscoveryContext` dataclass that pre-loads ALL 14 bot data sources once per run (paper_trades, trade_history, live_journal, positions, bot_state, universe + archives, clv, decisions, predictions, tracker_cadence, order_microstructure, strategy_audit, outcomes.db) and exposes streaming iterators for the multi-GB ones (live_ticks.jsonl, bot.log). Heuristics never read files directly — they consume `ctx.X`.
+- `findings.py` — `Finding` dataclass with stable fingerprint hash. Cross-run dedup against the previous day's JSONL findings file produces NEW / STABLE / RESOLVED tags so the daily report leads with what's actually new.
+- `heuristics/base.py` — `Heuristic` Protocol declaring `data_sources: tuple[str, ...]` and `run(ctx) -> list[Finding]`. Schema-aware skip if a declared source is missing/empty. Per-heuristic try/except in `main.py` so one broken heuristic does not abort the run.
+
+**Heuristics in 43a (the 2 that catch SFPHI):**
+1. `outlier_pnl.py` — flags single trades that dominate their `(opp_type, sport)` cohort by `>=$75 AND >=30%` of cohort total absolute P&L. Severity bumps to `high` if >=50%. Catches PAPER-4A16F5D2 directly (100% of n=1 vig_stack_futures cohort).
+2. `cohort_emergence.py` — flags `(opp_type, sport)` cohorts with >=3 entries in the last 7d and ZERO in the prior 30d. Catches `vig_stack_futures (mlb)` as a brand-new cohort.
+
+**Outputs:** `bot/state/discovery/discovery_report_YYYY-MM-DD.md` (human-readable, NEW first) + `bot/state/discovery/discovery_findings_YYYY-MM-DD.jsonl` (machine-readable, drives next-run dedup).
+
+**Tests required (locked):**
+- `test_context.py` — all 14 sources load; missing-file → empty container + load_warnings; streaming iterators do NOT load full file into memory (>100k-line fixture, peak memory < 50MB).
+- `test_findings.py` — same evidence → same fingerprint; different evidence → different fingerprint; NEW/STABLE/RESOLVED classification across two runs.
+- `test_heuristic_isolation.py` — a deliberately-raising heuristic does not abort other heuristics; error appears in report's "Heuristic errors" section.
+- `test_sfphi_regression.py` — **value-prop test.** Fixture contains the real SFPHI paper_trade record. Asserts `outlier_pnl` emits `high` severity referencing PAPER-4A16F5D2 AND `cohort_emergence` emits `notable` severity referencing `vig_stack_futures`. If this test ever breaks, the agent has lost its founding example — treat regression as P0.
+- Per-heuristic positive/negative/boundary/missing-source unit tests for `outlier_pnl` and `cohort_emergence`.
+
+**Scheduling:** launchd plist at `~/Library/LaunchAgents/com.hustle-agent.discovery.plist`, daily 6:00 AM ET. Add row to `REPORT_CALENDAR.md`.
+
+**Out of scope (explicit):**
+- The other 6 heuristics (Session 43b).
+- LLM integration, plugin/Claude-Agent-SDK integration, Slack/Telegram alerts, web dashboard.
+- Auto-fix actions — agent is read-only and emits findings only. Tyler/I decide what to ship.
+- Modifying the bot, its config, or any production state.
+
+**Discipline.** Tunable thresholds at the top of each heuristic file (no magic numbers in logic). Read-only. No bot restart. After 43a ships, framework is proven and 43b just plugs in 6 more heuristic files.
+
+**Verification.** Tests green; manual `python3 -m tools.discovery_agent.main` produces both output files; SFPHI surfaces in NEW findings under both heuristics; `launchctl list | grep discovery` shows agent loaded.
+
+**Commit:** `session 43a: discovery agent framework + outlier_pnl/cohort_emergence — SFPHI regression test green`.
+
+---
+
+### Session 43b — Discovery Agent: 6 additional heuristics (planned, ~2.5h coder, AFTER 43a ships)
+
+**Why.** 43a proves the framework with the 2 heuristics that catch SFPHI. 43b adds operational + correlation + streaming heuristics on the same chassis. Each is ~30 lines + a unit test — mostly mechanical once the framework exists.
+
+**Heuristics in 43b:**
+3. `threshold_proximity.py` — for each rejected `decision` whose reject_reason maps to a tunable threshold (low_volume, low_edge, etc.), measure how close the value was to the threshold. Flag reject_reason buckets where >=5 rejects fell within 5% of the threshold. Cross-reference: of those near-misses, how many showed +CLV later? Sources: decisions, clv, universe.
+4. `counterfactual_hotspots.py` — group `clv` records by `(skip_reason, sport)`. Flag buckets with >=10 settled CFs AND mean_CLV >= 5¢ AND +CLV rate >= 60% AND n_no_won >= 3 (survivorship sanity). Direct automation of the manual query that drove Session 38a. Sources: clv.
+5. `universe_gap.py` — scan universe archives for the last 14 days; flag `(sport, market_type)` pairs that were present > 50% of snapshots but are absent from today's universe. Cross-reference decisions to disambiguate "Kalshi delisted" vs "scanner stopped seeing it." Sources: universe, universe_archives, decisions.
+6. `live_tick_anomalies.py` — STREAM live_ticks.jsonl. For each ticker, rolling window of WINDOW_TICKS=5; flag ticks where `abs(price - rolling_median) >= 15¢` AND volume >= 100. Report tickers with >=3 jumps in the lookback window; cross-check against open positions at the time. Sources: live_ticks_iter.
+7. `cadence_outcome.py` — for each settled paper_trade, compute median tracker cadence in the 1h window before exit. Bucket by cadence band (10/20/35/60/120s). Flag buckets where mean P&L is >=1 std dev below global mean. Direct test of "does the bot exit late when the cadence loop is slow?" — Session 39 territory measured in P&L terms. Sources: tracker_cadence, paper_trades.
+8. `log_error_spike.py` — STREAM bot.log (current + last rotated). Parse ERROR/CRITICAL/exception/Traceback lines, fingerprint by first 80 chars (timestamp-stripped). Flag fingerprints where `recent_24h_rate / baseline_168h_rate >= 3.0` AND recent_count >= 5. Severity `high` if >=10× and recent_count >= 20. Would have flagged the Apr 30 12-hour wedge within the first run. Sources: bot_log_iter.
+
+**Tests required:** per-heuristic positive/negative/boundary/missing-source unit tests. Memory-safety regression test for both streamers (live_ticks_iter, bot_log_iter) — large fixture, peak memory < 50MB. Re-run the SFPHI regression test from 43a to confirm 43b additions didn't perturb it.
+
+**Out of scope:** 9th heuristic (e.g., strategy-config drift), notification routing, auto-fix.
+
+**Refinement folded in from Session 43-investigate (May 1):** the existing `cohort_emergence` heuristic over-stated the SFPHI lead because it counted decision records, not unique tickers or accept-rate-weighted volume. While 43b is open, also extend `cohort_emergence` evidence to include **(a) unique-ticker count, (b) accept count via `decision=='accept'` in the cohort window, and (c) refined sport classification distinguishing `KX{MLB,NBA,NHL}-` futures from `KX{MLB,NBA,NHL}GAME-` per-game**. A cohort with 867 decisions / 0 accepts is a different beast than a cohort with 5 decisions / 1 accept; the heuristic should distinguish them in the report. This is a small evidence-dict expansion + one extra ticker-prefix branch — not a new heuristic.
+
+**Verification:** Full e2e run on real bot data produces findings from all 8 heuristics. Tests green (43a tests + 43b tests + new cohort_emergence sub-tests for ticker/accept distinguishing). README in `tools/discovery_agent/` updated with the 6 new heuristics + the cohort_emergence refinement.
+
+**Commit:** `session 43b: discovery agent — 6 additional heuristics (threshold/counterfactual/universe/tick/cadence/log) + cohort_emergence refinement (ticker-count + accept-rate, futures-vs-per-game)`.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
