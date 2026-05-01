@@ -39,6 +39,117 @@ Declared but not currently on disk (skip cleanly with a load_warnings entry):
 A future heuristic that requires either will skip with a "skipped: missing
 sources [...]" entry in the report's errors section.
 
+## Canonical Data Schema (READ BEFORE EDITING ANY HEURISTIC)
+
+**Why this section exists.** Two schema mistakes in 24 hours during the May 1
+Session 43b/44/45 cycle:
+- Session 43b plan-time fix: `outcome_clv_cents` → `clv_cents`,
+  `outcome_settlement` → `market_result`, `skip_reason` → `skipped_by_gate`
+  for `clv.json` records
+- Session 45 verification error: `market_result == 'no_won'` when actual
+  canonical value is `'no'`. Returned 0 across all cohorts; correct count
+  was 30/130. Falsified a Layer-3 disqualification — Layer-1 (no tunable
+  threshold) saved the right outcome on a different rationale than documented
+
+If a third instance happens, the next decision could ride on falsified
+evidence. Single source of truth is `CLAUDE.md` "Canonical Data Schema
+Reference" section; mirrored here for coder context. **If this section
+disagrees with what you find on disk, the disk wins — but flag the
+discrepancy and update both this README and CLAUDE.md in the same commit.**
+
+### `bot/state/clv.json` records
+
+| Field | Type | Values / Notes |
+| --- | --- | --- |
+| `trade_id` | str | `'PAPER-...'` for real trades; `'CF-{scan_id}-{ticker}'` for counterfactuals |
+| `ticker` | str | full Kalshi ticker |
+| `side` | str | `'yes'` \| `'no'` — the side our bot WOULD have / DID enter on |
+| `entry_price` | float | cents 0-100, intended entry price |
+| `fair_value` | float | cents 0-100, model's fair value at scan time |
+| `recorded_at` | str | ISO 8601 UTC, when CF/trade was recorded |
+| `settled_at` | str \| None | ISO 8601 UTC, when market settled (null until settlement) |
+| `status` | str | `'open'` \| `'settled'` \| `'counterfactual_open'` \| `'counterfactual_settled'` |
+| **`skipped_by_gate`** | str \| None | reject reason (CFs only — real trades skip this). **NOT `'skip_reason'`** |
+| **`clv_cents`** | float \| None | CLV at settlement, signed. **NOT `'outcome_clv_cents'`** |
+| **`market_result`** | str \| None | `'yes'` \| `'no'` — which side actually won. **NOT `'yes_won'` / `'no_won'`** (Session 45 error). None until settlement |
+| `sport` | str \| None | sport family from ticker prefix |
+| `regime` | dict | 5-axis: time_of_day, day_of_week, sport_phase, event_horizon_hr, match_phase |
+| `extra` | dict | gate-specific: distance-from-threshold, no_ask_prob, floor, etc. |
+
+**Counterfactual filter pattern (canonical):**
+```python
+cfs = [r for r in clv if r.get("status") == "counterfactual_settled"
+       and r.get("skipped_by_gate") is not None
+       and r.get("clv_cents") is not None]
+```
+
+**Survivorship n_no count (canonical):**
+```python
+n_no = sum(1 for r in cfs if r.get("market_result") == "no")
+```
+**NOT `'no_won'`.** This is the exact bug that produced the falsified
+Layer-3 in Session 45. Reproduce by checking the agent's
+`counterfactual_hotspots.py:64` — the heuristic uses `== "no"` and is
+correct.
+
+### `bot/state/decisions.jsonl` records
+
+| Field | Type | Values / Notes |
+| --- | --- | --- |
+| **`ts`** | str | ISO 8601 UTC. Canonical timestamp for decisions. **NOT `'timestamp'`** (paper_trades uses that) |
+| `ticker` | str | |
+| **`opp_type`** | str | rich vocabulary: `vig_stack_series`, `vig_stack_futures`, `live_momentum`, etc. **DIFFERENT vocabulary from `paper_trades.type`** — DO NOT normalize |
+| `edge` | float | signed |
+| `gates` | dict | per-gate boolean pass/fail |
+| **`decision`** | str | `'accept'` \| `'reject'`. **NOT `'take'` / `'skip'`** |
+| **`reason`** | str | reject reason (when `decision='reject'`). **NOT `'skip_reason'`** |
+| `extra` | dict | gate-specific context |
+| `regime` | dict | 5-axis tag |
+
+### `bot/state/paper_trades.json` records
+
+| Field | Type | Values / Notes |
+| --- | --- | --- |
+| `id` | str | `'PAPER-...'` |
+| `ticker` | str | |
+| **`type`** | str | canonical opp_type field on paper_trades. **NOT `'opp_type'`**. Vocabulary is COARSER than `decisions.opp_type` — only `'vig_stack'` / `'live_momentum'` (no series/futures distinction). Vocabulary mismatch is intentional |
+| `side` | str | `'yes'` \| `'no'` |
+| `entry_price` | float | **0.0-1.0 dollars (NOT cents)** — different unit from clv.json |
+| `exit_price` | float \| None | dollars |
+| `contracts` | int | |
+| `edge_at_entry` | float | |
+| `confidence` | float | 0.0-1.0 |
+| `pnl` | float \| None | dollars, signed |
+| `status` | str | `'open'` \| `'won'` \| `'lost'` \| `'exited_early'` \| `'cancelled_stale'` |
+| `exit_reason` | str \| None | `'auto_take_profit'` \| `'auto_cut_loss'` \| `'edge_flipped'` \| `'manual'` \| etc. Forward-only persistence since Session 36 (Apr 29) |
+| **`timestamp`** | str | ISO 8601 UTC entry time. **NOT `'ts'`** (decisions.jsonl uses that) |
+| `resolved_at` | str \| None | settlement time |
+
+**Note:** `paper_trades.json` has NO `sport` field — derive from ticker prefix
+via `_sport_classifier.sport_from_ticker_distinguished()`.
+
+### Ticker prefix → sport map
+
+The discovery agent's `_sport_classifier.sport_from_ticker_distinguished()`
+distinguishes per-game from futures:
+
+| Prefix | Sport (per-game) | Prefix | Sport (futures) |
+| --- | --- | --- | --- |
+| `KXMLBGAME-` | `mlb_game` | `KXMLB-` | `mlb_futures` |
+| `KXNBAGAME-` | `nba_game` | `KXNBA-` | `nba_futures` |
+| `KXNHLGAME-` | `nhl_game` | `KXNHL-` | `nhl_futures` |
+| `KXATPMATCH-` | `atp` | `KXATPCHALLENGERMATCH-` | `atp_challenger` |
+| `KXWTAMATCH-` | `wta` | `KXWTACHALLENGERMATCH-` | `wta_challenger` |
+| `KXUFC` | `ufc` | `KXIPL` | `ipl` |
+| `KXHIGH*` | `weather_high` | `KXLOW*` | `weather_low` |
+| `KXINX*` | `index` | | |
+
+**The bot's `_TICKER_PREFIX_TO_SPORT` map (in `bot/scanner.py` /
+`bot/live_watcher.py`) is COARSER** — it doesn't distinguish per-game from
+futures. Don't conflate. Discovery agent always uses
+`_sport_classifier.sport_from_ticker_distinguished()`; bot code uses
+`_TICKER_PREFIX_TO_SPORT`.
+
 ## Heuristics shipped
 
 ### Session 43a (May 1)
