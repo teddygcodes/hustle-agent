@@ -12,6 +12,7 @@ from .heuristics.cadence_outcome import CadenceOutcome
 from .heuristics.cohort_emergence import CohortEmergence
 from .heuristics.counterfactual_hotspots import CounterfactualHotspots
 from .heuristics.live_tick_anomalies import LiveTickAnomalies
+from .heuristics.log_error_spike import LogErrorSpike
 from .heuristics.outlier_pnl import OutlierPnl
 from .heuristics.threshold_proximity import ThresholdProximity
 from .heuristics.universe_gap import UniverseGap
@@ -24,6 +25,7 @@ DEFAULT_HEURISTICS = [
     UniverseGap(),
     LiveTickAnomalies(),
     CadenceOutcome(),
+    LogErrorSpike(),
 ]
 SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
 
