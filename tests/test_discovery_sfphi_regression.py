@@ -109,17 +109,33 @@ def test_sfphi_surfaces_in_outlier_pnl(tmp_path: Path):
 
 
 def test_vig_stack_futures_surfaces_in_cohort_emergence(tmp_path: Path):
+    """SFPHI ticker is KXMLBGAME-* (per-game) so Session 43b classifies it as
+    'mlb_game' (not just 'mlb' as Session 43a did). Severity is notable/high
+    because the fixture's 5 decisions include accept records → cohort produces
+    accepts_recent >= 1, escaping the 'info' demotion."""
     _seed_sfphi_fixture(tmp_path)
     out = agent_main.run(repo=tmp_path)
     vsf = [
         f for f in out["all_findings"]
         if f.heuristic == "cohort_emergence"
         and f.evidence.get("opp_type") == "vig_stack_futures"
-        and f.evidence.get("sport") == "mlb"
+        and f.evidence.get("sport") == "mlb_game"
     ]
     assert len(vsf) == 1
     assert vsf[0].severity in ("notable", "high")
     assert vsf[0].evidence["source"] == "decisions"
+    # Session 43b refinement: new evidence keys present, semantics correct
+    assert vsf[0].evidence["accepts_recent"] >= 1, (
+        "SFPHI fixture seeds 5 vig_stack_futures decisions all with decision='accept'; "
+        "accepts_recent should reflect that"
+    )
+    assert vsf[0].evidence["unique_tickers_recent"] >= 1
+    # paper_trades_recent for the DECISIONS-side cohort is 0 BY DESIGN: SFPHI's
+    # paper_trade has type='vig_stack' but the decisions cohort is opp_type=
+    # 'vig_stack_futures'. The vocabulary mismatch is the bug-pair signal — the
+    # join via paper_trade.type == cohort.opp_type intentionally does NOT bridge.
+    # See test_paper_trades_use_type_field_not_opp_type for the vocab-policy lock.
+    assert vsf[0].evidence["paper_trades_recent"] == 0
 
 
 def test_both_findings_appear_in_markdown_report(tmp_path: Path):
