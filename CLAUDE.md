@@ -3389,6 +3389,57 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 
 ---
 
+### ☑ Session 51 — Strategy Lab v1: rapid hypothesis prototyping for new strategies (May 2 early hours, ~2.5h coder, no production code)
+
+**Trigger.** Tyler's directive throughout May 1: "always look for new possibilities" + "i want strategy prototyping too." Session 48 (`concurrent_attack_angles`) surfaces candidate new strategies daily; without a fast prototyping path, acting on a candidate means building a production scanner + wiring into ACTIVE_STRATEGIES + restarting bot + waiting weeks for trades + settlements before knowing if the idea even works. **Strategy Lab is the bridge:** write a tiny `def evaluate(market) -> CandidateOpportunity | None` function, run it against historical universe + clv data, get a hypothetical-P&L report in seconds.
+
+**What shipped (commit [1dc703f](https://github.com/teddygcodes/hustle-agent/commit/1dc703f) on main).**
+
+1. **`tools/strategy_lab/`** — new directory with 7 tracked files (gitignored generally; re-included via `.gitignore` exception):
+   - `__init__.py`, `README.md` (8KB, "how to write a candidate" + "how to read a report" + lab limitations + canonical schema reference)
+   - `candidate.py` — `CandidateStrategy` Protocol + `CandidateOpportunity` dataclass
+   - `data_loader.py` — streams `universe.jsonl` over date range, builds `clv_lookup` keyed by ticker, builds `existing_decisions_by_ticker` for context
+   - `evaluator.py` — for each would-have-bet, finds matching clv records (±N hour window, configurable), computes hypothetical P&L using settlement-anchored formula, aggregates per-sport + reason histogram + top winners/losers
+   - `driver.py` — CLI entry: `python3 -m tools.strategy_lab.driver --candidate <name> --days <N> --report-out <dir>`. Dynamically imports `tools.strategy_lab.candidates.<name>` and runs.
+   - `reports.py` — markdown rendering with **loud lab-limitations header** (settlement-anchored, no slippage, no exit-side, ±N hour clv match window)
+   - `candidates/example_total_points_under.py` — reference implementation (stub showing the contract; produces 0 would-have-bets on current data because KXNBAGAME-*-TOTAL markets aren't in the current universe — that's fine, lab handles 0-candidate runs gracefully)
+   - `candidates/__init__.py` + `candidates/.gitkeep` — placeholder so directory ships even if user candidates are gitignored
+   - `reports_out/.gitkeep` — same pattern; report markdown files themselves are gitignored
+2. **`.gitignore`** — extended with `!tools/strategy_lab/` + `!tools/strategy_lab/**` exception. Inner exception via `tools/strategy_lab/candidates/user_*.py` and `tools/strategy_lab/reports_out/*.md` patterns to keep user content + reports gitignored. Verified: example + driver + __init__ + .gitkeep tracked; user_*.py and *.md in reports_out ignored.
+3. **`tests/test_strategy_lab.py`** — **11 cases (10 brief-required + 1 bonus)**: protocol compliance, data_loader streams + window-filters by date, evaluator scores winner/loser/unresolved, reports renders zero-candidates AND with-candidates gracefully, **`test_canonical_schema_used_throughout`** (assertion-style: parses lab source files and asserts `'no_won'` substring is absent — schema discipline locked at commit-time, not just doc), driver smoke test on real data does not raise, **bonus**: archive-coverage test ensuring the lab handles gz-archived universe data gracefully.
+
+**Verification.**
+
+1. ☑ Targeted: 11/11 tests pass on `tests/test_strategy_lab.py` in 0.76s.
+2. ☑ Full repo: **1359 passed** (1348 baseline + 11 new), 0 regressions.
+3. ☑ Real-data manual run: `python3 -m tools.strategy_lab.driver --candidate example_total_points_under --days 14` → ran cleanly, 0 would-have-bets (acceptable per brief — example is a stub, may legitimately produce 0 matches on current universe). Report file at `tools/strategy_lab/reports_out/strategy_lab_example_total_points_under_2026-05-02.md`.
+4. ☑ `.gitignore` exception verified: 6 paths checked — driver/example/__init__.py/.gitkeep TRACKED; reports_out/anything.md and candidates/user_idea.py IGNORED. Discipline holds.
+5. ☑ `git diff bot/` empty. NO production code touched. 1 bot.main process running, no restart needed.
+
+**The schema-discipline test deserves a callout.** `test_canonical_schema_used_throughout` is a commit-time guard against the kind of `'no_won'` vs `'no'` schema-value mistake that almost falsified Session 45's disqualification. The canonical schema reference is now self-enforcing in BOTH places — CLAUDE.md "Canonical Data Schema Reference" section as documentation + this test as automated commit-time validator. Future commits that introduce the suffix-`_won` anti-pattern in lab source files will fail the test. **Compounding observability discipline.**
+
+**What did NOT change.**
+- `bot/` — entirely untouched. Lab is read-only on bot data, writes only to `tools/strategy_lab/reports_out/`.
+- Discovery agent code — untouched. Lab and discovery agent are complementary: agent surfaces candidates, lab evaluates them.
+- Bot state files — untouched.
+- Bot runtime — no restart needed.
+
+**The post-Session-48 → Session-51 workflow now exists.** When tomorrow's 6 AM agent run produces a NOTABLE/HIGH `concurrent_fire_candidate` (e.g., "live_momentum LEADER + total-points UNDER on same NBA game shows +5.2¢ concurrent CLV n=24"), the workflow is:
+1. Read the agent finding (suggests the strategy hypothesis)
+2. Write a 20-line candidate file in `tools/strategy_lab/candidates/`
+3. Run `python3 -m tools.strategy_lab.driver --candidate <name> --days 14`
+4. Read the markdown report — does the hypothesis hold on direct historical data?
+5. If YES → open a follow-up coder session to write a real production scanner
+6. If NO → discard the hypothesis; move to the next agent finding
+
+**Days/weeks → seconds** for the "is this idea worth pursuing?" decision. The bot now has both an autonomous search engine (discovery agent) AND a fast verification loop (lab) for new strategy ideas.
+
+**Operating Posture observation.** This is the **fourth discovery-agent-related shipment in 48 hours**: 43b cohort_emergence refinement, 47 cross-cohort context refinement, 48 frontier expansion (concurrent_attack_angles), and now 51 lab for acting on agent findings. Together: agent finds patterns → flags new strategy candidates → lab validates them in seconds → real scanner ships if validated. End-to-end "find new attack angles" loop closed. May 1's 12-session arc (43-investigate through 51) built and demonstrated this loop.
+
+**End of May 1 → May 2 dual-day arc.** Bot is now in its strongest-ever observability + discipline + search-frontier state. 1,359 tests, 0 failures. 9-heuristic discovery agent + per-sport sizing intervention + trade-record observability + strategy lab. Letting it run for 14 days from here will produce genuinely new information — both about the existing strategies (Session 49 sizing test, Session 38a ATP re-enable, Session 19c MOMENTUM_LEADER_MIN) AND about new attack angles (whatever 48 surfaces over the 14 daily runs). The 14-day clock is now at hour 0.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
