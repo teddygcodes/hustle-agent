@@ -225,6 +225,69 @@ Single source of truth: `MOMENTUM_DISABLED_SPORTS` is imported from
 `counterfactual_hotspots.py`: `CROSS_COHORT_MEAN_DEMOTION_FLOOR`,
 `CROSS_COHORT_TRIMMED_MEAN_FLOOR`, `DISABLED_SPORT_DEMOTION`.
 
+### Session 48 (May 1)
+
+| Name | What it catches | Tunables (constants at top of file) |
+| --- | --- | --- |
+| `concurrent_attack_angles` | Two finding types: (a) `concurrent_fire_candidate` — events we already trade where settled CFs on a *different* market type within the *same event* show +CLV concurrent with our primary winning trades. (b) `scanner_gap` — high-volume market types in `universe.jsonl` within series we trade that never appear in `decisions.jsonl`. | `LOOKBACK_DAYS=30`, `MIN_CONCURRENT_PAIRS=5`, `MIN_MEAN_CONCURRENT_CLV_CENTS=5.0`, `MIN_CONCURRENT_POSITIVE_RATE=0.65`, `MIN_CONCURRENT_N_NO=2`, `MIN_GAP_EVENTS=10`, `MIN_GAP_AVG_VOLUME_24H=1000`, `CONCURRENT_PAIR_WINDOW_HOURS=2`, `CROSS_FAMILY_MEAN_DEMOTION_FLOOR=0.0`, `DISABLED_SPORT_DEMOTION=True`, plus `HIGH_SEVERITY_*` bumps |
+
+### `concurrent_attack_angles` (Session 48, May 1)
+
+Tyler's directive: *"discover new ways to bet on the same markets we are
+already betting on. multiple strategies tied to the same game that if both
+proven to work can fire at the same time."*
+
+Search-frontier expander, not a refinement. The bot bets ONE attack angle per
+event today; Kalshi typically lists many market types per event. This heuristic
+surfaces where a winning view on one market should support edge on others.
+
+Two finding types from data we already collect:
+
+- **`concurrent_fire_candidate`**. For each event family the bot has touched in
+  the last 30d, find primary-strategy WINNING trades and count CFs in the same
+  event on a *different* market type within ±2h of the primary timestamp. If
+  ≥5 such pairs share `(series_ticker, primary_strategy, candidate_market_type)`
+  AND mean CF CLV ≥ +5¢ AND +CLV rate ≥ 65% AND n_no ≥ 2, emit. HIGH severity
+  bumps at n=15 / mean=10¢ / +CLV=75% / n_no=5. Survivorship guard mirrors
+  Session 47's `MIN_NO_WON_COUNT=3` shape.
+- **`scanner_gap`**. For each event family the bot has trades on, the
+  three-class universe split (`already_trading` / `scanned_not_taken` /
+  `never_scanned`) yields a per-event "what we never looked at" set. Aggregate
+  across the series by missing market type. If ≥10 events share the gap AND
+  avg 24h volume ≥ $1,000, emit. HIGH at ≥50 events with avg vol ≥ $5,000.
+
+**Cross-event-family demotion mirror (Session 47 pattern).** Per-tuple flags
+are preserved (data + Finding), but severity demotes when the *same*
+`(primary_strategy, candidate_market_type)` pair across ALL event-family
+cohorts has cross-family raw mean < 0¢ — same cherry-pick-failure mode
+Sessions 45/46 hit and Session 47 fixed for `counterfactual_hotspots`. Plus a
+disabled-sport demotion when the primary trade's sport is in
+`MOMENTUM_DISABLED_SPORTS` (relaxing the gate produces zero new actual primary
+trades; the candidate angle would be structurally neutralized downstream).
+
+**Schema discipline.** Only `universe.jsonl` carries `event_ticker`. For
+`decisions.jsonl` / `clv.json` / `paper_trades.json`, derive the event family
+via `ticker.rsplit("-", 1)[0]`. Tickers without a hyphen skip cleanly. CFs are
+filtered to `status == 'counterfactual_settled'` only. Survivorship counts use
+`market_result == 'no'` (canonical) — NOT `'no_won'` (Session 45 lesson).
+
+**Coarse `_market_type_from_ticker` v1.** `prefix/team` for alpha-only tails
+(team codes), `prefix/<letter><n>` for letter+digit tails (totals/spreads/period
+markets), `prefix/numeric` for digit-only tails. Sufficient to distinguish
+winner-side markets from totals/spreads within the same series. Player-prop
+sub-classification stays out of scope for v1.
+
+**Single source of truth.** `MOMENTUM_DISABLED_SPORTS` imported from
+`bot.config`; `SPORT_PREFIXES` imported from `bot.regime`. Vocab normalizer
+(`_normalize_sport_for_disabled_check`) reused from
+`counterfactual_hotspots.py`.
+
+**Acting on findings.** Treat surfaced candidates the way Sessions 44–46
+treated the original `counterfactual_hotspots` findings: cross-family context
+is built in to filter cherry-picks. NOTABLE/HIGH candidates that hold STABLE
+for ≥3 daily runs become Session 48b/48c/... (build a new scanner / extend an
+existing strategy). Auto-promotion is never the move.
+
 ## How to add a heuristic (Session 43b and beyond)
 
 1. Create `tools/discovery_agent/heuristics/<name>.py`:

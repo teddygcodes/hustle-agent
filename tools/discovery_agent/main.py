@@ -10,6 +10,7 @@ from .context import DEFAULT_REPO, DiscoveryContext
 from .findings import Finding, classify_findings, load_prior_findings, write_findings_jsonl
 from .heuristics.cadence_outcome import CadenceOutcome
 from .heuristics.cohort_emergence import CohortEmergence
+from .heuristics.concurrent_attack_angles import ConcurrentAttackAngles
 from .heuristics.counterfactual_hotspots import CounterfactualHotspots
 from .heuristics.live_tick_anomalies import LiveTickAnomalies
 from .heuristics.log_error_spike import LogErrorSpike
@@ -26,6 +27,7 @@ DEFAULT_HEURISTICS = [
     LiveTickAnomalies(),
     CadenceOutcome(),
     LogErrorSpike(),
+    ConcurrentAttackAngles(),  # Session 48
 ]
 SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
 
@@ -110,6 +112,47 @@ def _render_cross_cohort_context(f: Finding) -> str | None:
     )
 
 
+def _render_concurrent_attack_angles_context(f: Finding) -> str | None:
+    """Session 48: render the per-finding sub-block for concurrent_attack_angles.
+
+    Two finding-types share this hook:
+    - concurrent_fire_candidate → cross-event-family context paragraph
+      (mirrors Session 47's cross-cohort context for counterfactual_hotspots).
+    - scanner_gap → scope summary line.
+    """
+    if f.heuristic != "concurrent_attack_angles":
+        return None
+    ev = f.evidence
+    ftype = ev.get("finding_type")
+    if ftype == "concurrent_fire_candidate":
+        breakdown = ev.get("cross_family_breakdown") or []
+        breakdown_str = ", ".join(
+            f"{fam} {mean:+.1f}¢ (n={n})" for fam, n, mean in breakdown[:5]
+        ) or "—"
+        disabled_clause = (
+            " Primary sport is in MOMENTUM_DISABLED_SPORTS — relaxing here produces "
+            "zero new actual primary trades."
+            if ev.get("primary_sport_disabled") else ""
+        )
+        return (
+            f"**Cross-family context:** This pair "
+            f"({ev.get('primary_strategy', '?')} × {ev.get('candidate_market_type', '?')}) "
+            f"appears across {ev.get('cross_family_n_event_families', 0)} event-family "
+            f"cohorts ({breakdown_str}). Cross-family mean "
+            f"{ev.get('cross_family_mean_clv_cents', 0.0):+.2f}¢, "
+            f"{ev.get('cross_family_n_positive_event_families', 0)} positive cohorts."
+            f"{disabled_clause}"
+        )
+    if ftype == "scanner_gap":
+        return (
+            f"**Scope:** {ev.get('events_with_gap_count', 0)} events in series "
+            f"`{ev.get('series_ticker', '?')}` carry the gap; avg 24h volume "
+            f"${ev.get('avg_volume_24h', 0.0):,.0f}; "
+            f"{ev.get('total_ticker_count', 0)} total unscanned tickers."
+        )
+    return None
+
+
 def _sort_findings(findings: list[Finding]) -> list[Finding]:
     return sorted(findings, key=lambda f: (SEVERITY_RANK.get(f.severity, 99), f.heuristic, f.title))
 
@@ -147,6 +190,9 @@ def _write_markdown(
         cross_cohort = _render_cross_cohort_context(f)
         if cross_cohort:
             lines += [cross_cohort, ""]
+        concurrent = _render_concurrent_attack_angles_context(f)
+        if concurrent:
+            lines += [concurrent, ""]
         lines += [
             f"**Suggested action:** {f.suggested_action or '—'}",
             "",
