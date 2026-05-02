@@ -3264,6 +3264,45 @@ Until all three fire, it's not a candidate.
 
 ---
 
+### ☑ Session 48 — `concurrent_attack_angles` heuristic (May 1, ~2.5h coder, discovery agent only — 9th heuristic shipped)
+
+**Trigger.** Tyler's directive: "discover new ways to bet on the same markets we are already betting on. multiple strategies tied to the same game that if both proven to work can fire at the same time." Search-frontier expansion via the discovery agent — for every event the bot has touched, surface OTHER markets in the same event family that we could attack concurrently with the existing strategy. The bot should be the one finding new angles, not me enumerating them.
+
+**What shipped (commit [4220ed6](https://github.com/teddygcodes/hustle-agent/commit/4220ed6) on main).**
+
+1. [tools/discovery_agent/heuristics/concurrent_attack_angles.py](tools/discovery_agent/heuristics/concurrent_attack_angles.py) — 9th discovery heuristic. Two finding types:
+   - **`concurrent_fire_candidate`** — for each event family with at least one ALREADY_TRADING ticker + SCANNED_NOT_TAKEN sibling markets, computes whether the not-taken side shows positive concurrent CLV when the primary strategy wins. Surfaces concrete combos like "live_momentum LEADER on NBA games + total-points UNDER on the same game = X¢ CLV across n=Y pairs."
+   - **`scanner_gap`** — for event families where we trade some markets but never scan others (NEVER_SCANNED bucket), flags scanner-build candidates weighted by event count + 24h volume.
+2. Session 47 cross-family demotion ladder mirrored — primary-strategy × candidate-market-type pairs that look positive in one event family but flat across all event families get auto-demoted. Disabled-sport demotion preserved as cheap safety check.
+3. [tests/test_discovery_concurrent_attack_angles.py](tests/test_discovery_concurrent_attack_angles.py) — 15 cases (plan asked for 13; coder added 2 helper-sanity tests).
+4. [tools/discovery_agent/main.py](tools/discovery_agent/main.py) — registered `ConcurrentAttackAngles()` in `DEFAULT_HEURISTICS` + `_render_concurrent_attack_angles_context()` helper hooked alongside Session 47's renderer in NEW-section per-finding block.
+5. [tools/discovery_agent/README.md](tools/discovery_agent/README.md) — heuristics-table row + Session 48 refinement subsection mirroring 43b/47 structure.
+
+**Verification.**
+
+1. ☑ Targeted: 15/15 tests pass on `tests/test_discovery_concurrent_attack_angles.py`.
+2. ☑ Full discovery suite: 135/135 (120 baseline + 15) green.
+3. ☑ Full repo: **1336 passed** (1321 baseline + 15), 0 failures, 23.98s.
+4. ☑ SFPHI regression test: 4/4 PASS unchanged.
+5. ☑ Real-data manual run: 9/9 heuristics ran (was 8/8 pre-48); 7 NEW, 20 STABLE, 4 RESOLVED, 0 errors/skips.
+6. ☑ `git diff bot/` empty. Single bot process under launchd. No production change, no restart.
+
+**Real-data result on day 1: 0 findings emitted by `concurrent_attack_angles`.** Acceptable per plan. Today's universe-snapshot × traded-event-family overlap was minimal — many traded events are in the past (closed) and not in today's universe; many universe events haven't accumulated decisions yet. Tomorrow's 6 AM scheduled run is the natural first validator. As CFs accumulate over the next ~7 days and universe coverage stabilizes around currently-traded event families, daily runs will start surfacing concurrent-fire candidates and scanner gaps.
+
+**Smart coder deviation worth noting.** The plan specified `_market_type_from_ticker` returning series-prefixed forms like `"KXNBAGAME/team"` and `"KXNBAGAME/T<n>"`. Coder caught this on the first cross-family-negative test failure — the prefix form would have made the cross-family aggregator key incorrectly distinguish NBA-totals from NHL-totals (each living in its own series-prefixed bucket), defeating the demotion ladder's purpose. Coder switched to suffix-only (`"team"`, `"T<n>"`); test passed cleanly. Series identity is still preserved via the `series_ticker` field in evidence + the `event_family_pattern` (e.g., `"KXNBAGAME-*"`). README + tests reflect the corrected form. **Test-driven save** — exactly the kind of cross-cohort math subtlety the Session 47 demotion ladder was designed to catch, applied recursively to the cross-FAMILY math here.
+
+**What this heuristic enables.** Each shipped concurrent strategy from a Session 48 finding becomes another input to the next day's 48 run, surfacing further angles. The search frontier expands automatically — every morning, fresh "you should also be attacking these markets" findings appear if the data supports them. Acting on a NOTABLE/HIGH `concurrent_fire_candidate` that holds STABLE for 3+ daily runs opens a Session 48b/48c/etc. to prototype the new attack angle. Each new strategy then ALSO becomes a primary in future 48 runs. Compounding strategy expansion.
+
+**What did NOT change.**
+- Other heuristics (outlier_pnl, cohort_emergence, threshold_proximity, counterfactual_hotspots, universe_gap, live_tick_anomalies, cadence_outcome, log_error_spike) — untouched.
+- `bot/config.py`, `bot/live_watcher.py`, all bot code — untouched.
+- Bot state, scheduling, launchd plists — untouched.
+- The agent's existing daily report sections — only addition is the new heuristic's findings appearing in NEW/STABLE/RESOLVED slots.
+
+**Operating Posture observation.** This is the THIRD discovery-agent self-improvement / expansion session in 48 hours (43b cohort_emergence refinement, 47 cross-cohort context refinement, 48 search-frontier expansion). Three different shapes of "make the agent smarter / wider / deeper" — all driven by a single underlying directive: the bot is a search problem; the agent is the search engine; expand its frontier daily. The 9-heuristic chassis now reads from all 14 bot data sources via the canonical schema reference, surfaces both EXISTING-strategy leaks AND NEW-strategy candidates, and self-disqualifies cross-cohort/cross-family cherry-picks before they consume reactive sessions. Foundation in place for "all day every day" search.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
