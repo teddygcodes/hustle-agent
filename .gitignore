@@ -12,4 +12,10 @@ __pycache__/
 .DS_Store
 tools/*
 !tools/discovery_agent/
+!tools/strategy_lab/
+tools/strategy_lab/candidates/*
+!tools/strategy_lab/candidates/__init__.py
+!tools/strategy_lab/candidates/example_total_points_under.py
+tools/strategy_lab/reports_out/*
+!tools/strategy_lab/reports_out/.gitkeep
 output/
