@@ -5,7 +5,7 @@ Fractional Kelly with hard caps. Conservative by default.
 """
 
 import math
-from bot.config import KELLY_FRACTION, MAX_BET_FRACTION, MIN_BET_DOLLARS
+from bot.config import KELLY_FRACTION, MAX_BET_FRACTION, MIN_BET_DOLLARS, SPORT_PROFILES
 
 
 def kelly_size(
@@ -16,6 +16,7 @@ def kelly_size(
     max_fraction: float = MAX_BET_FRACTION,
     uncertainty_discount: float = 1.0,
     confidence: float = 0.75,
+    sport: str | None = None,
 ) -> dict:
     """
     Calculate optimal bet size using fractional Kelly criterion.
@@ -31,6 +32,11 @@ def kelly_size(
             when the model's probability estimate may be wrong.
         confidence: Scanner confidence score (0-1). Applied as additional probability
             discount — high-confidence bets size slightly larger at identical edges.
+        sport: Optional sport key (lowercase, e.g. "nba"). When provided, looks up
+            SPORT_PROFILES[sport]["size_multiplier"] and scales fractional Kelly by it.
+            Default 1.0 when None or sport has no multiplier key. Used by live_momentum
+            to size down bleeding cohorts (Session 49). vig_stack and other strategies
+            pass None and are unaffected.
 
     Returns:
         {contracts, price_cents, total_cost, max_payout, kelly_fraction, reason}
@@ -70,8 +76,16 @@ def kelly_size(
             "reason": "kelly_negative",
         }
 
+    # Session 49: per-sport size multiplier — applies AFTER full Kelly,
+    # BEFORE fractional Kelly cap. Defaults to 1.0 if sport=None or no
+    # size_multiplier key on the sport's profile. Stacks orthogonally with
+    # TP/SL overrides (Sessions 41/42) since those gate exit, not entry size.
+    sport_size_mult = 1.0
+    if sport:
+        sport_size_mult = SPORT_PROFILES.get(sport.lower(), {}).get("size_multiplier", 1.0)
+
     # Fractional Kelly (25% of full)
-    fractional = full_kelly * KELLY_FRACTION
+    fractional = full_kelly * KELLY_FRACTION * sport_size_mult
 
     # Hard cap at max_fraction of balance
     capped = min(fractional, max_fraction)

@@ -232,6 +232,35 @@ TENNIS_QUALITY_MIN_RANGE = 2     # cents — <2c range over lookback = flat/nois
 # format: {min_dip_cents, max_dip_cents, max_entry_price, score_diff_weight}
 SPORT_PROFILES = {
     # =====================================================================
+    # SESSION 49 (May 1, 2026) — per-sport size_multiplier on live_momentum
+    #
+    # Live_momentum P&L: +$12.30 (Apr 20, n=39) → −$40.42 (Apr 30, n=73).
+    # Sessions 40/41/42 ruled out exit-side framings (Pattern C across exit
+    # paths, global TP/SL ratio, per-sport TP/SL). Win:Loss = 0.261 (avg win
+    # +$3.41 vs avg loss −$13.10). Leak is on the entry/sizing side.
+    #
+    # Per-sport loss-class breakdown (Apr 30):
+    #   NBA: n=21, −$26.57, 48% WR  → size 0.5×
+    #   UFC: n=8,  −$8.30,  12% WR  → size 0.5×
+    #   IPL: n=7,  −$3.12,  14% WR  → DEFERRED to Session 38b (no profile entry)
+    #   NHL: n=10, +$7.80,  70% WR  → hold 1.0× (n too thin to size up;
+    #                                  Session 38a bar was n=56)
+    #   ATP main: n=4, +$8.60, 25% WR → hold 1.0× (n=4 way too thin)
+    #
+    # Discipline (mirrors Session 38a/38a-2 asymmetric-evidence pattern +
+    # Session 19c modest-change discipline): size DOWN bleeders only, no
+    # size-ups on thin-sample positives. Multipliers in 0.5–0.7 range, not
+    # 0.1× nuclear cuts. KELLY_FRACTION (0.25) and MAX_BET_FRACTION (0.05)
+    # remain global tunables — untouched.
+    #
+    # Plumbing precedent: per-sport variants on SPORT_PROFILES established
+    # by Sessions 41 + 42 (TP/SL overrides). size_multiplier rides on the
+    # same surface; orthogonal to TP/SL since those gate exit, not entry size.
+    #
+    # Re-validation routine fires 2026-05-15 (+14d). CONFIRM/EXPAND/REVERT
+    # decision per cohort vs the baseline above.
+    # =====================================================================
+    #
     # v6 — DATA AUDIT of 43 real trades (Apr 9-14, verified from logs)
     #
     # KEY FINDING: Entry price is the #1 predictor of profit/loss.
@@ -270,6 +299,7 @@ SPORT_PROFILES = {
         "stop_loss": 10,     # TIGHTENED: 15 → 10. Avg SL was -15c, need to cut faster
         "trail_stop": 4,
         "max_contracts": 20,  # NEW: cap position size
+        "size_multiplier": 0.5,  # SESSION 49: n=21, −$26.57, 48% WR — bleed cut
     },
     "nhl": {
         # DATA: 4 trades, 3W/1L, +$9.30. BEST SPORT.
@@ -285,6 +315,7 @@ SPORT_PROFILES = {
         "stop_loss": 10,     # TIGHTENED: 15 → 10
         "trail_stop": 8,
         "max_contracts": 20,
+        "size_multiplier": 1.0,  # SESSION 49: n=10 70% WR — too thin to size up (n<56 bar)
     },
     "mlb": {
         # DATA: 13 trades, 6W/7L, -$11.85. DISABLED.
@@ -298,6 +329,7 @@ SPORT_PROFILES = {
         "take_profit": 10,
         "stop_loss": 15,
         "disabled": True,
+        "size_multiplier": 1.0,  # SESSION 49: documentation-only; mlb already disabled
     },
     "tennis": {
         # DATA: 17 trades, 5W/12L, -$38.97. BUT:
@@ -334,6 +366,7 @@ SPORT_PROFILES = {
         "stop_loss": 10,     # TIGHTENED: 15 → 10
         "skip_dqs": True,
         "max_contracts": 10,  # REDUCED: 15 → 10. KO risk.
+        "size_multiplier": 0.5,  # SESSION 49: n=8, −$8.30, 12% WR — KO-loss bleed cut
     },
 }
 

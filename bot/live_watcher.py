@@ -1698,6 +1698,7 @@ class LiveGameWatcher:
             balance=balance,
             price_cents=price_cents,
             confidence=confidence,
+            sport=self.sport,  # SESSION 49: per-sport size_multiplier (NBA/UFC 0.5x)
         )
         if sizing["contracts"] <= 0:
             logger.debug("Momentum sizing returned 0 contracts")

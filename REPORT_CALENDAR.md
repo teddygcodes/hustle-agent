@@ -22,6 +22,7 @@ All times are in Eastern Time. The bot wall clock and ET match.
 | Weekly digest spot-check | 2026-05-12 9:00 AM ET | scheduled | inline | 2-week vs Apr 28 baseline; pre-readiness for May 18 Session 22 auto-fire |
 | Session 36 day-14 floor signal recheck | 2026-05-13 9:00 AM ET | scheduled | `bot/state/reports/session_36_day_14_weekly_2026-05-13.md` | Did `non_stable_below_weather_floor` mean CLV diminish from +0.2438? If yes, Session 37 floor-tune becomes a candidate. |
 | Session 38a ATP re-validation | 2026-05-13 9:00 AM ET | scheduled | inline | +14d post-deploy: re-runs bucket report on post-Session-38a cohort. CONFIRM/REVERT main-tour ATP re-enable per Session 38a evidence rule. Mirrors Session 22 pattern. |
+| Session 49 per-sport sizing re-validation | 2026-05-15 9:00 AM ET | scheduled | inline | +14d post-deploy: per-sport contract count + P&L by sport on post-2026-05-01 cohort. CONFIRM / EXPAND / REVERT NBA & UFC size_multiplier=0.5x cuts. Mirrors Session 22 / 38a pattern. |
 | MOMENTUM_LEADER_MIN re-validation | 2026-05-18 9:00 AM ET | scheduled | inline | 3-week re-validation of Session 19c shipment (0.70 → 0.65); CONFIRM / REVERT / INCONCLUSIVE |
 
 ## Completed
