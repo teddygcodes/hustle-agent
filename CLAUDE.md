@@ -3353,6 +3353,42 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 
 ---
 
+### ☑ Session 50 — Trade-record observability: confidence + dqs + sport on live_momentum (May 1 → May 2 transition, ~1h coder)
+
+**Trigger.** Pre-let-it-run-for-14-days observability audit surfaced 3 missing dimensions on live_momentum `paper_trades.json` records: `confidence` (vig_stack records it; live_momentum was writing 0 for all 74 settled trades — verified directly), `dqs` (Session 33 added it to `live_ticks.jsonl` rows but never threaded to `paper_trades`), and `sport` (derived from ticker prefix every analysis). Without these, the **May 15 Session 49 re-validation can only know "NBA was bad" — not "NBA was bad ONLY at confidence > 0.85, suggesting confidence-ceiling at entry is the right lever instead of sizing-down."** Forward-only persistence shipped today gives 14d of bucketable data; shipping on May 14 gives 1d.
+
+**What shipped (4 files; CLAUDE.md schema reference + 3 code files).**
+
+1. **[bot/executor.py:1050-1086](bot/executor.py:1050)** — inline `paper_trades.append` extended with 3 conditional emits: `paper_confidence` → `record["confidence"]`, `paper_dqs` → `record["dqs"]` (rounded 3 places), `paper_sport` → `record["sport"]` (lowercased, type-checked). All three OPTIONAL — when None (or kwarg omitted), the field is NOT added to the record. Backwards compatibility preserved for vig_stack and any sport-less call site.
+
+2. **[bot/live_watcher.py:1735-1773](bot/live_watcher.py:1735) `_auto_bet_momentum`** — threads all 3 fields. **Composite confidence formula chosen: `min(1.0, dqs * (1 + max(0, wp_edge)))`** — DQS as the dominant signal, wp_edge boost clamped to non-negative side, total clamped to 1.0. Documented inline so future analysis knows what `confidence` means for live_momentum (different from vig_stack's relative_edge fallback).
+
+3. **[bot/live_watcher.py:2675-2680](bot/live_watcher.py:2675) `_auto_bet` (WATCH/`_auto_bet_latency_arb` path)** — sets `paper_sport` only. WATCH path doesn't compute DQS, so `confidence`/`dqs` are correctly omitted (None passthrough).
+
+4. **[CLAUDE.md](CLAUDE.md) "Canonical Data Schema Reference"** — `paper_trades.json` block updated. Three new field rows: `confidence` (with composite-formula citation), `dqs` (forward-only Session 50), `sport` (forward-only Session 50). The "no sport field" note replaced with a forward-only-derivation-for-older-records note.
+
+5. **[tests/test_bot_executor.py](tests/test_bot_executor.py)** — 4 new cases in `TestSession50PaperTradeFields`: writes-when-passed, byte-identical-when-omitted (golden-file regression), partial-fields, sport-lowercased.
+
+**Verification.**
+
+1. ☑ Targeted: 4/4 new tests pass.
+2. ☑ Full repo: **1348 passed** (1344 baseline + 4 new), 0 failures, 25.80s.
+3. ☑ Bot restarted via launchd. **Battle Scar #3 in action — 3rd time today.** Killed orphan PID 19189 (the Session 49 process); fresh single PID 82747 since 23:52:46 ET May 1. Lock heartbeat clean.
+4. ☑ **Vig_stack regression PASS**: 3 vig_stack records written post-restart (01:21 + 03:05 UTC May 2) carry the original 13-key shape — no `dqs`/`sport` leak. Byte-equality preserved exactly. The optional-field discipline held.
+5. ☑ Live_momentum records will tag with `confidence`/`dqs`/`sport` as games fire over the next 14 days. Sample tag should appear within hours as overnight games or early-morning ATP matches enter.
+
+**What did NOT change.**
+- vig_stack code path — UNTOUCHED. Vig_stack records still carry their original 13-key shape (verified post-restart). Confidence on vig_stack is still the executor.py:1064 `relative_edge` fallback, NOT the composite live_momentum formula.
+- Other strategies' sizing, exit logic, or any non-record-write behavior — untouched.
+- Discovery agent code — untouched (heuristics will pick up the new fields automatically via DiscoveryContext on tomorrow's 6 AM run; counterfactual_hotspots and concurrent_attack_angles can start using `confidence` in cross-cohort math once n=10+ Session-50-flavored records accumulate).
+- Bot state files outside the new fields — untouched.
+
+**Operating Posture observation.** Last code change of the long May 1 evening (technically rolled into May 2). The bot now has the data it needs to bucket live_momentum entries by signal-strength dimension when the May 15 re-validation routine fires. **Battle Scar #3 caught its third orphan today** — the morning's "bot down" false alarm, the Session 49 restart kill, and now the Session 50 restart kill of PID 19189. The protocol pays for itself daily.
+
+**The 14-day clock starts now.** Next decision point: May 15 Session 49 re-validation reads the post-Session-50 data shape and decides CONFIRM/EXPAND/REVERT on per-sport sizing — informed by the new confidence/dqs/sport dimensions.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
@@ -3461,13 +3497,15 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
   "exit_price": float | None,
   "contracts": int,
   "edge_at_entry": float,
-  "confidence": float,                 # 0.0-1.0
+  "confidence": float,                 # 0.0-1.0. live_momentum (Session 50, 2026-05-01+): composite min(1.0, dqs * (1 + max(0, wp_edge))). vig_stack (since launch): relative_edge fallback at executor.py:1064. Pre-Session-50 live_momentum trades have confidence=0.
   "pnl": float | None,                 # dollars, signed
   "status": "open" | "won" | "lost" | "exited_early" | "cancelled_stale",
   "exit_reason": str | None,           # 'auto_take_profit' | 'auto_cut_loss' | 'edge_flipped' | 'manual' | etc. Persisted forward-only since Session 36.
+  "dqs": float | None,                 # Dip Quality Score at entry. live_momentum ONLY, forward-only since Session 50 (2026-05-01). None on conviction-without-DQS paths and absent on all non-live_momentum strategies. Source: bot/game_context.py:compute_dip_quality() per Session 33.
+  "sport": str | None,                 # Lowercase sport tag. live_momentum ONLY, forward-only since Session 50 (2026-05-01). Also set on live_latency_arb (WATCH path) records. Absent on vig_stack records.
   "timestamp": str,                    # ISO 8601 UTC, entry time. Canonical for paper_trades (NOT 'ts' which decisions.jsonl uses)
   "resolved_at": str | None,           # settlement time
-  # Note: paper_trades.json has NO 'sport' field — derive from ticker prefix
+  # Note: paper_trades.json had NO 'sport' field pre-Session 50; for older records, derive from ticker prefix via the per-game/futures map below. Same for `dqs` (live_momentum only) and the meaningful-confidence value on live_momentum trades.
 }
 ```
 

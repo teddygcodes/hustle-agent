@@ -1732,6 +1732,14 @@ class LiveGameWatcher:
         sizing["max_payout"] = round(scaled_contracts * 1.0, 2)
 
         gc = self._game_ctx
+        # Session 50 — forward-only observability for paper_trades.
+        # `confidence` for live_momentum is a composite of DQS at entry +
+        # wp_edge boost (clamped non-negative). NOT directly comparable to
+        # vig_stack's `confidence` which is relative_edge fallback. See
+        # CLAUDE.md "Canonical Data Schema Reference" for paper_trades.json
+        # semantics by strategy.
+        _paper_wp_edge = (gc.win_probability - yes_ask / 100.0) if gc else 0.0
+        _paper_conf = min(1.0, (dqs_score or 0.0) * (1.0 + max(0.0, _paper_wp_edge)))
         opp = {
             "type": "live_momentum",
             "ticker": use_ticker,
@@ -1754,6 +1762,10 @@ class LiveGameWatcher:
                 "math_chain": [f"Momentum: leader at {yes_ask}c, dip buy, scale={size_mult:.1f}x"],
                 "warnings": [],
             },
+            # Session 50 — paper_trades.json observability fields.
+            "paper_confidence": _paper_conf,
+            "paper_dqs": dqs_score if dqs_score else None,  # 0.0 → None for empty-DQS scalp paths
+            "paper_sport": self.sport.lower() if self.sport else None,
         }
 
         try:
@@ -2660,6 +2672,10 @@ class LiveGameWatcher:
                 "warnings": [],
             },
             "sizing": sizing,
+            # Session 50 — WATCH/arb path. dqs not computed here; confidence not
+            # analytically meaningful (the 0.75 literal is a Kelly sizing arg).
+            # Sport tag is the only useful observability addition for this path.
+            "paper_sport": self.sport.lower() if self.sport else None,
         }
 
         result = execute_trade(opp, sizing)

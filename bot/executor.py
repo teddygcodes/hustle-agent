@@ -1052,7 +1052,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         paper_trades = _load_json(PAPER_TRADES_FILE)
         if not isinstance(paper_trades, list):
             paper_trades = []
-        paper_trades.append({
+        record = {
             "id": order_result.get("order_id", ""),
             "ticker": ticker,
             "type": _PAPER_TYPE_MAP.get(opp_type, opp_type),
@@ -1066,7 +1066,23 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             "exit_price": None,
             "pnl": None,
             "resolved_at": None,
-        })
+        }
+        # Session 50 — forward-only observability for live_momentum.
+        # Vig_stack already records `confidence` via the line above (it carries
+        # confidence/relative_edge in its opp dict). Live_momentum's opp dict
+        # carries paper_* keys when the _auto_bet_momentum / _auto_bet call sites
+        # set them; absent keys = no field on the record (preserves pre-Session-50
+        # byte-equality for vig_stack records).
+        paper_conf = opportunity.get("paper_confidence")
+        if paper_conf is not None:
+            record["confidence"] = round(paper_conf, 4)  # OVERRIDES the default above
+        paper_dqs = opportunity.get("paper_dqs")
+        if paper_dqs is not None:
+            record["dqs"] = round(paper_dqs, 3)
+        paper_sport = opportunity.get("paper_sport")
+        if paper_sport is not None:
+            record["sport"] = paper_sport.lower() if isinstance(paper_sport, str) else None
+        paper_trades.append(record)
         _save_json(PAPER_TRADES_FILE, paper_trades)
 
     # Record CLV entry — we'll compare entry price to closing line when market settles

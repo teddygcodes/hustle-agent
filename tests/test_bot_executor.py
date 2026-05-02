@@ -272,6 +272,103 @@ class TestExecuteTradePaperHappyPath:
 
 
 # ---------------------------------------------------------------------------
+# Session 50 — paper_trades.json observability fields (confidence/dqs/sport)
+# ---------------------------------------------------------------------------
+
+class TestSession50PaperTradeFields:
+    """Forward-only persistence of confidence/dqs/sport on live_momentum
+    paper_trades records. When the opp dict carries paper_* keys, the inline
+    write site at bot/executor.py:1050 emits them on the record. When absent
+    (mimicking vig_stack), the record stays byte-identical to pre-Session-50.
+    """
+
+    def _run_paper_trade(self, opp, sizing):
+        """Helper: mock the 4 internal checks and call execute_trade."""
+        with patch("bot.executor.verify_contract_direction") as mock_dir, \
+             patch("bot.executor.get_balance") as mock_bal, \
+             patch("bot.executor._check_position_limits") as mock_pos, \
+             patch("bot.executor._verify_edge_still_exists") as mock_edge:
+            mock_dir.return_value = {
+                "direction_correct": True, "confidence": "high",
+                "explanation": "ok", "warnings": [],
+            }
+            mock_bal.return_value = {"balance_dollars": 100.0}
+            mock_pos.return_value = (True, "ok")
+            mock_edge.return_value = (True, "ok")
+
+            from bot.executor import execute_trade
+            return execute_trade(opp, sizing)
+
+    def test_paper_trade_persists_session_50_fields_when_set(self, tmp_state):
+        """When opp carries paper_confidence/paper_dqs/paper_sport, all 3 land
+        on the paper_trades record. Sport is lowercased."""
+        opp = _make_opp(opp_type="live_momentum")
+        opp["paper_confidence"] = 0.85
+        opp["paper_dqs"] = 0.42
+        opp["paper_sport"] = "NBA"
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["confidence"] == 0.85
+        assert rec["dqs"] == 0.42
+        assert rec["sport"] == "nba"
+
+    def test_paper_trade_omits_session_50_fields_when_unset(self, tmp_state):
+        """When opp has no paper_* keys (mimics vig_stack), record has NO dqs
+        and NO sport keys, and confidence falls back to the line-1064 default
+        (relative_edge fallback). This is the byte-equality regression-lock."""
+        opp = _make_opp(opp_type="weather", relative_edge=0.22)
+        # explicitly NO paper_* keys
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert "dqs" not in rec
+        assert "sport" not in rec
+        # Existing default: confidence comes from opp["confidence"] OR opp["relative_edge"]
+        assert rec["confidence"] == 0.22
+
+    def test_paper_trade_partial_session_50_fields(self, tmp_state):
+        """When only paper_confidence is set, only confidence overrides; dqs
+        and sport remain absent from the record."""
+        opp = _make_opp(opp_type="live_momentum", relative_edge=0.0)
+        opp["paper_confidence"] = 0.7
+        # explicitly NOT setting paper_dqs or paper_sport
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["confidence"] == 0.7
+        assert "dqs" not in rec
+        assert "sport" not in rec
+
+    def test_paper_trade_sport_is_lowercased(self, tmp_state):
+        """Mixed-case sport string is lowercased before persistence."""
+        opp = _make_opp(opp_type="live_momentum")
+        opp["paper_sport"] = "UFC"
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert trades[0]["sport"] == "ufc"
+
+
+# ---------------------------------------------------------------------------
 # execute_double — Fix 1 regression
 # ---------------------------------------------------------------------------
 
