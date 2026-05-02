@@ -3303,6 +3303,56 @@ Until all three fire, it's not a candidate.
 
 ---
 
+### ☑ Session 49 — Per-sport `size_multiplier` for live_momentum: NBA + UFC sized down 50% (May 1, ~1.5h coder, FIRST production-code change today)
+
+**Trigger.** Live_momentum loss-class breakdown (measured May 1 evening) showed asymmetric-loss multiplier of **0.54 ratio (losses 1.85× wins)** with concentration in 3 sports: NBA (n=21, −$26.57, 48% WR), UFC (n=8, −$8.30, 12% WR), IPL (n=7, −$3.12, 14% WR). NHL (+$7.80, 70% WR, n=10) and ATP (+$8.60, 25% WR, n=4) were the only positive cohorts but n was below the Session 38a n=56 bar to size up. Per-sport sizing is the same architectural surface Sessions 41 + 42 used for TP/SL overrides — adding `size_multiplier` to existing SPORT_PROFILES dicts is a single-line change per sport with orthogonal stacking on TP/SL.
+
+**What shipped (commit [13524f0](https://github.com/teddygcodes/hustle-agent/commit/13524f0) on main).**
+
+1. [bot/config.py:301-369](bot/config.py:301) — `size_multiplier` key added to per-sport SPORT_PROFILES dicts. **NBA: 0.5x**, **UFC: 0.5x**. **NHL: 1.0x explicit**, **MLB: 1.0x explicit** (smart coder deviation — making the no-change decision EXPLICIT documents that we know about these sports and chose 1.0; provides a future touchpoint for sizing-up sessions; matches "no implicit defaults" architectural style). 25-line evidence comment block at [bot/config.py:235](bot/config.py:235) citing the May 1 loss-class measurement + Sessions 41/42 architectural precedent + Session 19c modest-change discipline.
+2. [bot/sizing.py:19,79-88](bot/sizing.py:19) — `kelly_size()` accepts new `sport: str | None = None` kwarg; lookup `SPORT_PROFILES.get(sport.lower(), {}).get('size_multiplier', 1.0)` applied as `fractional = full_kelly * KELLY_FRACTION * sport_multiplier`. Defaults to 1.0 when sport is None or missing → vig_stack and any sport-less call site preserved byte-identical.
+3. [bot/live_watcher.py:1695-1702](bot/live_watcher.py:1695) — `sport=self.sport` threaded into the `_auto_bet_momentum` `kelly_size` call. Coder verified the second `kelly_size` call site at line 2621 (`_auto_bet` WATCH-command path) also threads `self.sport` correctly — both live_momentum surfaces covered.
+4. [tests/test_sizing.py](tests/test_sizing.py) — created from scratch (file did not exist pre-49). 8 cases covering: default unaffected, unknown sport defaults to 1.0, NBA produces half NHL contracts, UFC same, IPL ~~check~~ (deferred — see below), floor + ceiling still bind under multiplier, vig_stack `sport=None` regression, full executor.py path. All green.
+5. [REPORT_CALENDAR.md:25](REPORT_CALENDAR.md:25) — new one-off entry for the +14d re-validation routine (May 15 09:00 ET).
+6. Scheduled task at `~/.claude/scheduled-tasks/session-49-per-sport-sizing-revalidation/SKILL.md` — fires May 15, mirrors Session 38a-revalidation pattern: pulls post-deploy live_momentum trades grouped by sport, computes per-sport mean P&L + win rate post-2026-05-01, decides CONFIRM / EXPAND (size down further OR size up NHL/ATP if data clears Session 38a bar) / REVERT.
+
+**IPL deferred per plan-mode coder question.** The brief specified `ipl: 0.7` but Phase-1 verification revealed IPL has NO existing entry in SPORT_PROFILES (only nba/nhl/mlb/tennis/ufc + tennis aliases). Three options surfaced:
+- (A) **Defer IPL** — Session 38b is queued and will likely disable IPL outright (n=25 settled CFs at −35.88¢, n=7 realized at −$0.45/trade). Selecting this **kept Session 49 changeset tight** to nba 0.5x + ufc 0.5x.
+- (B) Create fresh `ipl` SPORT_PROFILES entry — would have required calibrated defaults for non-sizing keys (min_dip, max_dip, max_entry, take_profit, stop_loss) which we don't have; risk of unintended scope creep into entry-side gates.
+- (C) Layer IPL multiplier inside `kelly_size` via parallel override map — architectural debt; future sessions adding sports might miss the parallel surface.
+
+Selected (A). If Session 38b ships within 7-14d, IPL handling becomes moot via disable. If 38b doesn't ship by May 15, the Session 49 re-validation routine can revisit IPL with fresh evidence then.
+
+**Tennis-alias hazard called out (NOT actioned).** `atp` / `atp_challenger` / `wta` / `wta_challenger` ALL alias to the same `tennis` dict by reference at [bot/config.py:341-342](bot/config.py:341). Adding `size_multiplier` to the tennis dict would simultaneously affect ATP main (currently positive direction) AND the disabled challengers/wta (silently inheriting the multiplier if any get re-enabled). All tennis sizing changes deferred to a future session that explicitly addresses the alias structure (mirror Session 42's `TestSportOverridesTennisAliasIsolation` regression pattern).
+
+**Verification.**
+
+1. ☑ Targeted: 8/8 tests pass on `tests/test_sizing.py`.
+2. ☑ Full repo: **1344 passed** (1336 baseline + 8 new), 0 failures.
+3. ☑ Bot restarted via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Single PID **19189** post-restart.
+4. ☑ **Battle Scar #3 in action — orphan from Thursday killed.** Pre-restart there was an orphan bot process from Apr 30. Coder's restart caught it via the standard single-PID check + `pkill` cleanup. Post-restart: ONE bot, fresh PID 19189, lock heartbeat fresh. (This is the SECOND time today Battle Scar #3 surfaced a real issue — the first was the morning's "bot down" false alarm where my grep pattern was too narrow to see the running process.)
+5. ☑ Watchers ticking on KX{NBA,NHL,ATP}* tickers post-restart per `bot/logs/bot.log` tail.
+
+**Expected behavior change starting now.**
+- Every NBA live_momentum entry from PID 19189 onward gets sized at **50% of pre-Session-49 contracts** (Kelly fraction × 0.5 multiplier).
+- Every UFC live_momentum entry: same.
+- NHL, MLB, ATP, all other sports: behavior unchanged.
+- vig_stack: behavior unchanged (sport=None passes through to multiplier=1.0).
+- Trade COUNT unchanged (bot still scans + accepts at same rate); only per-trade dollar exposure changes on NBA/UFC.
+
+Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relative to pre-49 baseline (preserving win rate but cutting trade size on the bleeding cohort). May 15 re-validation routine will measure directly.
+
+**What did NOT change.**
+- `MOMENTUM_DISABLED_SPORTS` — untouched.
+- `MOMENTUM_LEADER_MIN`, `KELLY_FRACTION` (global 0.25), `MAX_BET_FRACTION` (global 0.05) — untouched.
+- vig_stack code, scanner code, executor pipeline outside the sizing call — untouched.
+- Discovery agent code — untouched (will continue to surface findings on the now-modified strategy behavior; expect counterfactual_hotspots and the new concurrent_attack_angles to start producing post-49-flavored evidence within ~7d).
+- Bot state files (paper_trades, positions, decisions, clv) — untouched.
+
+**Operating Posture observation.** This is the **first production-code change today aimed directly at the P&L leak** (after 6 prior doc-only or discovery-agent-only sessions today). The discipline cycle: measure (today's loss-class breakdown) → propose (per-sport sizing) → Phase-1 verify (coder caught IPL scope, dual call site, tennis aliasing, missing test file) → ship modest change with re-validation routine. The bot is now actively reducing exposure on its measured-bleeding cohorts while keeping the full search frontier open via the 9-heuristic discovery agent.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
