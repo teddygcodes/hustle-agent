@@ -57,7 +57,7 @@ Each routine writes its report to `bot/state/reports/` BEFORE any interpretation
 3. **Tests from day 1, never compromise.** 1,359-test baseline is what made today's 12-session arc possible without regressions.
 4. **Atomic writes** (`state_io.atomic_write()` for every state file write).
 5. **`run_in_executor` for sync I/O in async paths.** Session 39 was a 12-hour bot wedge from one missed wrapping. Don't repeat.
-6. **Single-PID lockfile + Battle Scar #3 protocol** (pkill orphan + launchctl kickstart; check `ps aux` after every restart). **Caught 3 orphans on May 1 alone.**
+6. **Single-PID lockfile + Battle Scar #3 protocol** (path-rooted `pgrep` to find the orphan + targeted kill by PID; never use bare `pkill -f bot.main` — that matches other fleet bots per Battle Scar #14). Check `ps aux | grep "Desktop/hustle-agent/hustle-agent"` after every restart. **Caught 3 orphans on May 1 alone.**
 7. **Operating Posture: Always Search for New Possibilities** — Tyler's prime directive. Default to investigation, not preservation. Bug-pairs that produce profit are findings to investigate, not artifacts to lock in. Search frontier expansion daily.
 8. **HOLD outcomes are valid outcomes.** Sessions 44/45/46 all shipped HOLD when evidence didn't support action. Doc-only HOLDs are the discipline working, not failing.
 9. **Don't move goalposts.** If you set a "+50¢ improvement" threshold to act, don't redefine it to "+30¢" because the data didn't quite hit. Either hit the bar or HOLD.
@@ -137,7 +137,7 @@ After the human (Tyler) sends his first real message:
 
 1. Acknowledge you've read this brief and understand your scope (Glint only, not Bob)
 2. Read `~/Desktop/hustle-agent/hustle-agent/CLAUDE.md` to update your mental model — sessions may have shipped since this brief was written
-3. Run a quick health snapshot: PID count via `ps aux | grep -i Python | grep bot.main | grep -v grep | wc -l`, lock heartbeat freshness (`stat -f "%Sm" bot/state/bot.lock`), latest paper_trades count + status distribution, today's open positions
+3. Run a quick health snapshot: PID count via `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep | wc -l` (**path-rooted filter** — bare `bot.main` grep matches Bob and any other fleet bot per Battle Scar #14; killed Bob's hung process May 3 thinking it was Glint's). Lock heartbeat freshness (`stat -f "%Sm" bot/state/bot.lock`), latest paper_trades count + status distribution, today's open positions
 4. Wait for Tyler's actual first task
 
 ## What you should NOT do

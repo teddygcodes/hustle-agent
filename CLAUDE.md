@@ -332,7 +332,26 @@ and p.get("status") in ("filled", "partial")
 Exited positions have `status: "exited"` (not `filled/partial`), so they're excluded. Resolved positions have `status: "resolved"`, also excluded.
 
 ### 3. Multiple processes
-The watchdog (`run_bot.sh`) and launchd both try to keep the bot alive. If the Telegram `RESTART` command kills the process without cleaning up cleanly, a zombie can linger. Always verify `ps aux | grep bot.main` after RESTART. If two PIDs appear, `kill -9` the older one.
+The watchdog (`run_bot.sh`) and launchd both try to keep the bot alive. If the Telegram `RESTART` command kills the process without cleaning up cleanly, a zombie can linger.
+
+**CRITICAL — DO NOT use `ps aux | grep bot.main` (cross-bot collision risk per Battle Scar #14).** Bob also runs `python3 -m bot.main` because each repo names its package `bot/`. Bare-module-name greps match EVERY fleet bot. Killing what looks like a Glint orphan can take Bob down (and vice versa — both directions happened May 3, 2026).
+
+Use the **path-rooted** pattern instead:
+
+```bash
+# Find Glint's bash wrapper PID (path is unique to Glint)
+WRAPPER=$(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")
+
+# Find Glint's bot.main child PID
+BOT_PID=$(pgrep -P "$WRAPPER")
+
+# Verify exactly one of each
+echo "wrapper=$WRAPPER bot_pid=$BOT_PID"
+```
+
+Or as a status one-liner: `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — should return exactly one `bash run_bot.sh` line + one `Python -m bot.main` line for Glint specifically.
+
+If two Glint PIDs appear under the same wrapper, `kill -9` the older one (use `ps -o pid,etime,command -p $(pgrep -P "$WRAPPER")` to identify oldest). For service-level restarts, use `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` — the launchd label is also bot-unique and a safe target.
 
 ### 4. `bypass_cache=True` for live watcher
 `odds_scraper.fetch_consensus_odds(sport)` caches for 120s (live) / 900s (idle). The 10s watcher tick MUST pass `bypass_cache=True` or 11 of 12 ticks see stale data. Already in place — don't remove it.
@@ -372,6 +391,41 @@ loop = asyncio.get_event_loop()
 await loop.run_in_executor(None, lambda: sync_fn(arg))
 ```
 If you write a new async loop and it calls into `bot/universe.py`, `bot/scanner.py`, `bot/tracker.py`, `bot/executor.py`, or anything that hits Kalshi: assume it's blocking, wrap in executor, audit at PR time. The Session 39 regression test at [tests/test_main.py:test_main_loop_runs_snapshot_universe_via_executor](hustle-agent/tests/test_main.py) asserts `snapshot_universe` runs on a non-`MainThread` worker thread — if a future refactor regresses it back to a direct sync call, that test fails.
+
+### 14. Cross-bot PID identification — bare `bot.main` grep matches OTHER bots in the fleet (May 3, 2026)
+
+Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/hustle-agent/`, Bob = `~/Desktop/bob/`, future bots TBD). Each bot's main entry is invoked as `python3 -m bot.main` because each repo names its package `bot/`. Result: **`ps aux | grep bot.main` matches EVERY bot's process, not just Glint's.** Same for `pgrep -f "bot.main"`, `pkill -f "bot.main"`, etc.
+
+**Real incident — both directions, same day (May 3, 2026):**
+- ~13:45 ET: Bob's coder during Bob Session 2.5 dry run saw two `python3 -m bot.main` PIDs in `ps aux`, identified one as a Bob multi-PID orphan, killed it. The killed PID was Glint's bot.main (PID 82747). Glint's launchd KeepAlive respawned ~5s later as PID 74112; no data loss (Sunday, market closed).
+- ~13:51 ET: Glint planner (this CLAUDE.md author) saw a separate PID 48988 in `ps aux`, identified it as a Glint orphan, killed it. PID 48988 was actually Bob's hung process from a Session 2.5 verify pass. Same root cause, opposite direction.
+
+**Same root cause both directions:** the operator-facing identification command can't distinguish bots when they share the module name. As the fleet grows (3rd, 4th bot), this gets WORSE.
+
+**Fix (apply everywhere — Glint's playbooks updated May 3):**
+
+For status checks, use the path-rooted filter:
+```bash
+ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep    # Glint only
+ps aux | grep "Desktop/bob" | grep -v grep                            # Bob only
+```
+
+For surgical kills (when a process must be terminated by PID), find the bot's launchd-managed bash wrapper first, then walk to the python child:
+```bash
+WRAPPER=$(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")
+BOT_PID=$(pgrep -P "$WRAPPER")
+kill "$BOT_PID"
+```
+
+**Never use `pkill -f bot.main` or `pgrep -f bot.main` — these match every bot in the fleet.**
+
+The launchd service label is also bot-unique and a safe target for restart operations:
+```bash
+launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot   # Glint
+launchctl kickstart -k gui/$(id -u)/com.bob.bot            # Bob (when configured)
+```
+
+Battle Scar #3 (single-PID enforcement) was updated May 3 to use the path-rooted pattern; this entry is the structural reminder for future bots added to the fleet.
 
 ---
 
@@ -652,7 +706,7 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 **Maintenance note.** When upgrading past Python 3.14, edit `PYTHON_BIN` in `run_bot.sh`. That's the single point of change.
 
 **Verify.**
-1. `ps aux | grep bot.main | grep -v grep` — exactly one PID, parent is launchd (`ppid=1`), binary path contains `Versions/3.14`.
+1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — exactly one Glint bash wrapper + one Glint `Python -m bot.main` child. Path-rooted filter is critical (per Battle Scar #14): bare `bot.main` grep matches Bob and any other fleet bot. Wrapper's parent should be launchd.
 2. `tail bot/logs/watchdog.log` — no new `Bot exited (code 0), restarting in 5s...` lines after the fix (the crash loop fingerprint was a consecutive run of those with <10s deltas).
 3. `tail bot/logs/bot.log` — shows normal startup sequence: `Telegram connected — bot is live`, `SCAN CYCLE — …`, scanner loops firing. Observed on first launchd-supervised boot post-fix.
 4. Telegram `STOP` now cleanly unloads launchd + kills the bot; `START` (or reboot / `launchctl load`) brings it back under supervision.
@@ -3587,7 +3641,7 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
-1. `ps aux | grep bot.main | grep -v grep` — verify ONE process
+1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint process (path-rooted filter — bare `bot.main` grep matches other fleet bots like Bob; see Battle Scar #14)
 2. `tail -30 bot/logs/bot.log` — verify ticks are firing, no repeated exceptions
 3. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'Active: {len(active)} positions, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"` — verify exposure is under balance
 4. Check `strategy_audit.json → settlement_log` for any settlements since last check
@@ -3625,7 +3679,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 
 ### 4. `bot/state/bot.lock` — process liveness signal
 - **Inspect:** `stat -f 'lock mtime=%Sm pid=%z' bot/state/bot.lock 2>/dev/null && cat bot/state/bot.lock`
-- **Expect:** mtime within last scan interval. PID matches `ps aux | grep bot.main`.
+- **Expect:** mtime within last scan interval. PID matches `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` (path-rooted filter; see Battle Scar #14).
 - **Caveat:** lock-touch fires at scan boundaries only ([bot/main.py:1061](hustle-agent/bot/main.py:1061)) — between scans, mtime can be stale up to 30 min and that's fine. Session 7 will add per-second heartbeat for true liveness.
 
 ### 5. `bot/state/strategy_audit.json` — settlement + PnL log
