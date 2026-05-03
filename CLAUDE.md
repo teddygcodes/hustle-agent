@@ -349,7 +349,7 @@ BOT_PID=$(pgrep -P "$WRAPPER")
 echo "wrapper=$WRAPPER bot_pid=$BOT_PID"
 ```
 
-Or as a status one-liner: `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — should return exactly one `bash run_bot.sh` line + one `Python -m bot.main` line for Glint specifically.
+Or as a status one-liner: `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — should return exactly **one** `bash run_bot.sh` line for Glint specifically. The `Python -m bot.main` child does NOT appear in path-rooted `ps aux` output because its command line is just `Python -m bot.main` with no repo path (CWD is set by launchd but doesn't show up in `ps aux`). Wrapper-presence is sufficient signal — launchd KeepAlive guarantees child respawn if the python dies. To verify the child PID specifically, use the parent-chain pattern below.
 
 If two Glint PIDs appear under the same wrapper, `kill -9` the older one (use `ps -o pid,etime,command -p $(pgrep -P "$WRAPPER")` to identify oldest). For service-level restarts, use `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` — the launchd label is also bot-unique and a safe target.
 
@@ -404,10 +404,16 @@ Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/h
 
 **Fix (apply everywhere — Glint's playbooks updated May 3):**
 
-For status checks, use the path-rooted filter:
+For status checks, use the path-rooted filter — note this catches the **bash wrapper** only, not the python child (the child's cmdline has no repo path; CWD doesn't appear in `ps aux`). Wrapper-presence is sufficient signal because launchd KeepAlive auto-respawns the child if it dies:
 ```bash
-ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep    # Glint only
-ps aux | grep "Desktop/bob" | grep -v grep                            # Bob only
+ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep    # Glint wrapper
+ps aux | grep "Desktop/bob" | grep -v grep                            # Bob wrapper
+```
+
+To **see both** the wrapper and the python child for a single bot, use the parent-chain (this also gives you the actual PIDs to operate on):
+```bash
+WRAPPER=$(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")
+ps -p $WRAPPER -p $(pgrep -P "$WRAPPER")   # shows wrapper + child together
 ```
 
 For surgical kills (when a process must be terminated by PID), find the bot's launchd-managed bash wrapper first, then walk to the python child:
@@ -706,7 +712,7 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 **Maintenance note.** When upgrading past Python 3.14, edit `PYTHON_BIN` in `run_bot.sh`. That's the single point of change.
 
 **Verify.**
-1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — exactly one Glint bash wrapper + one Glint `Python -m bot.main` child. Path-rooted filter is critical (per Battle Scar #14): bare `bot.main` grep matches Bob and any other fleet bot. Wrapper's parent should be launchd.
+1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — exactly **one** Glint bash wrapper line. The `Python -m bot.main` child does NOT appear in this output (cmdline has no repo path; CWD doesn't appear in `ps aux`); wrapper-presence is sufficient signal because launchd KeepAlive auto-respawns the child. Path-rooted filter is critical (per Battle Scar #14): bare `bot.main` grep matches Bob and any other fleet bot. Wrapper's parent should be launchd. To see the actual python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
 2. `tail bot/logs/watchdog.log` — no new `Bot exited (code 0), restarting in 5s...` lines after the fix (the crash loop fingerprint was a consecutive run of those with <10s deltas).
 3. `tail bot/logs/bot.log` — shows normal startup sequence: `Telegram connected — bot is live`, `SCAN CYCLE — …`, scanner loops firing. Observed on first launchd-supervised boot post-fix.
 4. Telegram `STOP` now cleanly unloads launchd + kills the bot; `START` (or reboot / `launchctl load`) brings it back under supervision.
@@ -3641,7 +3647,7 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
-1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint process (path-rooted filter — bare `bot.main` grep matches other fleet bots like Bob; see Battle Scar #14)
+1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint **wrapper** line (the python child doesn't appear here; its cmdline has no repo path). Wrapper-presence = bot alive (launchd KeepAlive guarantees child respawn). Path-rooted filter is critical: bare `bot.main` grep matches other fleet bots like Bob (see Battle Scar #14). For the python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
 2. `tail -30 bot/logs/bot.log` — verify ticks are firing, no repeated exceptions
 3. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'Active: {len(active)} positions, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"` — verify exposure is under balance
 4. Check `strategy_audit.json → settlement_log` for any settlements since last check
@@ -3679,7 +3685,7 @@ This is the *data-quality* checklist (vs. the *bot-health* checklist above). Wal
 
 ### 4. `bot/state/bot.lock` — process liveness signal
 - **Inspect:** `stat -f 'lock mtime=%Sm pid=%z' bot/state/bot.lock 2>/dev/null && cat bot/state/bot.lock`
-- **Expect:** mtime within last scan interval. PID matches `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` (path-rooted filter; see Battle Scar #14).
+- **Expect:** mtime within last scan interval. Lock PID matches the python child PID returned by `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")` — NOT the wrapper PID (lock contains the python child's PID, not the bash wrapper's). See Battle Scar #14 for path-rooted discipline.
 - **Caveat:** lock-touch fires at scan boundaries only ([bot/main.py:1061](hustle-agent/bot/main.py:1061)) — between scans, mtime can be stale up to 30 min and that's fine. Session 7 will add per-second heartbeat for true liveness.
 
 ### 5. `bot/state/strategy_audit.json` — settlement + PnL log
