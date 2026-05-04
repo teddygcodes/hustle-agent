@@ -202,7 +202,24 @@ def _acquire_lock() -> None:
 
 
 def _release_lock() -> None:
-    LOCK_FILE.unlink(missing_ok=True)
+    """Only unlink the lockfile if it still contains OUR PID.
+
+    Race condition this guards against (Battle Scar #3 follow-up, May 3 2026):
+    if an old orphan process receives SIGTERM AFTER a new process has already
+    acquired the lock with its own PID, the old process's SIGTERM handler must
+    NOT unconditionally unlink — that wipes the new process's lock content.
+    The new process's periodic `LOCK_FILE.touch()` would then recreate the
+    file as empty, leaving an empty lockfile despite a healthy bot.
+    """
+    if not LOCK_FILE.exists():
+        return
+    try:
+        held_by = int(LOCK_FILE.read_text().strip())
+    except (ValueError, OSError):
+        # Corrupt/empty/unreadable — leave alone; let _acquire_lock handle on next start.
+        return
+    if held_by == os.getpid():
+        LOCK_FILE.unlink(missing_ok=True)
 
 
 def _load_bot_state() -> dict:

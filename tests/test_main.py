@@ -462,3 +462,93 @@ def test_vig_stack_opp_types_constant():
     assert "live_momentum" not in _VIG_STACK_OPP_TYPES
     assert "vig_stack_futures" not in _VIG_STACK_OPP_TYPES  # not currently exempt; intentional
     assert "" not in _VIG_STACK_OPP_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Battle Scar #3 follow-up — _release_lock PID-aware (May 3, 2026 incident)
+# ---------------------------------------------------------------------------
+
+def test_release_lock_does_not_unlink_when_owned_by_other_pid(tmp_path, monkeypatch):
+    """If the lockfile contains a different PID (i.e., another process has
+    acquired the lock since we wrote ours), _release_lock must NOT unlink.
+
+    Without this guard, the May 3 race produced an empty lockfile: an old
+    orphan process received SIGTERM, its handler called _release_lock which
+    unconditionally unlinked the file, and the new process's periodic
+    LOCK_FILE.touch() recreated it as empty.
+    """
+    from bot import main as botmain
+    import os
+
+    lock = tmp_path / "bot.lock"
+    monkeypatch.setattr(botmain, "LOCK_FILE", lock)
+
+    other_pid = os.getpid() + 99999  # almost certainly not us
+    lock.write_text(str(other_pid))
+
+    botmain._release_lock()
+
+    # File must still exist and still contain the other PID
+    assert lock.exists(), "lock was unlinked despite being owned by another PID"
+    assert lock.read_text().strip() == str(other_pid)
+
+
+def test_release_lock_unlinks_when_owned_by_us(tmp_path, monkeypatch):
+    """When the lockfile contains OUR PID, _release_lock unlinks it."""
+    from bot import main as botmain
+    import os
+
+    lock = tmp_path / "bot.lock"
+    monkeypatch.setattr(botmain, "LOCK_FILE", lock)
+
+    lock.write_text(str(os.getpid()))
+
+    botmain._release_lock()
+
+    assert not lock.exists(), "lock was not unlinked despite containing our PID"
+
+
+def test_release_lock_handles_missing_lockfile(tmp_path, monkeypatch):
+    """_release_lock is a no-op when the lockfile doesn't exist."""
+    from bot import main as botmain
+
+    lock = tmp_path / "bot.lock"
+    monkeypatch.setattr(botmain, "LOCK_FILE", lock)
+
+    # No file written. Should not raise.
+    botmain._release_lock()
+    assert not lock.exists()
+
+
+def test_release_lock_handles_corrupt_lockfile(tmp_path, monkeypatch):
+    """_release_lock leaves a corrupt/empty lockfile alone (never unlinks
+    something we can't verify ownership of). The acquire path on next start
+    will overwrite it.
+    """
+    from bot import main as botmain
+
+    lock = tmp_path / "bot.lock"
+    monkeypatch.setattr(botmain, "LOCK_FILE", lock)
+
+    lock.write_text("not-a-pid\n")
+
+    botmain._release_lock()
+
+    # File preserved (acquire path will handle on next bot start)
+    assert lock.exists()
+    assert lock.read_text() == "not-a-pid\n"
+
+
+def test_release_lock_handles_empty_lockfile(tmp_path, monkeypatch):
+    """An empty lockfile (the exact symptom of the May 3 race) is left alone."""
+    from bot import main as botmain
+
+    lock = tmp_path / "bot.lock"
+    monkeypatch.setattr(botmain, "LOCK_FILE", lock)
+
+    lock.write_text("")
+
+    botmain._release_lock()
+
+    assert lock.exists()
+    assert lock.read_text() == ""

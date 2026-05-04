@@ -353,6 +353,8 @@ Or as a status one-liner: `ps aux | grep "Desktop/hustle-agent/hustle-agent" | g
 
 If two Glint PIDs appear under the same wrapper, `kill -9` the older one (use `ps -o pid,etime,command -p $(pgrep -P "$WRAPPER")` to identify oldest). For service-level restarts, use `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` — the launchd label is also bot-unique and a safe target.
 
+**Lock-empty race fix (May 3, 2026 follow-up):** `_release_lock()` in [bot/main.py:204](bot/main.py:204) now PID-guards before unlinking — only deletes the lockfile if it still contains our own PID. Prevents the race where an old orphan process's SIGTERM handler unlinks the lockfile that a NEWLY-spawned process has already overwritten with its own PID, leaving an empty lockfile after the new process's next periodic `LOCK_FILE.touch()`. 5 regression tests in `tests/test_main.py::test_release_lock_*`.
+
 ### 4. `bypass_cache=True` for live watcher
 `odds_scraper.fetch_consensus_odds(sport)` caches for 120s (live) / 900s (idle). The 10s watcher tick MUST pass `bypass_cache=True` or 11 of 12 ticks see stale data. Already in place — don't remove it.
 
