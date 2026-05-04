@@ -9,12 +9,15 @@ Uses python-telegram-bot v21+ (async native).
 from __future__ import annotations
 
 import asyncio
-import json
+import hashlib
 import logging
+import re
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -24,9 +27,88 @@ from telegram.ext import (
     filters,
 )
 
-from bot.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PAPER_MODE
+from bot.config import BOT_STATE_FILE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PAPER_MODE
+from bot.state_io import load_json as _load_json_state, save_json as _save_json_state
 
 logger = logging.getLogger("glint.notifier")
+
+
+TELEGRAM_THROTTLED_UNTIL = "telegram_throttled_until"
+TELEGRAM_THROTTLED_COUNT_24H = "telegram_throttled_count_24h"
+TELEGRAM_LAST_SEND_ATTEMPT_AT = "telegram_last_send_attempt_at"
+TELEGRAM_LAST_SEND_SUCCESS_AT = "telegram_last_send_success_at"
+
+_TELEGRAM_STATE_DEFAULTS = {
+    TELEGRAM_THROTTLED_UNTIL: None,
+    TELEGRAM_THROTTLED_COUNT_24H: 0,
+    TELEGRAM_LAST_SEND_ATTEMPT_AT: None,
+    TELEGRAM_LAST_SEND_SUCCESS_AT: None,
+}
+
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_bot_state() -> dict:
+    """Load bot_state.json with forward-only Telegram keys defaulted."""
+    try:
+        state = _load_json_state(BOT_STATE_FILE)
+    except Exception:
+        logger.warning("bot_state.json load failed during Telegram state update", exc_info=True)
+        state = {}
+    if not isinstance(state, dict):
+        state = {}
+    for key, default in _TELEGRAM_STATE_DEFAULTS.items():
+        state.setdefault(key, default)
+    return state
+
+
+def _save_bot_state(state: dict) -> None:
+    _save_json_state(BOT_STATE_FILE, state)
+
+
+def _mutate_bot_state(mutator: Callable[[dict], None]) -> None:
+    """Best-effort bot_state mutation; notifier delivery must not crash on state I/O."""
+    try:
+        state = _load_bot_state()
+        mutator(state)
+        _save_bot_state(state)
+    except Exception:
+        logger.warning("bot_state.json save failed during Telegram state update", exc_info=True)
+
+
+class EditThrottle:
+    """Token bucket for editMessageText: 1/sec sustained, burst 5."""
+
+    def __init__(
+        self,
+        rate_per_second: float = 1.0,
+        burst: int = 5,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.rate_per_second = rate_per_second
+        self.burst = burst
+        self._clock = clock
+        self._tokens = float(burst)
+        self._updated_at = self._clock()
+
+    def reserve_delay(self) -> float:
+        """Return seconds to wait, reserving a future token when needed."""
+        now = self._clock()
+        elapsed = max(0.0, now - self._updated_at)
+        self._tokens = min(float(self.burst), self._tokens + elapsed * self.rate_per_second)
+        self._updated_at = now
+
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return 0.0
+
+        missing = 1.0 - self._tokens
+        delay = missing / self.rate_per_second
+        self._tokens = 0.0
+        self._updated_at = now + delay
+        return delay
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +647,9 @@ class TelegramNotifier:
     get through (take profit, cut loss, trade resolutions).
     """
 
+    _TELEGRAM_MAX_RETRIES = 2
+    _TELEGRAM_NETWORK_RETRY_BASE_SECONDS = 1.0
+
     def __init__(self):
         self.app: Optional[Application] = None
         self._command_callbacks: dict[str, Callable] = {}
@@ -575,6 +660,8 @@ class TelegramNotifier:
         self._flood_until: float = 0.0  # unix timestamp when flood ban expires
         self._send_times: list[float] = []  # timestamps of recent sends for rate limiting
         self._RATE_LIMIT = 20  # max messages per 60 seconds
+        self._edit_throttle = EditThrottle()
+        self._edit_dedup_hashes: dict[int, bytes] = {}
 
     async def initialize(self):
         """Build and initialize the Telegram application."""
@@ -665,7 +752,6 @@ class TelegramNotifier:
 
     def _check_flood(self) -> bool:
         """Return True if we're currently flood-banned or rate-limited."""
-        import time
         now = time.time()
         if self._flood_until and now < self._flood_until:
             return True
@@ -679,25 +765,123 @@ class TelegramNotifier:
 
     def _record_send(self):
         """Record a successful send for rate limiting."""
-        import time
         self._send_times.append(time.time())
 
-    def _handle_flood_error(self, e: Exception):
+    def _retry_after_seconds(self, e: Exception) -> int:
         """Parse Telegram flood control error and set cooldown."""
-        import time, re
+        retry_after = getattr(e, "_retry_after", None)
+        if retry_after is None:
+            retry_after = getattr(e, "retry_after", None)
+        if isinstance(retry_after, timedelta):
+            return max(1, int(retry_after.total_seconds()))
+        if retry_after is not None:
+            try:
+                return max(1, int(retry_after))
+            except (TypeError, ValueError):
+                pass
+
         err_str = str(e)
-        # Extract retry-after seconds from error message
         m = re.search(r'[Rr]etry in (\d+)', err_str)
         if m:
-            retry_secs = int(m.group(1))
-        else:
-            retry_secs = 300  # default 5 min if we can't parse
+            return max(1, int(m.group(1)))
+        return 300  # default 5 min if we can't parse
+
+    def _is_flood_error(self, e: Exception) -> bool:
+        if isinstance(e, RetryAfter):
+            return True
+        err_str = str(e).lower()
+        return "flood" in err_str or "429" in err_str
+
+    def _format_telegram_exception(self, e: Exception | None) -> str:
+        if e is None:
+            return "unknown error"
+        if isinstance(e, RetryAfter):
+            return f"{type(e).__name__}(retry_after={self._retry_after_seconds(e)}s)"
+        return str(e)
+
+    def _handle_flood_error(self, e: Exception) -> int:
+        """Parse Telegram flood control error, set cooldown, and surface state."""
+        retry_secs = self._retry_after_seconds(e)
         self._flood_until = time.time() + retry_secs
+        until_iso = datetime.fromtimestamp(self._flood_until, timezone.utc).isoformat()
+
+        def mutate(state: dict) -> None:
+            state[TELEGRAM_THROTTLED_UNTIL] = until_iso
+            state[TELEGRAM_THROTTLED_COUNT_24H] = int(
+                state.get(TELEGRAM_THROTTLED_COUNT_24H) or 0
+            ) + 1
+
+        _mutate_bot_state(mutate)
         logger.warning(
             "Telegram flood control: backing off for %ds (until %s)",
             retry_secs,
-            datetime.fromtimestamp(self._flood_until).strftime("%H:%M:%S"),
+            datetime.fromtimestamp(self._flood_until, timezone.utc).strftime("%H:%M:%S UTC"),
         )
+        return retry_secs
+
+    def _record_telegram_attempt(self) -> None:
+        def mutate(state: dict) -> None:
+            state[TELEGRAM_LAST_SEND_ATTEMPT_AT] = _utc_iso()
+
+        _mutate_bot_state(mutate)
+
+    def _record_telegram_success(self) -> None:
+        def mutate(state: dict) -> None:
+            state[TELEGRAM_LAST_SEND_SUCCESS_AT] = _utc_iso()
+
+        _mutate_bot_state(mutate)
+
+    async def _wait_for_edit_slot(self) -> None:
+        delay = self._edit_throttle.reserve_delay()
+        if delay > 0:
+            logger.debug("[RATE] Edit throttle sleeping %.2fs", delay)
+            await asyncio.sleep(delay)
+
+    async def _telegram_call(self, coro_factory: Callable[[], object], *, kind: str):
+        """Run a python-telegram-bot coroutine with retry/backoff discipline."""
+        attempts = self._TELEGRAM_MAX_RETRIES + 1
+        last_exc: Exception | None = None
+        for attempt_idx in range(attempts):
+            self._record_telegram_attempt()
+            try:
+                result = await coro_factory()
+            except Exception as e:
+                last_exc = e
+                has_retry = attempt_idx < self._TELEGRAM_MAX_RETRIES
+
+                if self._is_flood_error(e):
+                    retry_secs = self._handle_flood_error(e)
+                    if has_retry:
+                        await asyncio.sleep(retry_secs)
+                        continue
+                    break
+
+                if isinstance(e, (NetworkError, TimedOut)):
+                    if has_retry:
+                        delay = self._TELEGRAM_NETWORK_RETRY_BASE_SECONDS * (2 ** attempt_idx)
+                        logger.warning(
+                            "Telegram %s transient failure: %s; retrying in %.1fs",
+                            kind,
+                            self._format_telegram_exception(e),
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    break
+
+                logger.error("Telegram %s failed: %s", kind, self._format_telegram_exception(e))
+                return None
+
+            self._record_telegram_success()
+            return result
+
+        logger.error(
+            "Telegram %s failed after %d attempts; giving up: %s",
+            kind,
+            attempts,
+            self._format_telegram_exception(last_exc),
+        )
+        return None
 
     # -- Sending messages --
 
@@ -720,18 +904,17 @@ class TelegramNotifier:
         if self._check_flood():
             logger.debug("[FLOOD] Skipping send: %s...", text[:60])
             return
-        try:
-            await self.app.bot.send_message(
+
+        result = await self._telegram_call(
+            lambda: self.app.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
                 parse_mode=None,  # Plain text for reliability
-            )
+            ),
+            kind="send_message",
+        )
+        if result is not None:
             self._record_send()
-        except Exception as e:
-            if "flood" in str(e).lower() or "429" in str(e):
-                self._handle_flood_error(e)
-            else:
-                logger.error(f"Failed to send Telegram message: {e}")
 
     async def edit_message_by_id(self, message_id: int, text: str) -> bool:
         """Edit a previously sent message in-place (for live status card)."""
@@ -739,19 +922,27 @@ class TelegramNotifier:
             return False
         if self._check_flood():
             return False
-        try:
-            await self.app.bot.edit_message_text(
+
+        text_hash = hashlib.sha1(text.encode("utf-8")).digest()
+        if self._edit_dedup_hashes.get(message_id) == text_hash:
+            logger.debug("[DEDUP] Skipping identical edit for msg_id=%s", message_id)
+            return True
+
+        await self._wait_for_edit_slot()
+        result = await self._telegram_call(
+            lambda: self.app.bot.edit_message_text(
                 chat_id=TELEGRAM_CHAT_ID,
                 message_id=message_id,
                 text=text,
                 parse_mode=None,
-            )
+            ),
+            kind="edit_message_text",
+        )
+        if result is not None:
+            self._edit_dedup_hashes[message_id] = text_hash
             return True
-        except Exception as e:
-            if "flood" in str(e).lower() or "429" in str(e):
-                self._handle_flood_error(e)
-            else:
-                logger.debug("edit_message_by_id failed (msg_id=%s): %s", message_id, e)
+        else:
+            logger.debug("edit_message_by_id failed (msg_id=%s)", message_id)
             return False
 
     async def send_message_get_id(self, text: str) -> int | None:
@@ -761,19 +952,18 @@ class TelegramNotifier:
         if self._check_flood():
             logger.debug("[FLOOD] Skipping send_message_get_id: %s...", text[:60])
             return None
-        try:
-            msg = await self.app.bot.send_message(
+
+        msg = await self._telegram_call(
+            lambda: self.app.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
-            )
+            ),
+            kind="send_message_get_id",
+        )
+        if msg is not None:
             self._record_send()
             return msg.message_id
-        except Exception as e:
-            if "flood" in str(e).lower() or "429" in str(e):
-                self._handle_flood_error(e)
-            else:
-                logger.warning("send_message_get_id failed: %s", e)
-            return None
+        return None
 
     async def send_photo(self, photo_path):
         """Send a photo (e.g. equity chart) to the configured chat."""
@@ -801,17 +991,22 @@ class TelegramNotifier:
         if not self.app or not TELEGRAM_CHAT_ID:
             logger.info(f"[DRY] Would send alert: {text[:80]}...")
             return
+        if self._check_flood():
+            logger.debug("[FLOOD] Skipping alert: %s...", text[:60])
+            return
 
-        try:
-            msg = await self.app.bot.send_message(
+        msg = await self._telegram_call(
+            lambda: self.app.bot.send_message(
                 chat_id=TELEGRAM_CHAT_ID,
                 text=text,
                 reply_markup=keyboard,
-            )
+            ),
+            kind="send_alert",
+        )
+        if msg is not None:
+            self._record_send()
             if opp_id:
                 self._message_ids[opp_id] = msg.message_id
-        except Exception as e:
-            logger.error(f"Failed to send alert: {e}")
 
     async def send_confirmation(self, trade_result: dict):
         """Send a trade execution confirmation."""
@@ -837,7 +1032,11 @@ class TelegramNotifier:
 
         data = query.data or ""
         if ":" not in data:
-            await query.edit_message_text("Unknown button action.")
+            await self._wait_for_edit_slot()
+            await self._telegram_call(
+                lambda: query.edit_message_text("Unknown button action."),
+                kind="button_edit_message_text",
+            )
             return
 
         action, opp_id = data.split(":", 1)
@@ -851,10 +1050,12 @@ class TelegramNotifier:
             result_text = "No handler registered."
 
         # Edit the original alert message in-place — clean, no clutter
-        try:
-            await query.edit_message_text(result_text)
-        except Exception as e:
-            logger.error(f"Failed to edit message: {e}")
+        await self._wait_for_edit_slot()
+        result = await self._telegram_call(
+            lambda: query.edit_message_text(result_text),
+            kind="button_edit_message_text",
+        )
+        if result is None:
             await self.send_message(result_text)
 
         # Clean up stored message_id

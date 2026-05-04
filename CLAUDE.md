@@ -289,7 +289,7 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | File | Purpose |
 |---|---|
 | `bot.lock` | PID lockfile. Deleted on graceful shutdown. **Mtime advances every 30s via a dedicated heartbeat task (Apr 24, Session 7; was per-scan in Session 5)** — fresh mtime + dead PID means the process was killed between heartbeats without releasing the lock. |
-| `bot_state.json` | Last scan time, heartbeat, scan counters, DK/FD disabled flags (12h TTL), Session-5 `last_ticks_rotation` flag. |
+| `bot_state.json` | Last scan time, heartbeat, scan counters, DK/FD disabled flags (12h TTL), Session-5 `last_ticks_rotation` flag, Session-52 Telegram delivery health (`telegram_*` forward-only fields). |
 | `positions.json` | **Source of truth for open positions.** Exposure calc reads this. |
 | `trade_history.json` | **Order log.** Every `execute_trade()` and `execute_hedge()` appends a record (filled OR resting). `tracker.resolve_trades()` updates entries in-place when markets settle. Distinct from `paper_trades.json` (the paper-mode resolution log). Read by the Telegram `HISTORY` command and `patterns.analyze_patterns()`. |
 | `paper_trades.json` | **Paper resolution log.** Balance is reconstructed from this. NOT the same as `trade_history.json` (orders) — paper-mode resolutions live here, with `status ∈ {won, lost, exited_early}` driving the post-Session-1 settlement pipeline. |
@@ -432,6 +432,16 @@ launchctl kickstart -k gui/$(id -u)/com.bob.bot            # Bob (when configure
 ```
 
 Battle Scar #3 (single-PID enforcement) was updated May 3 to use the path-rooted pattern; this entry is the structural reminder for future bots added to the fleet.
+
+### 15. Telegram 429s are state, not noise (Session 52, May 3)
+
+May 3 incident: Telegram cooled Glint down after sustained `editMessageText` volume. The old notifier caught the 429, logged a warning, set an in-memory `_flood_until`, and then silently dropped the message after one failed attempt. Worse: edits were not counted by the 20-messages/60s send limiter, so live-card updates could hammer Telegram while sends looked "rate limited" on paper. Symptom: thousands of edit attempts over 24h, no durable `bot_state.json` signal, and every bot restart extended the Telegram cool-down Tyler was waiting out.
+
+**Rule:** all Telegram send/edit calls go through `TelegramNotifier._telegram_call(...)`. On 429/`RetryAfter`, parse retry-after, persist `telegram_throttled_until` + increment `telegram_throttled_count_24h`, sleep, and retry with a fresh coroutine. On transient PTB network errors (`NetworkError`/`TimedOut`), retry with backoff. On success, stamp `telegram_last_send_success_at`; on every attempt, stamp `telegram_last_send_attempt_at`.
+
+**Edit discipline:** `edit_message_by_id` uses a per-chat `EditThrottle` (1/sec sustained, burst 5) plus message-id keyed SHA1 dedup. Dedup records only after a successful edit. Never add a second Telegram state path or a second cooldown field; `_flood_until` is the in-memory mirror, `bot_state.json:telegram_throttled_until` is the operator-facing state.
+
+**Operational note:** if Telegram is cooling down, do not restart Glint to "see if it works." Each restart can re-hit Telegram while still banned and extend the outage. Ship the code, wait out the cool-down, then Tyler restarts manually.
 
 ---
 
@@ -3545,6 +3555,54 @@ Battle Scar exemptions (#9 vig_stack auto-exit, #5 edge price basis, #12 settlem
 - Session 45 verification error: `market_result == 'no_won'` → actual canonical is `'no'` (n_no_won counter returned 0 across all cohorts; correct count is 30/130). Falsified Layer-3 disqualification; Layer-1 saved the right outcome on a different rationale than documented. See Session 45 entry above for full forensic.
 
 If a third instance happens, the next decision could ride on falsified evidence. This reference is the single source of truth.
+
+### `bot/state/bot_state.json`
+
+```python
+{
+  "running": bool,
+  "total_pnl": float,
+  "today_pnl": float,
+  "scan_count": int,
+  "scans_today": int,
+  "crypto_trades_today": int,
+  "crypto_pnl_session": float,
+  "odds_api_requests_this_month": int,
+
+  "started_at": str,                  # ISO 8601 UTC
+  "last_heartbeat": str,              # ISO 8601 UTC
+  "last_scan": str,                   # ISO 8601 UTC
+  "current_date": str,                # YYYY-MM-DD; daily reset key for scans_today + telegram_throttled_count_24h
+  "last_odds_api_request": str,
+  "last_morning_briefing": str,       # YYYY-MM-DD
+  "last_nightly_summary": str,        # YYYY-MM-DD
+  "last_balance_reconcile_date": str, # YYYY-MM-DD
+  "last_balance_reconcile": str,      # ISO 8601 UTC
+  "last_known_kalshi_balance": float,
+
+  "dk_disabled": bool,
+  "dk_disabled_until": float,         # unix timestamp
+  "fd_disabled": bool,
+  "fd_disabled_until": float,         # unix timestamp
+
+  "last_ticks_rotation": str,         # YYYY-MM-DD
+  "last_decisions_rotation": str,     # YYYY-MM-DD
+  "last_predictions_rotation": str,   # YYYY-MM-DD
+  "last_universe_rotation": str,      # YYYY-MM-DD
+  "last_order_microstructure_rotation": str, # YYYY-MM-DD
+  "last_tracker_cadence_rotation": str,      # YYYY-MM-DD
+  "last_universe_metering_reset": str,       # YYYY-MM-DD
+  "total_snapshots_today": int,
+  "partial_snapshots_today": int,
+
+  "telegram_throttled_until": str | None,        # ISO 8601 UTC; forward-only since Session 52
+  "telegram_throttled_count_24h": int,           # reset with scans_today; forward-only since Session 52
+  "telegram_last_send_attempt_at": str | None,   # ISO 8601 UTC; forward-only since Session 52
+  "telegram_last_send_success_at": str | None,   # ISO 8601 UTC; forward-only since Session 52
+}
+```
+
+Forward-only rule: older `bot_state.json` files may be missing any `telegram_*` keys. Readers must treat missing `telegram_throttled_until`, `telegram_last_send_attempt_at`, and `telegram_last_send_success_at` as `None`; missing `telegram_throttled_count_24h` as `0`. Do not rename these fields or add aliases.
 
 ### `bot/state/clv.json` records
 

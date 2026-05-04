@@ -1173,6 +1173,7 @@ class GlintBot:
             if state.get("current_date") != today:
                 state["scans_today"] = 0
                 state["crypto_trades_today"] = 0
+                state["telegram_throttled_count_24h"] = 0
                 state["current_date"] = today
             state["scans_today"] = state.get("scans_today", 0) + 1
             _save_bot_state(state)

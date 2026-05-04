@@ -92,7 +92,7 @@ def test_last_sunday_in_et_includes_today():
 
 # ───────────────────────────────────────────────────────── health pulse
 
-def test_compute_health_pulse_returns_five_rows_with_required_axes(tmp_path, monkeypatch):
+def test_compute_health_pulse_returns_six_rows_with_required_axes(tmp_path, monkeypatch):
     monkeypatch.setattr(h, "STATE_DIR", tmp_path)
     monkeypatch.setattr(h, "ARCHIVE_DIR", tmp_path / "archive")
     monkeypatch.setattr(h, "LOCK_FILE", tmp_path / "bot.lock")
@@ -103,16 +103,19 @@ def test_compute_health_pulse_returns_five_rows_with_required_axes(tmp_path, mon
     monkeypatch.setattr(h, "LOG_FILE", tmp_path / "bot.log")
 
     rows = h.compute_health_pulse(datetime(2026, 4, 29, 12, tzinfo=timezone.utc))
-    assert len(rows) == 5
+    assert len(rows) == 6
     assert [r["axis"] for r in rows] == [
-        "Bot alive", "Scanner health", "Decisions volume", "Trades fired", "Errors",
+        "Bot alive", "Scanner health", "Decisions volume", "Trades fired",
+        "Telegram delivery", "Errors",
     ]
-    # Empty state → bot dead, scanner empty (🚨), decisions zero (🚨), no trades (⚠️), zero errors (✅).
+    # Empty state → bot dead, scanner empty (🚨), decisions zero (🚨), no trades (⚠️),
+    # Telegram never-success warning (⚠️), zero errors (✅).
     statuses = [r["status"] for r in rows]
     assert statuses[0] == "🚨"  # no lock
     assert statuses[1] == "🚨"  # no scans
     assert statuses[2] == "🚨"  # no decisions
-    assert statuses[4] == "✅"  # zero errors
+    assert statuses[4] == "⚠️"  # no Telegram success recorded yet
+    assert statuses[5] == "✅"  # zero errors
 
 
 def test_compute_health_pulse_alive_with_fresh_lock_and_decisions(tmp_path, monkeypatch):
@@ -161,7 +164,9 @@ def test_compute_health_pulse_alive_with_fresh_lock_and_decisions(tmp_path, monk
     assert rows[2]["status"] == "✅"  # 100 decisions
     # Trades fired: empty paper_trades file → ⚠️
     assert rows[3]["status"] == "⚠️"
-    assert rows[4]["status"] == "✅"
+    by_axis = {row["axis"]: row for row in rows}
+    assert by_axis["Telegram delivery"]["status"] == "⚠️"
+    assert by_axis["Errors"]["status"] == "✅"
 
 
 # ───────────────────────────────────────────────────────── state file growth
