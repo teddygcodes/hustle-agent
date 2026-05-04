@@ -3510,6 +3510,41 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 
 ---
 
+### ☑ Session 52 — Telegram rate-limit hardening: 429 backoff + edit throttle + dedup + state surfacing (May 3, ~2.5h coder, restart DEFERRED per Battle Scar #15)
+
+**Trigger.** May 3, 2026 — Tyler reported "no Telegram messages since 4 AM." Investigation surfaced the Telegram silent-rate-limit failure mode now codified as Battle Scar #15: bot's previous notifier caught HTTP 429 responses, logged as INFO, set an in-memory `_flood_until`, and silently dropped the message. Edit volume (`editMessageText`) was 9,357 calls in 24h ≈ 6.5/min — well above Telegram's per-chat sustained 1/sec limit. Eventually tripped Telegram's anti-abuse, blocked outbound for 16+ hours. Two restart attempts during the day (13:39 ET launchctl kickstart + 19:55 ET planner-initiated) each triggered fresh sendMessage 429 bursts that extended the cool-down. Tyler had zero notification visibility while bot continued trading normally.
+
+**What shipped (commit [de52122](https://github.com/teddygcodes/hustle-agent/commit/de52122) on main).**
+
+1. **`bot/notifier.py`** — shared PTB retry/backoff wrapper: `TelegramNotifier._telegram_call(...)`. On 429 / `RetryAfter`: parses `retry_after`, persists `bot_state.telegram_throttled_until`, increments `telegram_throttled_count_24h`, sleeps the indicated duration, retries with a fresh coroutine. On transient `NetworkError` / `TimedOut`: exponential backoff retry. On success: stamps `telegram_last_send_success_at`. On every attempt: stamps `telegram_last_send_attempt_at`.
+2. **Edit throttle** — per-chat token bucket: 1 edit/sec sustained, burst capacity 5. `EditThrottle` class wraps every `editMessageText` call.
+3. **Edit dedup** — message-id keyed SHA1 hash of last-sent text. If new content matches the last successful edit byte-identically, skip the API call entirely. **Records only AFTER successful 200 OK** (so failed sends don't poison the cache).
+4. **Health pulse Telegram row** — `tools/daily_report.py` Section 1 now includes a Telegram delivery row: `last successful send <Xs ago>, throttled until <ts> (<N> throttle events 24h)`.
+5. **Canonical schema (Option A)** — new `bot/state/bot_state.json` block in CLAUDE.md "Canonical Data Schema Reference" section. Four new optional fields (forward-only): `telegram_throttled_until`, `telegram_throttled_count_24h`, `telegram_last_send_attempt_at`, `telegram_last_send_success_at`. The 24h counter resets with `scans_today` daily-reset key.
+6. **Battle Scar #15** — "Telegram 429s are state, not noise." Includes the operational rule: **do NOT restart Glint to "see if Telegram works"** — each restart re-hits Telegram while still cooling down, extends the outage. Wait, then restart manually after first 200 OK.
+7. **Force-added `tools/_report_helpers.py`** — file was previously ignored/untracked but is the actual report renderer (Session 35 work). Now tracked so future sessions don't lose it on a fresh clone.
+
+**Tests.** 1370 passed (was 1359 baseline post-Session 51 + 11 new notifier tests). `tests/test_notifier.py` — 11 cases including 429 backoff, RetryAfter parsing, NetworkError/TimedOut retry, success path, throttle math, dedup record-only-on-success, 24h counter reset semantics, daily report Telegram row rendering. Plus `tests/test_report_helpers.py` updated for the new health-pulse row.
+
+**Bot restart status: DEFERRED.** Per Battle Scar #15's own operational rule, do NOT restart Glint while Telegram is still cooling down — restarting re-hits Telegram with sendMessage burst, extending the cool-down. Current bot is running PRE-Session-52 code (last restart 19:55 ET). The OLD code's silent-fail behavior is, in practice, well-behaved during cool-down (it stops trying after first 429 burst). When `bot.log` shows the first `sendMessage.*200 OK` since 04:07:57 ET — Telegram cool-down has cleared — Tyler manually restarts and Session 52's improved code path takes over. This will likely be tomorrow morning (cool-down typically resolves in 6-24h; today's restart attempts may have extended toward the upper bound).
+
+**What did NOT change.**
+- `bot/main.py` — no scan-loop changes; only reads from notifier
+- `bot/executor.py`, `bot/tracker.py`, `bot/live_watcher.py` — untouched
+- All non-notifier scanner / strategy / sizing code — untouched
+- Bot config (`bot/config.py`) — untouched
+- Discovery agent / strategy lab / state files — untouched
+- Bot still running under launchd (PID 61399 at commit time, OLD pre-Session-52 code, awaiting natural cool-down + manual restart)
+
+**Operational status of Telegram outage (May 3 evening).**
+- Last successful sendMessage to Tyler: 2026-05-03T04:07:57 ET (~16h before commit)
+- Most recent sendMessage 429: 2026-05-03T19:57:25 ET (~2h before commit) — confirms cool-down still active
+- Plan: monitor `bot/logs/bot.log` for `sendMessage.*200 OK` → that's the all-clear signal → manual restart at that point
+
+**Operating Posture observation.** First incident-driven session in the May 1+ arc that EXPLICITLY codifies a "wait, don't restart" discipline. Glint's prior failures were either silent-fail-and-recover (Session 39 wedge) or single-PID-orphan-cleanup (Battle Scar #3). This is the first failure mode where restarting is ACTIVELY HARMFUL to the recovery path. Battle Scar #15 captures the discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
