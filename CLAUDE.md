@@ -445,6 +445,14 @@ May 3 incident: Telegram cooled Glint down after sustained `editMessageText` vol
 
 **Operational note:** if Telegram is cooling down, do not restart Glint to "see if it works." Each restart can re-hit Telegram while still banned and extend the outage. Ship the code, wait out the cool-down, then Tyler restarts manually.
 
+### 16. live_momentum sizing must use the configured paper bankroll, not historical constants (Session 54, May 5)
+
+May 5 correctness review found production `live_watcher._auto_bet_momentum` still reconstructing paper balance as `$500 + realized_pnl` even though `PAPER_STARTING_BALANCE` was bumped to `$10,500` on Apr 29. Result: every live_momentum Kelly sizing decision after the bump operated at roughly 9% of intended scale, while vig_stack / arbs used the executor-side balance path correctly.
+
+**Rule:** never hardcode bankroll constants in strategy-local sizing paths. If a strategy needs paper balance, use the configured `PAPER_STARTING_BALANCE` or a canonical shared helper if one exists. Session 54 intentionally did NOT invent a new helper because `_check_balance()` mixes reconstruction with admission/reserve checks; the surgical production fix is [bot/live_watcher.py:1686](hustle-agent/bot/live_watcher.py:1686) `PAPER_STARTING_BALANCE + paper_pnl`.
+
+**Analysis consequence:** Session 19c and Session 49 live_momentum sizing evidence is provisional until 14 days of post-Session-54 data accumulates. Do not re-tune those conclusions from pre-fix dollar notionals.
+
 ---
 
 ## Data-Driven Tuning (The Apr 14 Audit)
@@ -3544,6 +3552,65 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 - Plan: monitor `bot/logs/bot.log` for `sendMessage.*200 OK` → that's the all-clear signal → manual restart at that point
 
 **Operating Posture observation.** First incident-driven session in the May 1+ arc that EXPLICITLY codifies a "wait, don't restart" discipline. Glint's prior failures were either silent-fail-and-recover (Session 39 wedge) or single-PID-orphan-cleanup (Battle Scar #3). This is the first failure mode where restarting is ACTIVELY HARMFUL to the recovery path. Battle Scar #15 captures the discipline.
+
+### ☑ Session 53 — Per-family `max_position_dollars` cap for vig_stack: KXINX/KXMLBGAME $50, KXHIGH* $150, healthy $200 (May 4, ~1h coder, restart gated on Telegram cool-down per Battle Scar #15)
+
+**Trigger.** Session 52 post-Telegram-fix audit (Apr 30) revealed KXINX vig_stack is structurally EV-negative at the post-Apr-29 balance bump. Same 78% WR (n=23), same family — but position size jumped 6.7× (qty 14 → qty 235) when the dynamic cap (`min(balance × 5%, $200)`) lifted off the balance-bound regime. Math: `0.78 × $25 win − 0.22 × $200 loss = −$24.50/trade`. EV flipped from +$0.52/trade (pre-bump, $25 cap binding) to −$22.94/trade (post-bump, $200 cap binding). First post-bump KXINX trade lost $200 in ~6 minutes (1 ladder bin hit). Sizing alone broke EV without WR or family changing. KXMLBGAME has the same tail-risk shape; KXHIGH* families are mid; KXHIGHAUS/MIA are healthy at $200.
+
+**What shipped.**
+
+1. **`bot/config.py`** — `VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS = 200` + `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` dict (KXINX/KXMLBGAME $50, KXHIGHCHI/DEN/NY $150, KXHIGHAUS/MIA $200). Inserted after `VIG_STACK_MAX_RUNGS_PER_LADDER`.
+2. **`bot/sizing.py`** — `kelly_size()` gets optional `family: str | None = None` kwarg. When provided, replaces the $200 hardcode in the dynamic-cap calc with `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS.get(family, VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS)`. Default `None` ≡ legacy $200 → byte-identical for live_momentum, arbs, and every non-vig_stack caller.
+3. **`bot/main.py:_handle_opportunity()`** — for `opp_type in ("vig_stack_no", "vig_stack_series")` only, extracts `family = ticker.split("-", 1)[0]` and passes `family=` to `kelly_size()`. Other opp_types pass `family=None` (no-op).
+4. **`tests/test_sizing.py`** — 12 new test cases appended (Session 53 block): default-family-None no-op, KXINX caps at $50, unknown family falls back to $200 default, balance-pct still wins on small balance, live_momentum sport= path unaffected, plus a parameterized "every configured family respects its cap" sweep across all 7 dict entries.
+
+**Tests.** 1387 passed (1375 pre-Session-53 baseline + 12 new). live_momentum and vig_stack_series strategy tests untouched and green; test_sizing.py grows from 8 to 20 cases.
+
+**Bot restart status: GATED on Telegram cool-down per Battle Scar #15.** Same operational rule as Session 52: do NOT restart while `bot.log` is still showing sendMessage 429s. Check `grep "sendMessage.*200 OK" bot/logs/bot.log | tail -3` first. If no successful sendMessage since the Session 52 outage (last verified 04:07:57 ET May 3), DEFER restart. When cool-down clears, manual `launchctl kickstart -k gui/$(id -u)/com.tylergilstrap.hustle-agent`, verify single PID + lockfile match, then watch first KXINX vig_stack trade for size compliance.
+
+**Verification gate.** Next 3 KXINX vig_stack trades after restart should size at qty ≤ ~100 (was 235 pre-fix at $200 cap / ~$0.85 mean fill). Day-14 re-check 2026-05-18: KXINX P&L slope should trend toward break-even instead of −$22.94/trade slope. If qty > 100 on the first post-restart KXINX trade, the family-extraction or call-site change is broken — revert and investigate.
+
+**What did NOT change.**
+- `bot/strategies/vig_stack_series.py` — strategy logic untouched (it emits Opportunity objects; sizing is downstream).
+- `bot/strategies/live_momentum.py`, `bot/live_watcher.py` — kelly_size call sites pass no `family=` and remain on the legacy $200 cap. Session 49 `sport=` behavior preserved.
+- `bot/executor.py`, arbs sizing — untouched.
+- `MAX_BET_FRACTION` (0.05), `KELLY_FRACTION` (0.25), `MIN_BET_DOLLARS` (1.0) — global tunables untouched.
+- `VIG_STACK_STABLE_FAMILIES` (entry-price floor membership) — KXINX still on the 0.70 floor; orthogonal to position cap.
+- Open KXINX positions — ride to settlement at original size; cap only affects NEW trades. Correct (exits aren't sized; entries are).
+
+**Architectural mirror: Session 49** — same surgical shape (one `kelly_size()` kwarg, one config dict, default-None no-op, hand-walked-numerics test pattern). Different strategy (vig_stack vs live_momentum), different lever (dollar cap vs Kelly multiplier).
+
+**Cross-ref Battle Scar.** Sizing changes that pass tests but flip EV are invisible without per-family P&L decomposition — KXINX's own unit tests would have continued to pass at the $200 cap. Future sizing changes (global cap shifts, balance-pct, fractional-Kelly tuning) MUST trigger a per-family EV recompute in their verification gates, not just a unit-test pass count.
+
+**Out of scope.** Disabling KXINX entirely (premature; $50 cap should restore +EV at observed WR). Touching live_momentum or arbs sizing. Changing global MAX_BET_FRACTION or KELLY_FRACTION. Re-investigating the original Apr 29 balance bump (separate decision). Day-7/day-14 retro routines (auto-scheduled).
+
+---
+
+### ☑ Session 54 — live_watcher correctness pass: paper balance, exit_reason, ScoreSnapshot period (May 5, ~2h coder)
+
+**Trigger.** Codex review on May 5 confirmed three production `bot/live_watcher.py` bugs on the live_momentum side: paper sizing still used the pre-Apr-29 phantom `$500` bankroll, paper exits dropped the concrete `exit_reason`, and two telemetry paths treated `ScoreSnapshot` dataclasses like dicts. Scope was intentionally narrow: live_momentum only; vig_stack, arbs, and live_watcher arb-mode behavior unchanged.
+
+**What shipped.**
+
+1. **Paper bankroll fix** — [bot/live_watcher.py:45](bot/live_watcher.py:45) imports `PAPER_STARTING_BALANCE`; [bot/live_watcher.py:1686](bot/live_watcher.py:1686) now reconstructs `_auto_bet_momentum` sizing balance as `PAPER_STARTING_BALANCE + paper_pnl` instead of `500.0 + paper_pnl`. Phase-0 read found no dedicated canonical `_reconstruct_paper_balance` helper; `executor._check_balance()` includes admission/reserve semantics, so no shared helper was invented.
+2. **Exit reason persistence** — [bot/live_watcher.py:2520](bot/live_watcher.py:2520) now calls `_paper_record_exit(..., reason=reason)`. This restores the Session 36 forward-only `exit_reason` contract for live_watcher PAPER EXIT records; historical `"unknown"` rows stay unchanged.
+3. **ScoreSnapshot period access** — [bot/live_watcher.py:1819](bot/live_watcher.py:1819) and [bot/live_watcher.py:2564](bot/live_watcher.py:2564) now use `.period` attribute access instead of `.get("period")`, matching `bot.game_context.ScoreSnapshot` and the already-correct `bot/strategies/live_momentum.py` port.
+4. **Regression tests** — [tests/test_live_watcher.py:442](tests/test_live_watcher.py:442), [tests/test_live_watcher.py:500](tests/test_live_watcher.py:500), and [tests/test_live_watcher.py:567](tests/test_live_watcher.py:567) cover the bankroll, `exit_reason`, and ScoreSnapshot regressions.
+
+**Verification.**
+
+1. ☑ Targeted: `python3 -m pytest tests/test_live_watcher.py -v -k "uses_paper_starting_balance or exit_reason or score_snapshot"` → 3 passed.
+2. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1390 passed** (1387 baseline + 3 new), 0 failures.
+3. ☑ Pre-restart live_momentum notional baseline captured from `paper_trades.json`: last three were ATP `$13.40`, ATP `$13.40`, NBA `$14.40` (`2026-05-04T18:19:51Z`, `2026-05-04T18:25:59Z`, `2026-05-05T03:32:15Z`). No post-restart live_momentum trade fired during this session. First post-restart live_momentum trade should be roughly 10x larger in dollar notional after sport multipliers; if not, investigate sizing path.
+4. ☑ Bot restarted once via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Fresh child start: May 5, 2026 01:45:53 ET. Path-rooted verification: one wrapper PID `93948`, one child PID `93967`, `bot/state/bot.lock` = `93967`. Five-minute heartbeat check: `last_heartbeat=2026-05-05T05:50:58.801280+00:00`, age `25.1s`, `running=True`.
+
+**Analysis posture.** Session 19c (`MOMENTUM_LEADER_MIN=0.65`) and Session 49 per-sport `size_multiplier` evidence is now explicitly provisional pending 14 days of corrected post-Session-54 live_momentum data. The existing May 15 Session 49 and May 18 Session 22 routines should re-evaluate on corrected data; do not pre-empt them with backfilled or pre-fix dollar-size analysis. `bot_state.json running:false` remains a separate watch-list follow-up, not part of this session.
+
+**What did NOT change.**
+
+- `bot/executor.py`, `bot/strategies/live_momentum.py`, `bot/main.py`, vig_stack, arbs, and live_watcher arb-mode — untouched.
+- Historical paper records — no backfill; forward-only per Session 36.
+- Session 19c / Session 49 evidence numbers — not recalculated here.
 
 ---
 

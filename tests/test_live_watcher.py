@@ -436,6 +436,196 @@ def test_check_exit_trailing_stop_fires_after_peak_fix(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 54: live_watcher correctness pass
+# ---------------------------------------------------------------------------
+
+def test_auto_bet_momentum_uses_paper_starting_balance_not_hardcoded_500(tmp_path, monkeypatch):
+    """Momentum sizing must use the configured paper balance, not the old $500.
+
+    Pre-fix, _auto_bet_momentum reconstructed paper balance as 500 + realized
+    P&L, so post-Apr-29 live_momentum entries were sized at ~9% of intended
+    scale. Empty paper_trades should size off PAPER_STARTING_BALANCE.
+    """
+    import asyncio
+    from collections import Counter
+    from bot import live_watcher
+    from bot.config import PAPER_STARTING_BALANCE
+
+    state_dir = tmp_path / "bot" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "paper_trades.json").write_text("[]")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(live_watcher, "PAPER_MODE", True)
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", tmp_path / "live_journal.json")
+
+    captured = {}
+
+    def fake_kelly_size(**kwargs):
+        captured["balance"] = kwargs["balance"]
+        return {"contracts": 2, "total_cost": 1.0, "max_payout": 2.0}
+
+    def fake_execute_trade(*args, **kwargs):
+        return {
+            "success": True,
+            "order_result": {"order_id": "paper-order-balance", "filled_count": 2},
+        }
+
+    monkeypatch.setattr("bot.sizing.kelly_size", fake_kelly_size)
+    monkeypatch.setattr("bot.executor.execute_trade", fake_execute_trade)
+
+    watcher = live_watcher.LiveGameWatcher.__new__(live_watcher.LiveGameWatcher)
+    watcher.ticker = "KXNBAGAME-26MAY05TEST-LAL"
+    watcher.query = "test"
+    watcher.sport = "nba"
+    watcher.balance = 0.0
+    watcher._game_ctx = None
+    watcher._last_espn_data = None
+    watcher._match_title = "Test Game"
+    watcher.bets_placed = []
+    watcher._entry_count = 0
+    watcher._tick_telem = Counter()
+
+    asyncio.run(watcher._auto_bet_momentum(
+        {"ticker": watcher.ticker},
+        yes_ask=50,
+        reason="test dip",
+        dip_cents=4,
+        dqs_score=0.8,
+    ))
+
+    assert captured["balance"] >= PAPER_STARTING_BALANCE - 1
+    assert captured["balance"] > 5000
+
+
+def test_paper_exit_persists_exit_reason_not_unknown(tmp_path, monkeypatch):
+    """Live watcher paper exits must forward the concrete exit reason.
+
+    Pre-fix, _check_exit called _paper_record_exit without reason=..., so every
+    forward paper exit written from this path persisted exit_reason="unknown".
+    """
+    import asyncio
+    import json
+    from collections import deque
+    from bot import live_watcher
+    from bot import executor
+
+    ticker = "KXNBAGAME-26MAY05TEST-BOS"
+    order_id = "paper-order-exit-reason"
+    paper_file = tmp_path / "paper_trades.json"
+    paper_file.write_text(json.dumps([{
+        "id": order_id,
+        "ticker": ticker,
+        "type": "live_momentum",
+        "side": "yes",
+        "entry_price": 0.50,
+        "contracts": 5,
+        "timestamp": "2026-05-05T00:00:00+00:00",
+        "status": "open",
+        "exit_price": None,
+        "pnl": None,
+        "resolved_at": None,
+    }]))
+
+    monkeypatch.setattr(live_watcher, "PAPER_MODE", True)
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", tmp_path / "live_journal.json")
+    monkeypatch.setattr(executor, "PAPER_TRADES_FILE", paper_file)
+    monkeypatch.setattr("bot.config.POSITIONS_FILE", tmp_path / "positions.json")
+    monkeypatch.setattr("bot.tracker.log_settlement", lambda *a, **kw: None)
+    monkeypatch.setattr("bot.tracker.check_settlement_invariant", lambda *a, **kw: None)
+    monkeypatch.setattr("bot.patterns.record_resolution", lambda *a, **kw: None)
+
+    watcher = live_watcher.LiveGameWatcher.__new__(live_watcher.LiveGameWatcher)
+    watcher.mode = "momentum"
+    watcher.sport = "nba"
+    watcher.ticker = ticker
+    watcher._opponent_ticker = None
+    watcher._game_ctx = None
+    watcher._last_espn_data = None
+    watcher._price_history = deque([50, 65])
+    watcher._trailing_active = {}
+    watcher._peak_values = {}
+    watcher._match_title = "Test Game"
+    watcher.query = "test"
+    watcher.bets_placed = [{
+        "ticker": ticker,
+        "side": "yes",
+        "price_cents": 50,
+        "contracts": 5,
+        "order_id": order_id,
+        "entered_at": 0,
+    }]
+    watcher.exits = []
+
+    asyncio.run(watcher._check_exit({"yes_bid": 65, "yes_ask": 66}, edge=0.0, relative_edge=0.0))
+
+    record = json.loads(paper_file.read_text())[0]
+    expected_reason = "TAKE PROFIT: +15¢ (50¢ → 65¢)"
+    assert record["exit_reason"] == expected_reason
+    assert record["exit_reason"] != "unknown"
+
+
+def test_period_extraction_from_score_snapshot_does_not_raise(tmp_path, monkeypatch):
+    """ScoreSnapshot is a dataclass; period must be read as an attribute."""
+    import asyncio
+    from collections import Counter, deque
+    from bot import live_watcher
+    from bot.game_context import GameContext
+
+    gc = GameContext(sport="nba")
+    gc.update({}, our_score=87, their_score=79, period=3, clock_str="5:00")
+
+    monkeypatch.setattr(live_watcher, "PAPER_MODE", False)
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", tmp_path / "live_journal.json")
+    monkeypatch.setattr(
+        "bot.sizing.kelly_size",
+        lambda **kwargs: {"contracts": 2, "total_cost": 1.0, "max_payout": 2.0},
+    )
+    monkeypatch.setattr(
+        "bot.executor.execute_trade",
+        lambda *a, **kw: {
+            "success": True,
+            "order_result": {"order_id": "paper-order-period", "filled_count": 2},
+        },
+    )
+
+    watcher = live_watcher.LiveGameWatcher.__new__(live_watcher.LiveGameWatcher)
+    watcher.mode = "momentum"
+    watcher.ticker = "KXNBAGAME-26MAY05TEST-NYK"
+    watcher.query = "test"
+    watcher.sport = "nba"
+    watcher.balance = 1000.0
+    watcher._game_ctx = gc
+    watcher._last_espn_data = None
+    watcher._match_title = "Test Game"
+    watcher.bets_placed = []
+    watcher.exits = []
+    watcher._entry_count = 0
+    watcher._tick_telem = Counter()
+    watcher._opponent_ticker = None
+    watcher._price_history = deque([55, 70])
+    watcher._trailing_active = {}
+    watcher._peak_values = {}
+
+    asyncio.run(watcher._auto_bet_momentum(
+        {"ticker": watcher.ticker},
+        yes_ask=55,
+        reason="period test",
+        dip_cents=4,
+        dqs_score=0.8,
+    ))
+
+    assert watcher.bets_placed[0]["game_state"]["period"] == 3
+
+    monkeypatch.setattr(live_watcher, "PAPER_MODE", True)
+    monkeypatch.setattr("bot.executor._paper_record_exit", lambda *a, **kw: None)
+    monkeypatch.setattr("bot.config.POSITIONS_FILE", tmp_path / "positions.json")
+
+    asyncio.run(watcher._check_exit({"yes_bid": 70, "yes_ask": 71}, edge=0.0, relative_edge=0.0))
+
+    assert watcher.exits[0]["exit_game_state"]["period"] == 3
+
+
+# ---------------------------------------------------------------------------
 # Session 29: _journal_append recovers from trailing-bracket corruption
 # ---------------------------------------------------------------------------
 

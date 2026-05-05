@@ -545,6 +545,28 @@ VIG_STACK_WEATHER_MIN_PRICE = 0.93
 # 6-rung wipe would not have. Halves worst-case single-event loss.
 VIG_STACK_MAX_RUNGS_PER_LADDER = 3
 
+# Per-family max position dollars for vig_stack (Session 53, May 4 2026).
+# At the post-Apr-29 balance bump (~$10.5k), the global $200 dynamic cap in
+# sizing.py flipped KXINX (78% WR, n=23) from +$0.52/trade to −$22.94/trade —
+# sizing alone broke EV without WR or family changing. This dict caps each
+# family individually. Default (any family not listed) =
+# VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS, which preserves the legacy $200.
+# Architectural mirror: Session 49 per-sport size_multiplier on live_momentum.
+VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS = 200
+
+VIG_STACK_FAMILY_MAX_POSITION_DOLLARS = {
+    # NBA/MLB inning markets — high tail risk, EV-negative at $200 cap
+    "KXINX":      50,
+    "KXMLBGAME":  50,
+    # NHL/NBA highest-scorer markets — modest tail risk, near-flat P&L
+    "KXHIGHCHI": 150,
+    "KXHIGHDEN": 150,
+    "KXHIGHNY":  150,
+    # Healthy families — keep at default (listed for explicitness)
+    "KXHIGHAUS": 200,
+    "KXHIGHMIA": 200,
+}
+
 # ---------------------------------------------------------------------------
 # DraftKings Sportsbook API (primary odds source — no auth needed)
 # Blocked by Akamai WAF on some residential IPs; works from cloud/VPS.

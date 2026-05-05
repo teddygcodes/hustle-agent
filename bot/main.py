@@ -872,6 +872,15 @@ class GlintBot:
         )
         opp_type = opp.get("type", "")
         uncertainty_discount = 0.85 if opp_type in ("weather", "series_game_edge") else 1.0
+        # Session 53: vig_stack opp_types size against per-family caps. Family
+        # extracted from ticker prefix (e.g. KXINX-25APR30NETLAL → "KXINX").
+        # Non-vig_stack opp_types pass family=None → legacy $200 cap (no-op).
+        ticker = opp.get("ticker", "")
+        family = (
+            ticker.split("-", 1)[0]
+            if opp_type in ("vig_stack_no", "vig_stack_series") and ticker
+            else None
+        )
         sizing = kelly_size(
             edge=opp.get("edge", 0),
             probability=win_prob,
@@ -879,6 +888,7 @@ class GlintBot:
             price_cents=price_cents,
             uncertainty_discount=uncertainty_discount,
             confidence=opp.get("confidence", 0.75),
+            family=family,
         )
 
         if sizing["contracts"] <= 0:

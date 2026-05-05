@@ -42,7 +42,7 @@ from bot.config import (
     MOMENTUM_DISABLED_SPORTS,
     TENNIS_QUALITY_MIN_TICKS, TENNIS_QUALITY_MIN_RANGE,
     SPORT_PROFILES,
-    PAPER_MODE,
+    PAPER_MODE, PAPER_STARTING_BALANCE,
 )
 import bot.odds_scraper as _odds
 from bot.clv import (
@@ -1683,7 +1683,7 @@ class LiveGameWatcher:
             if pt_file.exists():
                 trades = json.loads(pt_file.read_text())
                 paper_pnl = sum(t.get("pnl") or 0 for t in trades)
-                balance = 500.0 + paper_pnl
+                balance = PAPER_STARTING_BALANCE + paper_pnl
 
         # Dip-scaled sizing: small dips = high confidence = bigger bet
         size_mult = self._dip_size_multiplier(dip_cents)
@@ -1816,7 +1816,7 @@ class LiveGameWatcher:
             "dqs_score": dqs_score,
             "game_state": {
                 "score_diff": gc.score_diff if gc else None,
-                "period": gc._snapshots[-1].get("period") if gc and gc._snapshots else None,
+                "period": gc._snapshots[-1].period if gc and gc._snapshots else None,
                 "completion": round(gc.game_completion_pct, 3) if gc else None,
                 "wp": round(gc.win_probability, 3) if gc else None,
                 "momentum": round(gc.momentum, 3) if gc else None,
@@ -2517,7 +2517,7 @@ class LiveGameWatcher:
                         from bot.executor import _paper_record_exit
                         exit_price = current_value / 100.0
                         order_id = bet.get("order_id", "")
-                        _paper_record_exit(order_id, exit_price, round(pnl, 4))
+                        _paper_record_exit(order_id, exit_price, round(pnl, 4), reason=reason)
                         # Also mark position as exited in positions.json so the
                         # orphan auto-close in _check_position_limits() doesn't
                         # later re-settle this trade against market outcome.
@@ -2561,7 +2561,7 @@ class LiveGameWatcher:
                     "hold_seconds": hold_seconds,
                     "exit_game_state": {
                         "score_diff": exit_gc.score_diff if exit_gc else None,
-                        "period": exit_gc._snapshots[-1].get("period") if exit_gc and exit_gc._snapshots else None,
+                        "period": exit_gc._snapshots[-1].period if exit_gc and exit_gc._snapshots else None,
                         "completion": round(exit_gc.game_completion_pct, 3) if exit_gc else None,
                         "wp": round(exit_gc.win_probability, 3) if exit_gc else None,
                     } if exit_gc else None,

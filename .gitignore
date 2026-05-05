@@ -18,4 +18,28 @@ tools/strategy_lab/candidates/*
 !tools/strategy_lab/candidates/example_total_points_under.py
 tools/strategy_lab/reports_out/*
 !tools/strategy_lab/reports_out/.gitkeep
+# Load-bearing tools/ files — explicit exceptions (audit aftermath of Session 52
+# _report_helpers.py force-add; if you add a new tool that's imported by tests
+# or referenced in CLAUDE.md as a deliverable, add an exception here too).
+!tools/_report_helpers.py
+!tools/daily_report.py
+!tools/weekly_report.py
+!tools/calibration_report.py
+!tools/cohort_report.py
+!tools/excursion_report.py
+!tools/universe_report.py
+!tools/microstructure_report.py
+!tools/hypothetical_report.py
+!tools/backtest.py
+!tools/tick_backtest.py
+!tools/backfill_regime.py
+!tools/backfill_extended_mfe.py
+!tools/live_momentum_dataset.py
+!tools/live_momentum_buckets.py
+!tools/journal_analysis.py
+!tools/exit_replay.py
+!tools/regenerate_live_momentum_fixtures.py
+!tools/rebuild_strategy_audit.py
+!tools/clean_stale_state.py
+!tools/purge_clv_disabled.py
 output/

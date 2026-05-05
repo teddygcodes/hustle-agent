@@ -161,3 +161,97 @@ def test_kelly_size_vig_stack_path_unaffected_when_sport_None():
     assert no_kwarg == explicit_none == fake_sport
     assert no_kwarg["reason"] == "sized"
     assert no_kwarg["contracts"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Session 53 (May 4, 2026) — per-family max_position_dollars for vig_stack.
+#
+# At post-Apr-29 balance bump, KXINX flipped EV-negative purely on sizing
+# (78% WR unchanged; +$0.52 → −$22.94/trade). Adds optional `family` kwarg
+# to kelly_size(); when provided, replaces the $200 hardcode in `dynamic_max`
+# with VIG_STACK_FAMILY_MAX_POSITION_DOLLARS[family] (default $200).
+#
+# Scenario chosen so the family cap is the BINDING constraint:
+#   balance=10_000, MAX_BET_FRACTION=0.05 → balance × 5% = $500
+#   family cap = $50 (KXINX) → dynamic_max = min(500, 50) = $50
+#   risk_dollars after Kelly is well above $50, so the cap binds.
+# ---------------------------------------------------------------------------
+CAP_BOUND_SCENARIO = dict(
+    edge=0.10,
+    probability=0.78,
+    balance=10_000.0,
+    price_cents=50,
+    confidence=0.80,
+)
+
+
+def test_kelly_size_default_family_none_unchanged():
+    """Calling kelly_size without `family` is byte-identical to family=None,
+    which is byte-identical to pre-Session-53 behavior. Paranoid no-op test."""
+    no_kwarg = kelly_size(**CAP_BOUND_SCENARIO)
+    explicit_none = kelly_size(**CAP_BOUND_SCENARIO, family=None)
+    assert no_kwarg == explicit_none
+    assert no_kwarg["reason"] == "sized"
+
+
+def test_kelly_size_family_kxinx_caps_at_50():
+    """KXINX has $50 cap. At $10k balance, balance × 5% = $500 would otherwise
+    bind; family cap of $50 wins. total_cost ≤ $50."""
+    sized = kelly_size(**CAP_BOUND_SCENARIO, family="KXINX")
+    assert sized["reason"] == "sized"
+    # $50 cap / $0.50 price = 100 contracts max
+    assert sized["contracts"] <= 100
+    assert sized["total_cost"] <= 50.0
+    # And it must be SMALLER than the no-family default-$200 path.
+    none_path = kelly_size(**CAP_BOUND_SCENARIO, family=None)
+    assert sized["contracts"] < none_path["contracts"]
+
+
+def test_kelly_size_family_unknown_uses_default_200():
+    """Unconfigured family falls back to VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS
+    ($200) — same effective ceiling as family=None."""
+    unknown = kelly_size(**CAP_BOUND_SCENARIO, family="KXNEWFAMILY")
+    none_path = kelly_size(**CAP_BOUND_SCENARIO, family=None)
+    assert unknown["contracts"] == none_path["contracts"]
+    assert unknown["total_cost"] == none_path["total_cost"]
+
+
+def test_kelly_size_balance_pct_still_wins_on_small_balance():
+    """Pre-balance-bump regime: at $500 balance, 5% = $25 < $200 family cap.
+    Family cap is non-binding — balance × MAX_BET_FRACTION still binds.
+    Session 53 must not change small-balance sizing."""
+    small = dict(CAP_BOUND_SCENARIO, balance=500.0)
+    with_family = kelly_size(**small, family="KXHIGHAUS")  # cap=$200
+    without = kelly_size(**small, family=None)
+    assert with_family["contracts"] == without["contracts"]
+
+
+def test_kelly_size_live_momentum_path_unaffected_by_family_kwarg():
+    """live_momentum still passes sport= without family=. Sport multiplier
+    behavior is unchanged by Session 53; family=None defaults preserve $200."""
+    nba_pre = kelly_size(**CAP_BOUND_SCENARIO, sport="nba")
+    nba_post = kelly_size(**CAP_BOUND_SCENARIO, sport="nba", family=None)
+    assert nba_pre == nba_post
+
+
+@pytest.mark.parametrize(
+    "family,expected_cap",
+    [
+        ("KXINX",      50),
+        ("KXMLBGAME",  50),
+        ("KXHIGHCHI", 150),
+        ("KXHIGHDEN", 150),
+        ("KXHIGHNY",  150),
+        ("KXHIGHAUS", 200),
+        ("KXHIGHMIA", 200),
+    ],
+)
+def test_kelly_size_every_configured_family_respects_its_cap(family, expected_cap):
+    """Every family in VIG_STACK_FAMILY_MAX_POSITION_DOLLARS sizes within its
+    own cap at $10k balance (where balance × 5% = $500 would otherwise bind).
+    Guards against typos in future dict edits."""
+    sized = kelly_size(**CAP_BOUND_SCENARIO, family=family)
+    assert sized["reason"] == "sized"
+    assert sized["total_cost"] <= float(expected_cap), (
+        f"{family}: total_cost={sized['total_cost']} exceeds cap=${expected_cap}"
+    )

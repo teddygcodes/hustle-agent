@@ -5,7 +5,14 @@ Fractional Kelly with hard caps. Conservative by default.
 """
 
 import math
-from bot.config import KELLY_FRACTION, MAX_BET_FRACTION, MIN_BET_DOLLARS, SPORT_PROFILES
+from bot.config import (
+    KELLY_FRACTION,
+    MAX_BET_FRACTION,
+    MIN_BET_DOLLARS,
+    SPORT_PROFILES,
+    VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS,
+    VIG_STACK_FAMILY_MAX_POSITION_DOLLARS,
+)
 
 
 def kelly_size(
@@ -17,6 +24,7 @@ def kelly_size(
     uncertainty_discount: float = 1.0,
     confidence: float = 0.75,
     sport: str | None = None,
+    family: str | None = None,
 ) -> dict:
     """
     Calculate optimal bet size using fractional Kelly criterion.
@@ -37,6 +45,11 @@ def kelly_size(
             Default 1.0 when None or sport has no multiplier key. Used by live_momentum
             to size down bleeding cohorts (Session 49). vig_stack and other strategies
             pass None and are unaffected.
+        family: Optional vig_stack ticker family (e.g. "KXINX"). When provided, looks up
+            VIG_STACK_FAMILY_MAX_POSITION_DOLLARS[family] and uses it as the dynamic
+            dollar ceiling instead of the legacy $200 hardcode. Default None ≡ legacy
+            $200 cap. vig_stack callers pass family=ticker.split("-", 1)[0]; live_momentum
+            and arbs pass None and are byte-identical to pre-Session-53 behavior.
 
     Returns:
         {contracts, price_cents, total_cost, max_payout, kelly_fraction, reason}
@@ -93,8 +106,17 @@ def kelly_size(
     # Dollar amount to risk
     risk_dollars = balance * capped
 
-    # Dynamic cap: 5% of balance, never more than $200
-    dynamic_max = min(balance * MAX_BET_FRACTION, 200.0)
+    # Dynamic cap: 5% of balance, capped at family-specific dollar ceiling.
+    # Session 53 (May 4 2026): vig_stack callers pass family=ticker.split("-")[0]
+    # to look up per-family ceiling. All other callers (live_momentum, arbs)
+    # pass family=None and get the legacy $200 hardcode (no behavior change).
+    if family is not None:
+        family_cap = VIG_STACK_FAMILY_MAX_POSITION_DOLLARS.get(
+            family, VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS
+        )
+    else:
+        family_cap = 200.0
+    dynamic_max = min(balance * MAX_BET_FRACTION, family_cap)
 
     # Apply dollar floor and ceiling
     risk_dollars = max(risk_dollars, MIN_BET_DOLLARS)
