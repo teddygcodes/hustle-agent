@@ -112,6 +112,48 @@ def test_eth_not_in_active_strategies():
     assert "eth_price_edge" not in ACTIVE_STRATEGIES
 
 
+def test_scan_game_vig_kxmlbgame_emits_series_and_attributes():
+    """Session 63: per-game MLB structural vig is series-shaped, not futures."""
+    from unittest.mock import patch
+    from bot.scanner_sports_arb import scan_game_vig
+
+    event = "KXMLBGAME-26MAY082210ATLLAD"
+    markets = [
+        {
+            "ticker": f"{event}-LAD",
+            "event_ticker": event,
+            "yes_ask": 61,
+            "no_ask": 39,
+            "volume": 200,
+            "title": "Atlanta at Los Angeles Winner?",
+        },
+        {
+            "ticker": f"{event}-ATL",
+            "event_ticker": event,
+            "yes_ask": 63,
+            "no_ask": 64,
+            "volume": 200,
+            "title": "Atlanta at Los Angeles Winner?",
+        },
+    ]
+    seen = []
+
+    with patch("bot.scanner_sports_arb.get_markets", return_value={"markets": markets}):
+        opps = scan_game_vig(
+            scan_id="scan-session-63",
+            on_market_seen=lambda *args: seen.append(args),
+        )
+
+    assert seen == [
+        ("scan-session-63", f"{event}-LAD", "vig_stack_series"),
+        ("scan-session-63", f"{event}-ATL", "vig_stack_series"),
+    ]
+    assert len(opps) == 1
+    assert opps[0]["ticker"] == f"{event}-LAD"
+    assert opps[0]["type"] == "vig_stack_series"
+    assert opps[0]["series_ticker"] == "KXMLBGAME"
+
+
 # ---------------------------------------------------------------------------
 # Weather NWS date targeting
 # ---------------------------------------------------------------------------

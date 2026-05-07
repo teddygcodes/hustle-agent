@@ -3,8 +3,9 @@
 PAPER-4A16F5D2 (KXMLBGAME-26APR291840SFPHI-PHI, vig_stack, +$172.52, exited_early)
 on 2026-04-30 -> outlier_pnl HIGH severity.
 
-vig_stack_futures cohort (decisions.jsonl) emerged 2026-04-29, n>=3 in last 7d,
-n=0 in prior 30d -> cohort_emergence NOTABLE/HIGH severity.
+Historical pre-Session-63 vig_stack_futures cohort (decisions.jsonl) emerged
+2026-04-29, n>=3 in last 7d, n=0 in prior 30d -> cohort_emergence
+NOTABLE/HIGH severity.
 
 If this test breaks, the agent has lost its founding example. P0 regression.
 """
@@ -60,9 +61,9 @@ def _seed_sfphi_fixture(repo: Path) -> None:
         })
     (state / "paper_trades.json").write_text(json.dumps([sfphi] + baseline))
 
-    # decisions.jsonl: 5 vig_stack_futures decisions in last 7d (matches real-world
-    # emergence of 2000+ records starting 2026-04-29) + only vig_stack_series in
-    # prior 30d. Provides the cohort_emergence NEW signal.
+    # decisions.jsonl: historical pre-Session-63 fixture with 5 KXMLBGAME
+    # decisions labeled vig_stack_futures + only vig_stack_series in the prior
+    # 30d. Provides the cohort_emergence NEW signal without backfilling history.
     decisions = []
     for i in range(5):
         decisions.append({

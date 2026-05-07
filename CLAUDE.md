@@ -3989,6 +3989,28 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 63 — KXMLBGAME per-game scanner classification fix (May 7, structural follow-up to Session 62)
+
+**Trigger.** Session 62 closed the immediate money-at-risk surface by making `vig_stack_futures` cap-aware at sizing time, but it left the source label wrong: per-game MLB `KXMLBGAME-*` game-vig opportunities were still emitted as `vig_stack_futures`. Session 63 closes the analytical-pollution surface so downstream `opp_type` cohorts see the correct market shape.
+
+**Phase 0 evidence.** The original brief suspected `bot/strategies/vig_stack_series.py:name_for()`, but Phase 0 corrected the source: `VigStackSeries.name_for()` already returns `vig_stack_series` for current `KXMLBGAME` universe rows; the live bad label came from `bot/scanner_sports_arb.py:scan_game_vig()`, which hard-coded both `on_market_seen(..., "vig_stack_futures")` and opportunity `"type": "vig_stack_futures"`. All decision files since Apr 30 contained **9** `KXMLBGAME-*` decisions, all `vig_stack_futures` (5 accept / 4 reject). Since the Session 53 deploy cutoff, the population was **2** `KXMLBGAME-*` decisions, both accepts. Current NBA/NHL per-game vig-stack counts were zero; true long-dated `KX{MLB,NBA,NHL}-*` futures remained correctly `vig_stack_futures`.
+
+**Fix.** Added an explicit per-game prefix contract `("KXMLBGAME-", "KXNBAGAME-", "KXNHLGAME-")` in `bot/scanner_sports_arb.py` and used it for both universe attribution and emitted opportunity type. Per-game KX*GAME structural-vig opportunities now emit `vig_stack_series`; true championship futures keep `vig_stack_futures`. Added the same explicit guard to `VigStackSeries.name_for()` as defense-in-depth in case a future config edit accidentally includes per-game families in `SPORTS_FUTURES_TICKERS`.
+
+**Layer interaction.** Session 62's `_VIG_STACK_SIZING_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_futures")` stays in place as defense-in-depth. Post-fix `KXMLBGAME-*` emits `vig_stack_series`, so family-cap sizing passes `family="KXMLBGAME"` and Battle Scar #9 TP/SL/edge-flip exemption naturally applies through `_VIG_STACK_OPP_TYPES`. If a future label slips through as `vig_stack_futures`, Session 62 still keeps sizing cap-aware.
+
+**Regression tests added.** Net +10 tests. Coverage now proves: `KXMLBGAME-*` game-vig scanner output and `on_market_seen` attribution are `vig_stack_series`; per-game prefixes for MLB/NBA/NHL classify as `vig_stack_series` even if config tries to treat the base series as futures; true long-dated MLB/NBA/NHL futures still classify as `vig_stack_futures`; corrected `vig_stack_series` KXMLBGAME opportunities still use NO-perspective fair value and the `$50` family cap; Session 62's futures sizing tuple remains active. The SFPHI discovery fixture is now documented as historical pre-Session-63 data, not the forward classifier contract.
+
+**Verification.**
+- `python3 -m pytest tests/test_vig_stack_series_strategy.py tests/test_main.py tests/test_bot_executor.py tests/test_bot_scanners.py -v -k "classifier or per_game or KXMLBGAME or vig_stack_futures or vig_stack_series or game_vig"` → **31 passed / 81 deselected**.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1454 passed**.
+
+**Operating Posture.** This is the FIFTH coder session triggered by `glint_status.py` findings in 24h and completes the Session 62/63 paired arc: surgical first, structural second. Session 43-investigate's "SFPHI singleton; mechanism does not generalize" framing is now updated: the profitable SFPHI trade was one historical instance, but the **mis-classification mechanism** recurred continuously until this session closed the source. Cross-link: Session 62 contains the containment fix; this block contains the cure.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.

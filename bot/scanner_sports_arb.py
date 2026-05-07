@@ -50,6 +50,7 @@ GAME_SERIES = {
     "nhl": "KXNHLGAME",
     "mlb": "KXMLBGAME",
 }
+PER_GAME_VIG_STACK_PREFIXES = ("KXMLBGAME-", "KXNBAGAME-", "KXNHLGAME-")
 CHAMPIONSHIP_SERIES = {
     "nba": "KXNBA",
     "nhl": "KXNHL",
@@ -59,6 +60,13 @@ PLAYOFF_SERIES_SERIES = {
     "nba": "KXNBASERIES",
     "nhl": "KXNHLSERIES",
 }
+
+
+def _game_vig_opp_type_for_ticker(ticker: str) -> str:
+    """Per-game KX*GAME markets are series-shaped, not futures-shaped."""
+    if ticker.startswith(PER_GAME_VIG_STACK_PREFIXES):
+        return "vig_stack_series"
+    return "vig_stack_futures"
 
 
 def _parse_spread_threshold(ticker: str) -> tuple[str, float] | None:
@@ -463,9 +471,9 @@ def scan_game_vig(min_vig_pct: float = 0.08,
     Only scans games with meaningful volume (>100) to avoid illiquid spreads.
 
     Session 12: scan_id + on_market_seen attribute every game-series ticker
-    to its universe.jsonl row. Emits the same opp_type (vig_stack_futures)
-    as scan_vig_stack_series's futures branch, so we attribute under the
-    same name for consistency. None = no-op.
+    to its universe.jsonl row. Per-game KX*GAME markets are series-shaped
+    structural-vig opportunities, so they emit vig_stack_series; true
+    championship futures keep vig_stack_futures elsewhere. None = no-op.
     """
     opportunities = []
 
@@ -483,7 +491,8 @@ def scan_game_vig(min_vig_pct: float = 0.08,
 
         if on_market_seen and scan_id:
             for _m in markets:
-                on_market_seen(scan_id, _m.get("ticker", ""), "vig_stack_futures")
+                _ticker = _m.get("ticker", "")
+                on_market_seen(scan_id, _ticker, _game_vig_opp_type_for_ticker(_ticker))
 
         # Group by event
         events: dict[str, list] = {}
@@ -532,8 +541,9 @@ def scan_game_vig(min_vig_pct: float = 0.08,
                     evt, yes_sum, vig_pct * 100, team, no_fair, na, rel_edge * 100,
                 )
 
+                opp_type = _game_vig_opp_type_for_ticker(ticker)
                 opportunities.append({
-                    "type": "vig_stack_futures",  # Reuse same type — same structural logic
+                    "type": opp_type,
                     "ticker": ticker,
                     "title": m.get("title", ""),
                     "market": m,

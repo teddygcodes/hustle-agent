@@ -263,6 +263,58 @@ def _assert_equivalent(legacy_opps: list[dict], new_opps: list[dict]) -> None:
 # Tests
 # ---------------------------------------------------------------------------
 
+def _attribution_market(ticker: str, series_ticker: str) -> Market:
+    return Market(
+        ticker=ticker,
+        series_ticker=series_ticker,
+        event_ticker=None,
+        status="active",
+        close_ts=None,
+        yes_ask=50,
+        yes_bid=49,
+        no_ask=50,
+        no_bid=49,
+        volume_24h=100,
+        open_interest=100,
+        raw={},
+    )
+
+
+@pytest.mark.parametrize(
+    "ticker,series_ticker",
+    [
+        ("KXMLBGAME-26MAY082210ATLLAD-LAD", "KXMLBGAME"),
+        ("KXNBAGAME-26MAY08NYKPHI-PHI", "KXNBAGAME"),
+        ("KXNHLGAME-26MAY08VGKANA-VGK", "KXNHLGAME"),
+    ],
+)
+def test_classifier_per_game_prefixes_emit_vig_stack_series(
+    ticker: str,
+    series_ticker: str,
+) -> None:
+    """Session 63: per-game KX*GAME tickers are series-shaped."""
+    market = _attribution_market(ticker, series_ticker)
+    with patch("bot.strategies.vig_stack_series.SPORTS_FUTURES_TICKERS", [series_ticker]):
+        assert VigStackSeries().name_for(market) == "vig_stack_series"
+
+
+@pytest.mark.parametrize(
+    "ticker,series_ticker",
+    [
+        ("KXMLB-26-LAD", "KXMLB"),
+        ("KXNBA-26-OKC", "KXNBA"),
+        ("KXNHL-26-VGK", "KXNHL"),
+    ],
+)
+def test_classifier_long_dated_futures_emit_vig_stack_futures(
+    ticker: str,
+    series_ticker: str,
+) -> None:
+    """True championship futures keep the vig_stack_futures label."""
+    market = _attribution_market(ticker, series_ticker)
+    assert VigStackSeries().name_for(market) == "vig_stack_futures"
+
+
 @pytest.mark.parametrize("scenario_name", list(SCENARIOS.keys()))
 def test_byte_identical_opportunities(scenario_name: str) -> None:
     market_dicts, expected_opps, _ = _load_legacy_fixture(scenario_name)

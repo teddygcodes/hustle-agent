@@ -147,6 +147,8 @@ _VIG_STACK_REASON_TO_GATE = {
     "self_check_failed": "self_check",
 }
 
+_PER_GAME_VIG_STACK_PREFIXES = ("KXMLBGAME-", "KXNBAGAME-", "KXNHLGAME-")
+
 
 def _vig_stack_gate_fingerprint(reason: str) -> dict[str, bool]:
     gate = _VIG_STACK_REASON_TO_GATE.get(reason, reason)
@@ -272,6 +274,8 @@ class VigStackSeries:
         """Preserve historical attribution: futures family attributes
         as 'vig_stack_futures', everything else as 'vig_stack_series'.
         Was bot/scanner.py:710."""
+        if market.ticker.startswith(_PER_GAME_VIG_STACK_PREFIXES):
+            return "vig_stack_series"
         if market.series_ticker in set(SPORTS_FUTURES_TICKERS):
             return "vig_stack_futures"
         return "vig_stack_series"
