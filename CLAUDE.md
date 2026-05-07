@@ -2150,7 +2150,7 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 **Asymmetry worth noting (side observation, not actionable yet):** the original Apr 20 disable was based on n=17 trades for atp_challenger but n=1 for wta_challenger. A future re-evaluation of `MOMENTUM_DISABLED_SPORTS` scope (Session 31+ candidate) should split per-circuit and require ≥30 settled challenger CFs *with at least 5 leader-loss settlements* before considering re-enable.
 
-**Watch-list trigger:** when challenger CFs in the research dataset accumulate **≥30 rows with `outcome_clv_cents` populated AND ≥5 rows with `outcome_settlement=no_won`**, re-run this probe. Until then, leave `MOMENTUM_DISABLED_SPORTS` untouched.
+**Watch-list trigger (fired/evaluated by Session 61):** when challenger CFs in the research dataset accumulate **≥30 rows with `outcome_clv_cents` populated AND ≥5 rows with `outcome_settlement=no_won`**, re-run this probe. Session 61 re-ran it at n=398 / leader-loss=122 and held both challenger circuits disabled because both per-circuit EVs were negative. Future challenger re-checks should require materially new data (rough default: another 200+ combined settled challenger CFs after 2026-05-07, or either circuit reaching mean CLV >= +5c with n_no_won >= 100) rather than re-opening on the already-consumed n>=30 / leader-loss>=5 threshold.
 
 **Out of scope (resisted):** no edits to `bot/config.py`, `bot/live_watcher.py`, or `tools/live_momentum_dataset.py`. No re-enable. No bot restart. No UFC investigation (separate rabbit hole — defer to May 2).
 
@@ -3934,6 +3934,33 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 **Operating Posture.** This is the SECOND coder session triggered by a `glint_status.py` finding. The planner-tuned consolidator is now actively driving the session backlog; specifically, the watch-list + flag features (not just the snapshot) are surfacing actionable work.
 
 **Methodology lesson re-codified.** Any post-restart log filtering by timestamp used regex anchoring (`^\[2026-05-07 ...`) rather than lexicographic comparison, per Session 58.5.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
+### ☑ Session 61 — Challenger CF re-evaluation held + live_momentum zero-entry flag diagnosed passive (May 7, investigation-only)
+
+**Trigger.** Persistent `tools/glint_status.py` flags on May 7: the Session 30-followup challenger CF item was TRIGGERED and `live_momentum_zero_entries_48h` was WARN. This is the THIRD coder session triggered by `glint_status.py` findings.
+
+**Phase A diagnosis.** Regenerated `bot/state/research/live_momentum_dataset.csv` with `python3 tools/live_momentum_dataset.py --days 14`: **1,675 rows** (14 accepts / 1,661 tunable rejects) from 275,545 ticks, 66,271 journal events, and 1,351 CLV records. Challenger trigger is genuinely mature now: combined challenger settled CFs **n=398 / leader-loss=122**. Per circuit:
+- `atp_challenger`: n=200, yes_won=140, no_won=60 (30.0%), avg CLV **-0.62c**, +CLV 70.0%, avg positive +26.56c, avg non-positive -64.05c. Historical pre-disable paper trades remain n=17 terminal / **-$7.80** / -$0.46 per trade.
+- `wta_challenger`: n=198, yes_won=136, no_won=62 (31.3%), avg CLV **-4.07c**, +CLV 68.7%, avg positive +24.54c, avg non-positive -66.82c. Historical direct paper evidence is still thin (n=1 / +$3.20), but the fresh CF EV fails.
+
+**Phase A decision: Outcome B — keep both challenger circuits disabled.** Survivorship passes cleanly on both circuits, so the result is informative rather than biased-to-winners. EV fails on both. Cross-cohort context also argues against a challenger-specific positive: all-sports settled CF mean is -3.52c trimmed -3.48c, with positive lift concentrated in NHL (+19.05c) and only mild ATP main-tour support (+0.82c). `atp_challenger` is near-flat but still negative; `wta_challenger` is negative. No `bot/config.py` membership change, no re-enable, no restart. The old Session 30-followup n>=30 / leader-loss>=5 item is marked fired/evaluated; future re-checks require materially new data rather than re-opening on the consumed threshold.
+
+**Phase B diagnosis: passive no-entry-signal window, not a sizing or watcher bug.** At `2026-05-07T06:18Z`, the trailing 48h window had 0 paper `live_momentum` entries, but watchers were active: 55 `scan_found(skip_reason=None)` spawns across wta=19, atp=17, atp_challenger=10, nba=7, ipl=1, nhl=1. Inner-loop `live_momentum` decisions in the same window were 27 rejects / 0 accepts, and all 27 rejects were `sport_disabled` (wta=17, atp_challenger=10). Enabled-sport session summaries show no execution path firing: examples include NBA NYK 415 ticks at flat 80c / execute_attempt=0, NHL ANA 138 ticks at 93-96c / conviction_checked=126 / execute_attempt=0, and IPL SRH 4 ticks at 88c / execute_attempt=0. Sizing is not the floor issue: reconstructed balance **$11,079.73**, NBA/UFC max Kelly dollars **$69.25**, other enabled sports **$138.50**, all far above `MIN_BET_DOLLARS=1.0`.
+
+**Phase B decision: no code change.** This is a D1/D2-passive hybrid: live markets existed and watchers spawned, but enabled sports did not produce a qualifying dip/conviction entry; disabled tennis markets dominate the reject counter because those are the only inner-loop decisions currently being logged. No retune shipped inside Session 61. If the zero-entry WARN persists through the next clear NBA/NHL game window with enabled-sport accept signals absent despite real dip windows, open Session 61-followup focused on entry-gate telemetry.
+
+**Regression tests added.** None. Phase A shipped no config change, so there is no disabled-sports membership assertion to update. Phase B shipped no runtime fix, so there is no behavior regression to lock.
+
+**Verification.**
+- `python3 -m pytest tests/test_glint_status.py -q` → **10 passed**.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1434 passed** (unchanged Session 60 baseline; docs-only).
+- `python3 tools/glint_status.py` → still shows `live_momentum_zero_entries_48h` (top current-file reject reason `sport_disabled=7`) and the Session 30-followup challenger item as TRIGGERED at n=398 / leader-loss=122. Both are now documented as consumed/passive findings rather than confirmed runtime bugs.
+
+**Operating Posture.** This is the THIRD coder session triggered by `glint_status.py` findings. The discovery/consolidator layer is now compounding: deterministic status surfaces the trigger, the session consumes the evidence, and the resulting docs tighten future session selection.
 
 **README sync.** Committed separately per push discipline.
 
