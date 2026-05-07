@@ -4196,6 +4196,51 @@ Both findings now correctly demote because family aggregate is positive (KXHIGHM
 
 ---
 
+### ☑ Session 68 — `edge_below_threshold/nhl_futures` Phase-1 HELD (May 7, doc-only, Outcome C)
+
+**Trigger.** Session 66 §10 Strategy Candidates surfaced `counterfactual_hotspots: edge_below_threshold/nhl_futures n=14 mean CLV +6.4¢ 100% +CLV STABLE`. Phase-0 survivorship gate PASSED decisively (n_no=14, n_yes=0 — opposite of survivorship, genuine leader-side validation). Phase-1 evidence on Session 38a methodology.
+
+**Phase 1 evidence summary.**
+- **1a per-cohort EV:** mean +6.36¢, trimmed +6.42¢ (clears headline bars). CAVEAT: cohort collapses to 3 unique tickers (TB×8, EDM×4, DAL×2); n_effective ~3 unique market events vs Session 38a's n=56 bar.
+- **1b cross-cohort:** combined +2.30¢ across 263 CFs; nhl_futures is the strongest positive cohort (+6.36¢) but only futures family with data — no MLB/NBA futures CFs to confirm isolation. Does NOT disqualify; does NOT confirm Outcome B candidacy.
+- **1c threshold sweep:** ALL 14 CFs have `edge_at_trade` in [-0.0051, -0.0022] — every one has NEGATIVE computed edge. Sweeping `min_relative_edge` across 0.005 / 0.010 / 0.015 / 0.020 (current) / 0.025 / 0.030 admits **0/14 in every case**. Lever is structurally FLAT across all positive thresholds. Only NEGATIVE thresholds admit, which violates vig_stack's structural-edge invariant.
+- **1d historical realized:** 0 KXNHL-* trades in `paper_trades.json`. Vacuous check.
+
+**Mechanism: fair-value model under-prices KXNHL-* championship futures by 5-7¢.** All 14 CFs had `fair_value_cents` in [92.52, 94.69] vs `closing_yes_price = 0` → actual fair was effectively 100¢ NO. The +6.4¢ CLV signal is REAL but the lever to capture it is the fair-value calculation in [bot/math_engine.py](bot/math_engine.py), NOT the gate threshold `VIG_STACK_MIN_EDGE`.
+
+**Decision: Outcome C (HOLD, doc-only).** Outcomes A and B both disqualified because the threshold lever cannot capture the signal at any structurally-valid setting (sweep flat across all positive thresholds, only negative thresholds admit). Sample also thin on n_effective basis (~3 unique markets). Outcome D N/A (infra was sufficient to run the sweep — blocker is data shape, not tooling). Mirrors Session 45/46/40/41 Pattern C discipline.
+
+**Watch-list trigger — re-investigate when ALL of:**
+- Settled-CF count grows to **n>=30 across >=10 distinct KXNHL-* tickers** (n_effective basis, not raw n; current: 14/3 tickers).
+- AND fair-value model for championship futures has been investigated separately (Session 69+ candidate — different surface, much bigger lift, out of scope for Session 68).
+- AND threshold sweep produces a monotonic positive-side admission curve on the larger sample (i.e., some CFs accumulate with `edge_at_trade >= 0.005`).
+
+Until all three fire, the signal is unactionable on the gate-threshold surface.
+
+**What did NOT change.**
+- [bot/strategies/vig_stack_series.py:37](bot/strategies/vig_stack_series.py:37) `VIG_STACK_MIN_EDGE = 0.02` — untouched. Same value since Session 13a.
+- `bot/config.py` — no new override surface added (Pattern B mirror would require activation candidate; we have none).
+- [bot/math_engine.py](bot/math_engine.py) — fair-value calculation untouched. Mechanism analysis points here as the real lever, but a fair-value-model investigation is its own session-sized scope (different file, different evidence requirements, ~3-5h coder time minimum). Out of scope per user spec.
+- `MOMENTUM_DISABLED_SPORTS`, `MOMENTUM_LEADER_MIN`, all live_momentum surfaces — untouched.
+- `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` — untouched.
+- Bot state files (`paper_trades.json`, `positions.json`, `decisions.jsonl`, `clv.json`) — untouched.
+- Tests — no new tests added (Pattern C ships no behavior change to lock).
+
+**Verification.**
+1. ☑ Phase-0 query reproduces: `n=14, n_no=14, n_yes=0, mean_clv=+6.36c`.
+2. ☑ Phase-1c sweep reproduces: edge range [-0.0051, -0.0022], all positive thresholds admit 0/14.
+3. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1478 passed, 1 failed in 40.45s**. Failure is `test_positions_paper_trades_consistency.py::test_paper_trades_open_count_matches_positions_active` — pre-existing live-state race documented as such in Session 67 entry, NOT caused by Session 68 (doc-only). Effective baseline preserved.
+4. ☑ `git diff bot/` empty after edit lands.
+5. ☑ No bot restart. Doc edits don't touch any module loaded by `bot/main.py`. Battle Scar #15 cool-down gate not applicable to this ship.
+
+**Operating Posture observation.** This is the THIRD Session 66 §10-driven Phase-1 (after Session 67's Pattern B stable-floor override + the implicit no-action holds on other §10 STABLE candidates). The discovery → investigate → decide loop continues compounding. **Pattern C ship preserves the search frontier** (signal IS real, just not on this lever) **without false-positive activation**. Mirror of Sessions 18.5 (TRAILING_STOP root cause was peak-tracking bug, not config), 19a (port divergence root cause was sample selection + window, not port bug), 41 (SL-axis-flat ruled out plausible config tunes), 56.5 (calendar drift in fixture), 58 (watcher-task-lifetime), 67 (gate-name vs floor-value scope mismatch). Each disciplined Phase-0/Phase-1 verification gate before locking scope saved ~hours of wrong-direction work.
+
+**No code change. No test change. No bot restart.** Pure investigation + doc update.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
