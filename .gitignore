@@ -24,6 +24,7 @@ tools/strategy_lab/reports_out/*
 !tools/_report_helpers.py
 !tools/daily_report.py
 !tools/weekly_report.py
+!tools/glint_status.py
 !tools/calibration_report.py
 !tools/cohort_report.py
 !tools/excursion_report.py

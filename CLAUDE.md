@@ -3878,6 +3878,36 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 59 — Planner-tuned `tools/glint_status.py` consolidator (May 7, ~2h, read-only planner workflow tool)
+
+**Trigger.** Data-readability friction surfaced May 7: every "how we looking" required 3-6 ad-hoc Python invocations plus manual cross-reference against CLAUDE.md and manual diff computation. Tyler asked for a consolidator; the design discussion surfaced two highest-leverage additions beyond a basic snapshot: diff since last check and watch-list trigger evaluation.
+
+**What shipped.**
+
+1. **[tools/glint_status.py](hustle-agent/tools/glint_status.py)** — on-demand CLI that reads existing reports + state + `CLAUDE.md` + `REPORT_CALENDAR.md` and emits a 9-section planner snapshot. It prints to stdout, writes `bot/state/glint_status_last.json` for next-run diff, and writes `bot/state/glint_status_YYYY-MM-DD.md` as the human audit artifact. Runtime on real production state: **~0.22s**.
+2. **Planner sections.** Verdict, diff since last check, daily-report health pulse, current P&L with since-daily delta, open positions grouped by family/cap, discovery findings, anomalies + watch-list status, next calendar routines, and aggregated flags.
+3. **Defensive watch-list parser.** Parsed **27** trigger blocks from `CLAUDE.md`. Reliable threshold shapes auto-evaluate; complex prose emits `MANUAL_CHECK_REQUIRED` with the source line instead of guessing. First real run surfaced the Session 30-followup challenger-CF trigger as **TRIGGERED** and correctly marked stale daily-report input.
+4. **Conservative anomaly flags.** Added read-only checks for live_momentum 48h entry drought, family-cap concentration, heartbeat/Telegram/log/HTTPX health, and `positions.json` vs `paper_trades.json` open-position mismatch.
+5. **[tests/test_glint_status.py](hustle-agent/tests/test_glint_status.py)** — 10 new tests covering first-run diff marker, delta math, anomaly/no-false-positive paths, watch-list extraction/evaluation/fallback, markdown extraction, atomic persistence, and the <2s real-state performance gate.
+6. **`.gitignore` exception** for `tools/glint_status.py` because `tools/*` is ignored by default.
+
+**Operating Posture observation.** This is the first tool aimed at the planner's workflow rather than the bot's behavior. It strengthens human-in-the-loop discipline by making the "right now" state, diff, and watch-list triggers visible in one deterministic pass, reducing the odds that Tyler/Claude misses a cross-reference.
+
+**Tests.**
+- `python3 -m pytest tests/test_glint_status.py -v` → **10/10 passed** in 0.30s.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1429 passed** (Session 58.5 baseline 1419 + 10 new). 0 failures.
+
+**What did NOT change.**
+- No bot production code touched.
+- No bot restart required.
+- No Telegram push or scheduled run.
+- No replacement of daily / weekly / discovery reports — `glint_status.py` is an additive planner layer over those artifacts.
+- No structured watch-list migration; prose parsing is intentionally v1/best-effort.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
