@@ -4746,6 +4746,11 @@ For live_momentum: cross-intersection doesn't apply. Use journal_analysis findin
 - **Config constants have comments with data.** If you add a new threshold, include the evidence or mark it `# tuned by feel — revisit after 20 resolved`.
 - **Telegram messages are terse.** No prose. Bullets, numbers, action verbs. Emojis sparingly and only to highlight state (💰 profit, ❌ failure, ⏭️ skip, 🎯 edge, ♻️ restart, 🛑 stop).
 - **Logs are the audit trail.** Log edge decisions, trade decisions, exit decisions. Don't log "starting loop" spam. INFO for actionable events, WARNING for safety-gate failures, ERROR for exceptions.
+- **All tests must always pass.** No skips, no flakes, no documented baseline failures. If a test fails:
+  - (a) The failure is in scope of the current session → fix it before ship.
+  - (b) The failure is a flake (race / timing / external dep) → fix the flake (mtime-fence, fixture isolation, deterministic mocking). Don't skip. Don't `xfail`. Don't document as "pre-existing."
+  - (c) The failure is genuinely unrelated to this session AND a real bug → fix it as the session's first deliverable, OR open an immediate follow-up session before this one's main work begins.
+  Sessions 68 + 69 documented "1 pre-existing live-state race" without naming the test, mirroring the exact Session 37 anti-pattern (10 baseline failures cleaned up at once because they accumulated). Session 70 closes that gap. Future sessions: the test name MUST appear in the ship report if any test fails, and the failure MUST be addressed in the same or next session.
 - **Every session ends with `git push origin main`.** Both code commits AND the mandatory README sync commit must be pushed before marking the session complete. Use `git status` to verify "Your branch is up to date with 'origin/main'." Per Sessions 53/54/56.5 lessons learned: documented gaps in commit-but-not-push and CLAUDE.md-but-not-README-sync recur unless enforced at session-end. The discipline is one operation: commit + push together. README sync is mandatory after every session — see Session 56.5 entry for the pattern.
 
 ---
