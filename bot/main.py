@@ -397,6 +397,37 @@ class GlintBot:
     async def stop(self):
         """Gracefully shut down."""
         self._running = False
+
+        # Session 58: cancel active watchers BEFORE tearing down the notifier.
+        # Watchers spawned via _live_scan_loop / handle_watch are standalone
+        # asyncio tasks (not part of the gather'd task list), so a notifier
+        # shutdown alone leaves them ticking on a dead HTTPXRequest until
+        # asyncio.run() finally GCs them — observed at 16+ minutes on May 6,
+        # generating 234 'HTTPXRequest is not initialized' errors during the
+        # zombie window. Session 52's retry-with-backoff masks the failures
+        # as warnings, so the underlying bug stays invisible during normal
+        # operation. Mirror handle_unwatch's pattern: stop()→cancel()→clear.
+        if self._active_watchers:
+            logger.info("Stopping %d active watcher(s)", len(self._active_watchers))
+            watchers_to_stop = list(self._active_watchers.values())
+            for watcher, task in watchers_to_stop:
+                try:
+                    watcher.stop()
+                except Exception:
+                    pass
+                task.cancel()
+            self._active_watchers.clear()
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *[t for _, t in watchers_to_stop],
+                        return_exceptions=True,
+                    ),
+                    timeout=5.0,
+                )
+            except (asyncio.TimeoutError, Exception):
+                pass
+
         state = _load_bot_state()
         state["running"] = False
         _save_bot_state(state)

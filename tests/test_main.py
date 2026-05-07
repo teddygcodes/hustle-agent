@@ -552,3 +552,206 @@ def test_release_lock_handles_empty_lockfile(tmp_path, monkeypatch):
 
     assert lock.exists()
     assert lock.read_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Session 58 — GlintBot.stop() must cancel _active_watchers before notifier
+# teardown. Without this, watchers tick on a dead HTTPXRequest for 16+ min
+# until process GC. See CLAUDE.md Session 58 for diagnosis.
+# ---------------------------------------------------------------------------
+
+
+def _build_stoppable_bot(monkeypatch, tmp_path, watchers):
+    """Construct a partially-initialized GlintBot with a notifier and a
+    populated _active_watchers dict for stop()-path testing."""
+    from bot import main as botmain
+
+    monkeypatch.setattr(botmain, "LOCK_FILE", tmp_path / "bot.lock")
+    monkeypatch.setattr(botmain, "_load_bot_state", lambda: {})
+    monkeypatch.setattr(botmain, "_save_bot_state", lambda _state: None)
+
+    notifier_calls: list[str] = []
+
+    class _StubNotifier:
+        async def stop(self):
+            notifier_calls.append("notifier.stop")
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+    bot.notifier = _StubNotifier()
+    bot._active_watchers = dict(watchers)
+    return bot, notifier_calls
+
+
+class _StubWatcher:
+    def __init__(self, raise_on_stop: bool = False):
+        self.stop_called = False
+        self.raise_on_stop = raise_on_stop
+
+    def stop(self):
+        self.stop_called = True
+        if self.raise_on_stop:
+            raise RuntimeError("simulated watcher stop failure")
+
+
+def _make_done_task() -> asyncio.Task:
+    """Create a coroutine task that completes immediately on cancel."""
+    async def _coro():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            return
+    loop = asyncio.get_event_loop()
+    return loop.create_task(_coro())
+
+
+def test_stop_cancels_active_watchers_and_clears_dict(tmp_path, monkeypatch):
+    """Session 58: GlintBot.stop() must call watcher.stop() AND task.cancel()
+    on every entry in _active_watchers, then clear the dict."""
+
+    async def _drive():
+        watcher_a = _StubWatcher()
+        watcher_b = _StubWatcher()
+        task_a = _make_done_task()
+        task_b = _make_done_task()
+        watchers = {"a": (watcher_a, task_a), "b": (watcher_b, task_b)}
+        bot, notifier_calls = _build_stoppable_bot(monkeypatch, tmp_path, watchers)
+
+        await bot.stop()
+
+        assert watcher_a.stop_called, "watcher_a.stop() not invoked"
+        assert watcher_b.stop_called, "watcher_b.stop() not invoked"
+        assert task_a.cancelled() or task_a.done()
+        assert task_b.cancelled() or task_b.done()
+        assert bot._active_watchers == {}, "_active_watchers must be cleared"
+        assert notifier_calls == ["notifier.stop"], "notifier.stop must run after watcher cancellation"
+
+    asyncio.run(_drive())
+
+
+def test_stop_cancels_watchers_BEFORE_notifier_shutdown(tmp_path, monkeypatch):
+    """Session 58: ordering invariant — watchers must be cancelled before
+    notifier.stop() runs. If notifier shuts down first, an in-flight watcher
+    tick fires the same HTTPXRequest error we're trying to eliminate."""
+
+    async def _drive():
+        order: list[str] = []
+
+        class _OrderedWatcher:
+            def stop(self):
+                order.append("watcher.stop")
+
+        async def _ordered_task():
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                order.append("task.cancelled")
+                raise
+
+        loop = asyncio.get_event_loop()
+        watcher = _OrderedWatcher()
+        task = loop.create_task(_ordered_task())
+        bot, _ = _build_stoppable_bot(monkeypatch, tmp_path, {"q": (watcher, task)})
+
+        # Replace notifier with one that records its own ordering position.
+        class _OrderedNotifier:
+            async def stop(self):
+                order.append("notifier.stop")
+        bot.notifier = _OrderedNotifier()
+
+        await bot.stop()
+
+        assert "watcher.stop" in order
+        assert "notifier.stop" in order
+        assert order.index("watcher.stop") < order.index("notifier.stop"), (
+            f"watcher.stop must come BEFORE notifier.stop; got order={order}"
+        )
+
+    asyncio.run(_drive())
+
+
+def test_stop_with_no_active_watchers_skips_cancellation(tmp_path, monkeypatch):
+    """Session 58: empty _active_watchers should not log spam or break the
+    stop() flow. Backwards compatibility with paths that never spawned a
+    watcher (e.g. early-startup crash before _live_scan_loop fires)."""
+
+    async def _drive():
+        bot, notifier_calls = _build_stoppable_bot(monkeypatch, tmp_path, {})
+
+        await bot.stop()
+
+        assert notifier_calls == ["notifier.stop"], "notifier still must run"
+        assert bot._active_watchers == {}
+
+    asyncio.run(_drive())
+
+
+def test_stop_handles_watcher_stop_exception(tmp_path, monkeypatch):
+    """Session 58: if one watcher's .stop() raises, others still get
+    cancelled and notifier.stop is still called. Mirrors handle_unwatch's
+    best-effort discipline."""
+
+    async def _drive():
+        bad_watcher = _StubWatcher(raise_on_stop=True)
+        good_watcher = _StubWatcher()
+        bad_task = _make_done_task()
+        good_task = _make_done_task()
+        bot, notifier_calls = _build_stoppable_bot(
+            monkeypatch, tmp_path,
+            {"bad": (bad_watcher, bad_task), "good": (good_watcher, good_task)},
+        )
+
+        await bot.stop()  # must not raise
+
+        assert bad_watcher.stop_called
+        assert good_watcher.stop_called
+        assert bad_task.cancelled() or bad_task.done()
+        assert good_task.cancelled() or good_task.done()
+        assert notifier_calls == ["notifier.stop"]
+        assert bot._active_watchers == {}
+
+    asyncio.run(_drive())
+
+
+def test_stop_bounded_by_5s_timeout_when_task_doesnt_unwind(tmp_path, monkeypatch):
+    """Session 58: a stuck watcher task must not block process shutdown.
+    The asyncio.wait_for timeout forces forward progress to notifier.stop()."""
+
+    async def _drive():
+        watcher = _StubWatcher()
+
+        async def _stuck_coro():
+            # Simulate a task that swallows CancelledError indefinitely.
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    pass  # malicious — refuse to unwind
+
+        loop = asyncio.get_event_loop()
+        stuck_task = loop.create_task(_stuck_coro())
+        bot, notifier_calls = _build_stoppable_bot(
+            monkeypatch, tmp_path, {"q": (watcher, stuck_task)}
+        )
+
+        # Patch wait_for timeout to 0.05s so the test runs fast.
+        original_wait_for = asyncio.wait_for
+
+        async def fast_wait_for(coro, timeout):
+            return await original_wait_for(coro, timeout=0.05)
+
+        monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+
+        await bot.stop()  # must complete despite the stuck task
+
+        assert notifier_calls == ["notifier.stop"], (
+            "notifier.stop must run even when watcher cancellation times out"
+        )
+        # Cancel the stuck task at the end so the test doesn't leak.
+        stuck_task.cancel()
+        try:
+            await stuck_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    asyncio.run(_drive())
