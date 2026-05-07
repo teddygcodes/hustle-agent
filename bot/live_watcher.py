@@ -440,9 +440,14 @@ class LiveGameWatcher:
         self.exits: list[dict] = []             # exited positions this session
         self._started_at = time.time()
         self._peak_values: dict[str, float] = {}   # ticker → highest mark-to-market value
-        self._trailing_active: dict[str, bool] = {}  # ticker → trailing stop engaged
         # NOTE: _underwater_ticks removed Apr 16 with UNDERWATER EXIT branch —
         # data-killed in Apr 14 audit. HARD STOP-LOSS + DOLLAR STOP cover the risk.
+        # NOTE: trailing-stop tracking attribute removed Session 56 (2026-05-06)
+        # — dict was initialized but never written to (only popped/read). The
+        # status-card branch that consumed it referenced a config constant
+        # deleted in Session 18.5; that branch was unreachable. The live
+        # trailing-stop logic at _check_exit uses MOMENTUM_DQS_TRAIL_STOP and
+        # is unaffected. See CLAUDE.md Session 56 entry for full context.
 
         # Momentum mode state
         self._price_history: deque = deque(maxlen=MOMENTUM_PRICE_WINDOW)
@@ -2569,7 +2574,6 @@ class LiveGameWatcher:
                 self.exits.append(exit_record)
                 self.bets_placed.remove(bet)
                 self._peak_values.pop(ticker, None)
-                self._trailing_active.pop(ticker, None)
                 logger.info(
                     "LiveGameWatcher EXIT: %s %s — %s (pnl=$%.2f, held %ds, peak %dc)",
                     ticker, held_side.upper(), reason, pnl, hold_seconds, prev_peak,
@@ -2736,14 +2740,10 @@ class LiveGameWatcher:
                     cur_val = 100 - kalshi_ask_cents
                 gain_pct = (cur_val - entry_c) / entry_c * 100 if entry_c else 0
                 gain_str = f"+{gain_pct:.0f}%" if gain_pct >= 0 else f"{gain_pct:.0f}%"
-                trailing = " [TRAILING]" if self._trailing_active.get(b.get("ticker")) else ""
-                peak = self._peak_values.get(b.get("ticker"), cur_val)
                 lines.append(
                     f"HOLDING: {side.upper()} {b['contracts']}x @ {entry_c}c "
-                    f"→ {cur_val}c ({gain_str}){trailing}"
+                    f"→ {cur_val}c ({gain_str})"
                 )
-                if self._trailing_active.get(b.get("ticker")):
-                    lines.append(f"  Peak: {peak:.0f}c | Stop if drops to {peak * (1 - LIVE_TRAILING_STOP):.0f}c")
         if self.exits:
             for ex in self.exits:
                 pnl = (ex.get("pnl") or 0)

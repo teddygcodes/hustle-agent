@@ -733,11 +733,24 @@ PAPER_STARTING_BALANCE = 10500.0
 # "weather"         — NWS bias correction (next-day markets only)
 # "vig_stack_series" — Series ladder NO edge (mechanical, no prediction)
 # Add others only after 20+ resolved paper trades with +CLV on each.
+#
+# Session 56 (2026-05-06): sports_monotonicity_arb + sports_consistency_arb
+# disabled until paired-leg execution is built. Codex review surfaced that the
+# opportunity dict's arb_pair metadata is ignored by executor.execute_trade()
+# — every "riskless arb" actually executes as a one-sided directional bet at
+# $200-Kelly sizing labeled confidence=0.95. 0 historical fills (we got
+# lucky); dormant-loaded code path that would fire on the first real Kalshi
+# monotonicity/consistency violation. Re-enable only after paired execution
+# with atomic both-legs-or-refund is built — separate Session 56-followup
+# brief, NOT blocking. Trigger to consider: cohort_emergence (or new
+# heuristic) flags sports arb violations at >=10 observations/week with
+# consistent edge >=3¢ for >=2 consecutive weeks. Until that bar fires, leave
+# disabled. Defense in depth: the strategy gate at scanner.py:672-681 also
+# filters out non-ACTIVE_STRATEGIES opps before the executor; Layer 2 in
+# scanner_sports_arb.py returns [] regardless.
 ACTIVE_STRATEGIES = [
     "vig_stack_series",       # 79% WR (159/201) — structural arb, best strategy
     "vig_stack_futures",      # Same math as vig_stack_series, applied to championship/futures
-    "sports_monotonicity_arb", # Riskless arb — spread/total threshold violations
-    "sports_consistency_arb",  # Riskless arb — championship > series violations
 ]
 # Disabled (data-driven, 2026-04-14 audit):
 #   btc_price_edge: 33% WR in paper (-$35.06), model overestimates intraday vol
@@ -747,6 +760,11 @@ ACTIVE_STRATEGIES = [
 #   weather: 17% WR (-$4.41), NWS bias model too imprecise
 #   live_momentum: 52% WR but avg_loss 2x avg_win = -$104 total (runs separately via watcher)
 #   xrp/doge/bnb: all losing, crypto disabled
+# Disabled (Session 56, 2026-05-06):
+#   sports_monotonicity_arb: opportunity dict shape mismatch with executor —
+#     execution would be one-sided directional, not riskless. 0 history fills.
+#     Rebuild via paired execution (atomic both-legs-or-refund) when justified.
+#   sports_consistency_arb: same shape bug as sports_monotonicity_arb.
 
 # ---------------------------------------------------------------------------
 # Weather strategy — next-day filter

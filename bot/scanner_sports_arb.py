@@ -295,7 +295,14 @@ def scan_monotonicity_violations(scan_id: str | None = None,
 
     _telem["violations"] = len(opportunities)
     logger.info("MONOTONICITY_TELEMETRY: %s", _telem)
-    return opportunities
+    # Session 56 (2026-05-06): disabled — opportunity dict shape mismatch with
+    # executor.execute_trade(). Single-leg ticker + recommended_side fields
+    # would execute as a one-sided directional bet; arb_pair metadata is
+    # ignored. See bot/config.py:ACTIVE_STRATEGIES and Session 56 CLAUDE.md
+    # entry. Side-effects (_attribute / on_market_seen) preserved for universe
+    # attribution. Re-enable only when paired both-legs-or-refund execution
+    # ships.
+    return []
 
 
 def scan_championship_series_violations(scan_id: str | None = None,
@@ -433,7 +440,14 @@ def scan_championship_series_violations(scan_id: str | None = None,
                     },
                 })
 
-    return opportunities
+    # Session 56 (2026-05-06): disabled — opportunity dict shape mismatch with
+    # executor.execute_trade(). Single-leg ticker + recommended_side fields
+    # would execute as a one-sided directional bet; arb_pair metadata is
+    # ignored. See bot/config.py:ACTIVE_STRATEGIES and Session 56 CLAUDE.md
+    # entry. Side-effects (_attribute / on_market_seen) preserved for universe
+    # attribution. Re-enable only when paired both-legs-or-refund execution
+    # ships.
+    return []
 
 
 def scan_game_vig(min_vig_pct: float = 0.08,

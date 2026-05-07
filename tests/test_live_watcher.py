@@ -1494,3 +1494,55 @@ class TestScanLiveMatchesSkipReason:
             assert "ticker" in s
             assert "sport" in s
             assert "skip_reason" in s  # explicitly present, may be None
+
+
+# ---------------------------------------------------------------------------
+# Session 56 (2026-05-06) — LIVE_TRAILING_STOP / _trailing_active dead-code
+# regression. CLAUDE.md Session 19a flagged the unfixed reference; Session 56
+# cleaned it up. These tests pin the cleanup so a future session can't
+# resurrect the dead infrastructure without explicit attention.
+# ---------------------------------------------------------------------------
+
+class TestSession56DeadInfraRemoval:
+    """Pins removal of LIVE_TRAILING_STOP + _trailing_active dead-code in
+    bot/live_watcher.py. Pattern matches Session 51's
+    test_canonical_schema_used_throughout discipline — source-level grep
+    asserts the literal string is absent."""
+
+    def _live_watcher_source(self) -> str:
+        from pathlib import Path
+        src = Path(__file__).resolve().parent.parent / "bot" / "live_watcher.py"
+        return src.read_text()
+
+    def test_live_trailing_stop_constant_not_referenced(self):
+        """
+        LIVE_TRAILING_STOP was removed from bot/config.py in Session 18.5.
+        Session 56 deleted the dangling reference inside an unreachable
+        status-card branch in bot/live_watcher.py (line 2746 pre-fix). If
+        this test fails, someone reintroduced a reference to a config
+        constant that no longer exists — NameError waiting to fire.
+        """
+        text = self._live_watcher_source()
+        assert "LIVE_TRAILING_STOP" not in text, (
+            "LIVE_TRAILING_STOP literal found in bot/live_watcher.py. "
+            "The constant was deleted from bot/config.py in Session 18.5; "
+            "any reference is a NameError. See CLAUDE.md Session 56."
+        )
+
+    def test_trailing_active_attribute_removed(self):
+        """
+        _trailing_active was an instance dict initialized to {} but never
+        written to (no `_trailing_active[ticker] = True` anywhere in the
+        codebase). All reads returned falsy; both consuming branches were
+        dead. Session 56 deleted the init, the .pop(), and both reads. If
+        this test fails, someone resurrected dead infrastructure — find out
+        why and consider whether they actually need a working trailing-stop
+        flag instead.
+        """
+        text = self._live_watcher_source()
+        assert "_trailing_active" not in text, (
+            "_trailing_active reference found in bot/live_watcher.py. "
+            "Session 56 deleted this dead infrastructure. The live "
+            "trailing-stop logic at _check_exit uses MOMENTUM_DQS_TRAIL_STOP "
+            "and is the actual production trailing-stop path."
+        )
