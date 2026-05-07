@@ -35,6 +35,7 @@ from bot.config import (
     LIVE_TAKE_PROFIT_CENTS, LIVE_NEAR_SETTLE_CENTS,
     LIVE_STOP_LOSS_CENTS,
     MOMENTUM_LEADER_MIN, MOMENTUM_DIP_BUY, MOMENTUM_DIP_MAX,
+    get_leader_min_for_sport,
     MOMENTUM_PRICE_WINDOW,
     MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN,
     MOMENTUM_SCALE_SMALL_DIP, MOMENTUM_SCALE_MED_DIP, MOMENTUM_SCALE_LARGE_DIP,
@@ -1037,8 +1038,11 @@ class LiveGameWatcher:
             self._cooldown_remaining -= 1
 
         # Current state — primary side
+        # Session 64: per-sport leader_min via helper (null-op for
+        # sports not in MOMENTUM_LEADER_MIN_PER_SPORT).
+        sport_leader_min = get_leader_min_for_sport(self.sport)
         player_prob = yes_ask / 100.0
-        is_leader = player_prob >= MOMENTUM_LEADER_MIN
+        is_leader = player_prob >= sport_leader_min
         recent_high = max(self._price_history) if self._price_history else yes_ask
         dip_cents = recent_high - yes_ask
 
@@ -1048,7 +1052,7 @@ class LiveGameWatcher:
         opp_dip_cents = 0
         if opp_yes_ask > 0:
             opp_prob = opp_yes_ask / 100.0
-            opp_is_leader = opp_prob >= MOMENTUM_LEADER_MIN
+            opp_is_leader = opp_prob >= sport_leader_min
             opp_recent_high = max(self._opp_price_history) if self._opp_price_history else opp_yes_ask
             opp_dip_cents = opp_recent_high - opp_yes_ask
 
@@ -2978,10 +2982,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 )
                 continue
 
-            # Determine the leader
-            if price_a >= MOMENTUM_LEADER_MIN * 100:
+            # Determine the leader. Session 64: per-sport leader_min
+            # override (null-op when sport not in
+            # MOMENTUM_LEADER_MIN_PER_SPORT, which is empty in production).
+            sport_leader_min_cents = get_leader_min_for_sport(sport) * 100
+            if price_a >= sport_leader_min_cents:
                 leader, leader_price = side_a, price_a
-            elif price_b >= MOMENTUM_LEADER_MIN * 100:
+            elif price_b >= sport_leader_min_cents:
                 leader, leader_price = side_b, price_b
             else:
                 _telem["no_leader"] += 1
@@ -3009,7 +3016,7 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     entry_price_cents=max(price_a, price_b),
                     opponent_ticker=lower_side.get("ticker"),
                     measured_value=float(max(price_a, price_b)),
-                    threshold_value=float(MOMENTUM_LEADER_MIN * 100),
+                    threshold_value=float(sport_leader_min_cents),
                     market_state=higher_side,
                 )
                 continue

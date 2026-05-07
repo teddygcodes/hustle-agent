@@ -95,6 +95,45 @@ MOMENTUM_LEADER_MIN      = 0.65  # Session 19c (Apr 27, shipped): lowered 0.70 �
                                  # The Session 19c sweep extends the floor down by 5pp; the
                                  # newly-admitted [65-70c) bucket carries the +408/+488¢
                                  # delta on the post-Apr-23 sample.
+
+# Session 64 (2026-05-07): per-sport MOMENTUM_LEADER_MIN override.
+# Architectural mirror of Session 49's kelly_size(sport=...) per-sport
+# size_multiplier, but stored as a top-level dict — NOT inside
+# SPORT_PROFILES["tennis"], which aliases to atp/atp_challenger/
+# wta_challenger via the loop at L374-375. Putting wta-specific
+# leader_min there would silently affect ATP main (currently re-enabled,
+# positive direction) and Session 42's alias-isolation regression test
+# would fire.
+#
+# Pattern B (this session): infrastructure shipped, dict empty in
+# production, WTA stays in MOMENTUM_DISABLED_SPORTS, so this override
+# is null-op. When a future session activates WTA, the evidence-derived
+# starting value is 0.55 (n=28 / mean CLV +3.96c / 64% +CLV at 14d,
+# post-disable forward-only CF). Documented but NOT activated here:
+#   - Threshold non-monotonicity (peak +12.05c at 0.60, dip -0.80c at 0.58)
+#   - Pre-disable realized P&L was -$10.20 / 67% cut over n=6
+#   - Two-lever bet (re-enable + relax) compounds risk
+# See CLAUDE.md Session 64 ☑ block for full evidence.
+MOMENTUM_LEADER_MIN_PER_SPORT: dict[str, float] = {
+    # Empty in production. To activate WTA recapture, ALSO remove
+    # 'wta' from MOMENTUM_DISABLED_SPORTS in the same change:
+    #   "wta": 0.55,
+}
+
+
+def get_leader_min_for_sport(sport: str | None) -> float:
+    """Return the per-sport MOMENTUM_LEADER_MIN override if present,
+    else the global MOMENTUM_LEADER_MIN. Mirror of Session 49's
+    kelly_size per-sport multiplier lookup. Sport key is lowercased
+    for consistency with LiveGameWatcher._normalize() (config L172
+    MOMENTUM_DISABLED_SPORTS keys are lowercase by convention)."""
+    if sport:
+        return MOMENTUM_LEADER_MIN_PER_SPORT.get(
+            sport.lower(), MOMENTUM_LEADER_MIN
+        )
+    return MOMENTUM_LEADER_MIN
+
+
 MOMENTUM_MAX_LOSS_DOLLARS = 5.00  # HARD CAP: exit if unrealized loss exceeds $5
                                   # Data: 7 trades lost >$10, totaling -$127. Capping at $5
                                   # would have turned -$104 total into +$2.84.

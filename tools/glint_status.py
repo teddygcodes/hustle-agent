@@ -714,9 +714,15 @@ def evaluate_watchlist_triggers(triggers: list[dict], data: dict) -> list[dict]:
             mean_s = f"{mean:+.2f}c" if mean is not None else "unknown"
             detail = f"wta CF n={n}; mean CLV={mean_s}"
         elif "no_leader/wta" in low or "per-sport `momentum_leader_min` for wta" in low:
+            # Session 64 (2026-05-07): bar raised after Pattern B ship.
+            # Original n>=30 & mean>0 fired at n=35/+9.34c but threshold
+            # sensitivity was non-monotonic (peak +12.05c at 0.60, dip
+            # -0.80c at 0.58, n_no_won=5 at peak). Re-fire only when the
+            # sub-cohort has grown ~2.3x AND the mean is meaningfully
+            # above the noise floor.
             n = data["no_leader_wta_n"]
             mean = data["no_leader_wta_mean_clv"]
-            triggered = n >= 30 and mean is not None and mean > 0
+            triggered = n >= 80 and mean is not None and mean >= 5.0
             status = "TRIGGERED" if triggered else "NOT_YET_TRIGGERED"
             mean_s = f"{mean:+.2f}c" if mean is not None else "unknown"
             detail = f"no_leader/wta n={n}; mean CLV={mean_s}"

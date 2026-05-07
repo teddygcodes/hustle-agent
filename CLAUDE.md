@@ -4011,6 +4011,53 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 64 — WTA per-sport `MOMENTUM_LEADER_MIN` re-evaluation (May 7, Pattern B — architectural lever shipped, WTA stays disabled)
+
+**Trigger.** `tools/glint_status.py` L2570 / L3147 — no_leader/wta TRIGGERED at n=35, mean CLV +9.34c (Session 44's deferred lever). SIXTH coder session triggered by `glint_status.py` findings, FIRST that surfaced a positive-CLV signal as a candidate for production change rather than a regression-fix.
+
+**Phase 0 evidence (canonical Session 38a-2 methodology, 14d dataset, 1683 rows post-regeneration).**
+- Sub-cohort: n=35 (Y=24, N=11), survivorship PASS, EV +9.34c PASS (mean +9.34c, median +39c, +CLV 69%, win:loss magnitude 0.689)
+- Cross-cohort: all-sport no_leader aggregate -6.15c (NEGATIVE) — WTA edge isolated, NOT Session 47 cherry-pick shape
+- Threshold sensitivity NON-MONOTONIC: 0.50 → +6.19c (n=32), 0.55 → +3.96c (n=28), 0.58 → -0.80c (n=25), 0.60 → +12.05c (n=19, n_no_won=5 — bare survivorship), 0.62 → -0.50c (n=8). Picking 0.60 = over-fitting risk; 0.55 = conservative middle.
+- Pre-disable realized: n=6, -$10.20, 67% cut (Session 38a-2)
+- Broader WTA all gates: n=140, +0.44c (essentially flat — slightly up from -0.04c when prompt was written; dataset has shifted)
+- Distribution by sport (no_leader): nhl +21.77, ufc +22.00, **wta +9.34**, atp +3.28, atp_c +1.18, wta_c -12.92, nba -32.28, ipl -36.68
+- WTA breakdown by skip_reason (n=140 total CFs, ZERO accept entries): no_vol_growth_first_seen n=37 (-0.49c), **no_leader n=35 (+9.34c, the candidate)**, no_vol_growth_idle n=35 (+1.20c), low_volume n=33 (-8.79c)
+
+**Decision: Pattern B** (ship per-sport infrastructure; WTA stays disabled).
+- **Pattern A rejected:** threshold non-monotonicity prevents clean value choice; two-lever bet (re-enable + relax) compounds risk; pre-disable realized was unfavorable.
+- **Pattern C rejected:** strict criteria 1+4 pass and cross-cohort context doesn't disqualify; future re-evaluation benefits from having the architecture pre-built.
+- **Pattern B chosen:** ships the lever for future activation, documents the evidence-derived value (0.55) in code comments and CLAUDE.md, keeps WTA disabled so net behavioral effect is zero. Mirrors Session 49's `kelly_size(sport=...)` architectural pattern.
+
+**Architectural lever introduced.** `MOMENTUM_LEADER_MIN_PER_SPORT` dict + `get_leader_min_for_sport()` helper at top-level [bot/config.py](hustle-agent/bot/config.py) (NOT inside `SPORT_PROFILES["tennis"]`, which aliases to atp/atp_challenger/wta_challenger per L374-375). Used at [bot/live_watcher.py:2986](hustle-agent/bot/live_watcher.py:2986) (outer `scan_live_matches`) and [bot/live_watcher.py:1043,1054](hustle-agent/bot/live_watcher.py:1043) (inner `_tick_momentum`).
+
+**Net behavioral change: zero** — dict empty in production. WTA still in `MOMENTUM_DISABLED_SPORTS`. Telemetry/CF skip_reason distribution unchanged (no_leader still fires on the same matches).
+
+**Watch-list bar raised.** [tools/glint_status.py:716-728](hustle-agent/tools/glint_status.py:716) now requires `n >= 80 AND mean CLV >= +5.0c` (was `n >= 30 AND mean > 0`). Re-fires only when both met.
+
+**Future activation cost.** ~5 lines — uncomment `"wta": 0.55,` in `MOMENTUM_LEADER_MIN_PER_SPORT`, remove `"wta"` from `MOMENTUM_DISABLED_SPORTS`, schedule +14d re-validation routine.
+
+**Session 38a-2 framing UPDATE.** Original Outcome B (keep WTA disabled because broader CLV is EV-negative) remains correct at the broader-cohort level. The sub-cohort positive finding represents potential edge, but threshold ambiguity says wait for stronger evidence before activating.
+
+**Operating Posture observation.** SIXTH consolidator-driven session (60 → 61A → 61B → 62 → 63 → 64). FIRST that surfaced a positive-CLV signal as a candidate for production change (vs previous regression-fixes). Pattern B halfway ship documents the lever without taking the bet — preserves optionality without committing to a noisy threshold. The discovery → investigate → decide loop continues compounding.
+
+**Test ladder (5 new tests, baseline 1454 → 1459):**
+- `test_session_19c_global_leader_min_unchanged`
+- `test_per_sport_leader_min_override_resolution`
+- `test_per_sport_leader_min_no_alias_leak`
+- `test_dict_empty_in_production_until_wta_unidisabled`
+- `test_helper_does_not_mutate_override_dict`
+
+**Verification.**
+- `python3 -m pytest tests/test_per_sport_leader_min.py -v` → 5/5 pass
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1459 passed** (1454 baseline + 5 new), 0 failures.
+- `python3 tools/glint_status.py` → L2570 / L3147 NOT_YET_TRIGGERED at new n>=80 / mean>=5c bar (n=35).
+- No bot restart required. Pattern B is null-op behavior change.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
