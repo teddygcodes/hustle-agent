@@ -3614,6 +3614,50 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 
 ---
 
+### ☑ Session 55 — `settlement_vs_rationale` 10th discovery heuristic; KXHIGHMIA founding regression P0 (May 6, ~2.5h coder, doc + tools/ only — no bot/ touch, no restart)
+
+**Trigger.** May 6 KXHIGHMIA-26MAY05-T87 lost $199.95 on a $200 notional in a family Session 53 explicitly categorized as "healthy at $200 cap." Sat unflagged for ~6 hours before Tyler surfaced it manually. Cross-AI panel review of a proposed "Glint Analyst" LLM concluded the founding example is **config-comparison-shaped, not prose-synthesis-shaped** — the family caps live in `bot/config.py:VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` as code. A deterministic 10th heuristic catches this finding shape at $0 cost, full auditability, no new failure surface. Glint Analyst stays deferred until a finding surfaces that genuinely requires prose synthesis.
+
+**What shipped (commit 3d16d52, 3 files).**
+
+1. **[tools/discovery_agent/heuristics/settlement_vs_rationale.py](tools/discovery_agent/heuristics/settlement_vs_rationale.py)** (new, ~290 LOC). Three pattern detectors keyed off `bot.config` constants (config dicts as the unambiguous "rationale" source — prose memory isn't):
+   - **Pattern 1: `tail_loss_in_high_cap_family`** — `type=="vig_stack"` AND `pnl <= -95% × notional` AND `notional >= 95% × family_cap` AND `family_cap >= $150` (skip already-aggressive $50 tier). Default HIGH severity. Cross-cohort demotion ladder mirrors Session 47's `_severity()` math: demote +1 when family aggregate (last 14d) > 0 AND n_tail==1 (single tail in profitable family); demote +1 when settled <24h post-Session-53-deploy AND notional > current cap (legacy pre-cap exclusion). Clamp via `min(base_idx + demote, len(_SEVERITY_LADDER) - 1)`.
+   - **Pattern 2: `disabled_sport_settlement`** — `type=="live_momentum"` AND sport in `MOMENTUM_DISABLED_SPORTS`. CRITICAL severity. **Plus a `MOMENTUM_DISABLED_SINCE` filter on entry timestamp** (Apr 20 cutoff for atp_challenger/wta/wta_challenger): legacy entries that pre-date the disable list are NOT regressions. Without this filter, real-data verification surfaced 24 false-positive critical findings; with it, 9 real post-disable entries remain.
+   - **Pattern 3: `outsized_notional_post_size_multiplier`** — `type=="live_momentum"` AND sport's `SPORT_PROFILES.size_multiplier < 1.0` AND notional > `MAX_BET_FRACTION × PAPER_STARTING_BALANCE × size_multiplier × 1.2 tolerance`. HIGH severity. Catches Session 49 sizing-not-applying regressions.
+   - Severity ladder local to this heuristic: `("critical", "high", "notable", "info")`. Graceful degradation: if `bot.config` import fails, returns `[]` instead of crashing the agent run.
+
+2. **[tools/discovery_agent/main.py](tools/discovery_agent/main.py)** — registered `SettlementVsRationale()` in `DEFAULT_HEURISTICS` (10 heuristics now); added `"critical": -1` to `SEVERITY_RANK` so disabled-sport-settlement findings sort above HIGH in markdown reports.
+
+3. **[tests/test_discovery_settlement_vs_rationale.py](tests/test_discovery_settlement_vs_rationale.py)** (new, 10 cases): KXHIGHMIA founding regression (P0; mirrors `test_discovery_sfphi_regression.py` discipline — if it fails, system-down severity), Pattern 2 with legacy-filter assertion, Pattern 3 NBA at 2× ceiling, demotion single-tail-positive-family, no-demotion 2+ tails, pre-Session-53 legacy excluded, canonical schema discipline (mirrors Session 51 — forbids `'no_won'` / `'opp_type'` / `'outcome_clv_cents'` substrings), SFPHI smoke check, graceful config-import-fail isolation, empty paper_trades returns empty.
+
+**Verification.**
+
+1. ☑ `python3 -m pytest tests/test_discovery_settlement_vs_rationale.py -v` → **10/10 pass**.
+2. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1397 passed**, 3 pre-existing SFPHI failures unrelated to Session 55 (verified by disabling registration: same 3 failures reproduce on baseline; cohort_emergence fixture-vs-current-date drift in `tests/test_discovery_sfphi_regression.py`, not caused by this PR). 0 regressions.
+3. ☑ Real-data run: `python3 -m tools.discovery_agent.main` → **10/10 heuristics ran**, 0 errors/skips. KXHIGHMIA-26MAY05-T87 surfaces as **HIGH** severity (n=4 tail losses in 14d → "pattern not outlier" branch fires, not demoted). Also surfaces **KXHIGHAUS-26MAY04-B82.5 -$200.00** — second healthy-cap-tier tail-loss in the same shape. 9 real Pattern 2 critical findings on post-Apr-20 disabled-sport entries.
+4. ☑ `git diff bot/` empty. Bot still running under launchd (single PID 93948, path-rooted verification per Battle Scar #14). No restart needed (read-only tool addition; `bot/main.py` doesn't import `tools/discovery_agent/`).
+
+**Out of scope (held).**
+- Glint Analyst LLM proposal — deferred per cross-AI panel review.
+- New patterns beyond the 3 above.
+- Modifying any of the 9 existing heuristics.
+- Touching `bot/config.py` (heuristic READS the config dicts; does not modify them).
+- Production code path (`bot/main.py`, `bot/live_watcher.py`, `bot/strategies/`, `bot/executor.py`).
+- Re-implementing or refining the existing 9 heuristics.
+- Bot restart (read-only tool addition, no production code changes).
+- Fixing the 3 pre-existing SFPHI test failures (unrelated to Session 55; separate session if Tyler wants them addressed).
+
+**Watch-list trigger — Glint Analyst v0 brief re-open conditions.** Re-open if a future agent run surfaces a finding that:
+1. Required reading session prose (not config) to identify, AND
+2. Has no clear heuristic refinement that would catch it, AND
+3. The synthesis took >30 min of manual cross-referencing.
+
+Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains the synthesis layer.
+
+**Operating Posture observation.** This is the FOURTH discovery agent expansion in 6 days (43b cohort_emergence refinement, 47 cross-cohort context, 48 concurrent_attack_angles, 55 settlement_vs_rationale). Pattern: every operator-driven finding that's heuristic-shaped becomes a heuristic; prose-shape findings stay open as Glint Analyst candidates. The agent's surface area grew from 8 heuristics (pre-43b) to 10 (post-55) with each addition driven by a concrete missed-signal incident.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
