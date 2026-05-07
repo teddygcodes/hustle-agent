@@ -15,6 +15,7 @@ from .heuristics.counterfactual_hotspots import CounterfactualHotspots
 from .heuristics.live_tick_anomalies import LiveTickAnomalies
 from .heuristics.log_error_spike import LogErrorSpike
 from .heuristics.outlier_pnl import OutlierPnl
+from .heuristics.settlement_vs_rationale import SettlementVsRationale
 from .heuristics.threshold_proximity import ThresholdProximity
 from .heuristics.universe_gap import UniverseGap
 
@@ -28,8 +29,11 @@ DEFAULT_HEURISTICS = [
     CadenceOutcome(),
     LogErrorSpike(),
     ConcurrentAttackAngles(),  # Session 48
+    SettlementVsRationale(),  # Session 55
 ]
-SEVERITY_RANK = {"high": 0, "notable": 1, "info": 2}
+# Session 55: "critical" added at rank -1 so disabled_sport_settlement findings
+# sort above "high" in the markdown report.
+SEVERITY_RANK = {"critical": -1, "high": 0, "notable": 1, "info": 2}
 
 
 def _source_present(ctx: DiscoveryContext, attr: str) -> bool:
