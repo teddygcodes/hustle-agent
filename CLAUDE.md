@@ -4241,6 +4241,90 @@ Until all three fire, the signal is unactionable on the gate-threshold surface.
 
 ---
 
+### ☑ Session 69 — `vig_stack_series.evaluate` fair-value formula calibration HELD (May 7, doc-only, Outcome C)
+
+**Trigger.** Session 68 (May 7, doc-only) ruled out `VIG_STACK_MIN_EDGE` as the lever for the `edge_below_threshold/nhl_futures` finding (n=14, mean CLV +6.36¢, 100% market_result='no', threshold sweep structurally flat across all positive values). Session 68 named the **fair-value formula** as the actual lever and deferred to Session 69. The Session 69 prompt mandated Phase-0 mechanism identification + Phase-1 cross-cohort verification with explicit default-to-Outcome-C if (a) mechanism not cleanly identifiable, (b) Phase-1 single-sport cherry-pick, (c) weather ladders perturbed by hypothetical fix, OR (d) n_effective on cross-cohort drops below 30.
+
+**Phase 0a — file misidentification CORRECTED.** The Session 69 prompt named `bot/math_engine.calculate_vig_stack` as the formula. **That is parlay math.** Direct read of [bot/math_engine.py:312-379](bot/math_engine.py:312) shows `calculate_vig_stack(leg_probabilities: list[float], kalshi_yes_price_cents: int)` computes `true_yes = product(leg_probabilities)` for combining independent legs into one Kalshi parlay market. Used at exactly one call site: [bot/scanner_sports.py:265](bot/scanner_sports.py:265) (`scan_parlays_for_sport`). NOT invoked anywhere on championship-futures or weather-ladder code paths. The actual fair-value formula for `vig_stack_series` + `vig_stack_futures` (which share code per Session 13a refactor) lives at [bot/strategies/vig_stack_series.py:691-697](bot/strategies/vig_stack_series.py:691):
+
+```
+yes_sum = sum(m.yes_ask for m in valid)        # line 454
+yes_sum_prob = yes_sum / 100.0                  # line 455
+vig_factor = yes_sum_prob
+
+YES_fair = yes_ask / vig_factor                 # line 695 (math_chain)
+NO_fair = 100 - YES_fair                        # line 696
+edge = (NO_fair - NO_ask) / NO_ask              # relative
+```
+
+**Single unified formula** across all three families (weather B-buckets, index ranges, sports futures). Branch at [vig_stack_series.py:373-374](bot/strategies/vig_stack_series.py:373) only switches the `opp_type` label; the math is identical. **Implication:** any change to this formula applies UNIFORMLY across weather + index + futures. There is no per-market-type branch to scope a fix into. Outcome A's blast radius extends to weather ladders by construction — the prompt's Phase-1d weather regression check is therefore load-bearing.
+
+**Phase 0b — one-CF trace.** Sample `KXNHL-26-TB`, status=counterfactual_settled, skipped_by_gate=edge_below_threshold, market_result=no, clv_cents=+7, **extra=None** (the 14 NHL CFs were emitted before Session 10's `extra` dict instrumentation extension). Hand calc using the formula: yes_ask=7¢ × yes_sum=122¢ (22% NHL vig per CLAUDE.md Money section) → vig_factor=1.22 → model yes_fair = 7/1.22 = 5.74¢ → model no_fair = **94.26¢**. Market no_ask ≈ 93¢ → edge_relative = (94.26-93)/93 = +1.4% < `VIG_STACK_MIN_EDGE = 0.02` → REJECTED. Actual settlement NO=100 → CLV = 100-93 = +7¢ → matches the `clv_cents=+7` on the sample. The 5-7¢ gap reproduces from the formula's inputs.
+
+**Phase 0c — mechanism (H1 confirmed).** The formula proportionally redistributes vig: leg_vig_removed = yes_ask × (1 - 1/vig_factor). Total yes_sum is conserved (`sum(yes_fair) = 100`). Bookmakers don't distribute vig proportionally; they concentrate it on favorites and the most-likely-bucket. The proportional model under-attributes vig to favorites (over-states their fair_yes → under-states fair_no for favorites) AND over-attributes vig to mid-tier teams (over-states their fair_no when actual fair_no is closer to 100¢ for genuine long-tails). The 14 NHL CFs settle at 100¢ NO (every one a leader-loss), and their model fair_no ∈ [92.52, 94.69] per Session 68's reconstruction. Mechanism is consistent with H1 acting on mid-band teams (yes_ask ≈ 5-15¢). H2 (YES-side complement ignores spread asymmetry) is partially redundant — the formula already only uses yes_ask, so spread asymmetry on the NO side doesn't enter. **Mechanism is real, identifiable, and structural.**
+
+**Phase 1 — cross-cohort + weather regression.**
+
+| Cohort | n | n_no | n_yes | Mean CLV | n_unique_tickers |
+|---|---|---|---|---|---|
+| **KXNHL-** | 14 | 14 | 0 | **+6.36¢** | **3** |
+| KXNBA- | **0** | — | — | — | — |
+| KXMLB- | **0** | — | — | — | — |
+| KXHIGHMIA- | 38 | 38 | 0 | +5.11¢ | — |
+| KXHIGHAUS- | 49 | 47 | 2 | +0.27¢ | — |
+| KXHIGHCHI- | 54 | 54 | 0 | +3.78¢ | — |
+| KXHIGHDEN- | 28 | 27 | 1 | +0.04¢ | — |
+| KXHIGHNY- | 27 | 27 | 0 | +4.04¢ | — |
+| KXINX- | 53 | 49 | 4 | -0.09¢ | — |
+
+- **Phase 1b cross-sport decision matrix.** Prompt requires "≥2 of {NHL, NBA, MLB} futures show it" for Outcome A candidacy. **Structurally impossible:** NBA + MLB cohorts EMPTY at this gate; NHL alone with n_effective ≈ 3 unique tickers.
+- **Phase 1c trimmed mean.** NHL drop top-1 + bottom-1 by clv_cents preserves mean (~+6¢) but n_effective remains ~3 (only 3 distinct market events). Below Session 38a's n=56 evidence bar.
+- **Phase 1d weather regression FALSIFIED.** Prompt's discipline says "if weather ladders ALSO show systematic mis-pricing, the bias is in the unified formula and Outcome A widens to weather too." 3 of 6 weather families show the same +3-5¢ pattern (KXHIGHMIA, KXHIGHCHI, KXHIGHNY). Combined weather: n=249, n_no=242 (97%), weighted mean +2.78¢ — POSITIVE, not near-zero. **The H1 mechanism applies symmetrically to weather B-buckets** (which also have proportionally-distributed vig in the model but bookmakers concentrate vig on the most-likely temperature buckets).
+
+**Decision: Outcome C — HOLD doc-only.** Three Outcome-C triggers fire simultaneously:
+1. ✓ **Phase-1 single-sport cherry-pick.** NHL only (n_effective=3); NBA + MLB EMPTY.
+2. ✓ **Weather ladders perturbed by hypothetical fix.** 3 of 6 weather families show same bias; n=249 weather CFs would be affected by any formula change designed for NHL.
+3. ✓ **n_effective on cross-cohort < 30.** NHL n_effective=3; non-NHL has either zero records or different bias magnitudes.
+
+The mechanism IS cleanly identifiable (Phase 0c — H1 confirmed) — the prompt's "Phase-0 mechanism unclear" trigger does NOT fire, but the other three fire decisively. Outcome A (universal formula recalibration) rejected: cannot validate net impact across the unified weather + futures cohort without back-tester infrastructure that doesn't exist (`tools/backtest.py` per Session 13b currently doesn't support vig_stack_futures or fair-value sweeps). Outcome B (per-market-type override) rejected: bias is NOT isolated to one market type — weather + futures both show it, so picking per-family bias values with only 1 sport's meaningful data is over-fitting. Outcome D (defer for infrastructure) ranks below C because the underlying signal IS real; C documents the finding and sets a watch-list, D would silently lose the work.
+
+Mirrors the Pattern C discipline of Sessions 18.5, 38a-2, 40, 41, 42, 45, 46, 67-investigate, 68 — discipline working, not failing.
+
+**Watch-list trigger — re-evaluate when ALL of:**
+1. **Cross-sport replication.** NBA OR MLB futures cohort accumulates **n>=20 settled CFs** at edge_below_threshold gate.
+2. **NHL cohort matures.** NHL cohort grows to **n>=30 across n_unique_tickers >=10** (current: 14 / 3).
+3. **Mechanism-aware infra exists.** EITHER (a) `tools/backtest.py` extends to support vig_stack_futures fair-value sweeps (Session 13b extension; mirror Session 13c's VigStackSeries param-override discipline), OR (b) `VIG_STACK_FAIR_VALUE_BIAS_OVERRIDES: dict[str, float]` per-family override surface ships first as Pattern B null-op (Session 67 architectural precedent — `VIG_STACK_FAMILY_FLOOR_OVERRIDES` shipped that exact shape).
+
+**Note on ordering.** Trigger #3 is the long-pole — back-tester extension or per-family override architecture are session-sized scope each (~3-5h coder). Triggers #1 and #2 are calendar-driven: NHL playoffs end June 2026; NBA/MLB championships settle later. Realistic earliest re-evaluation: Q3 2026 once championship futures settle and CFs from current scans accumulate.
+
+**What did NOT change.**
+- [bot/math_engine.py](bot/math_engine.py) `calculate_vig_stack` — untouched (the named function isn't even on the futures code path; it's parlay math used by `scanner_sports.py:265` only).
+- [bot/strategies/vig_stack_series.py:691-697](bot/strategies/vig_stack_series.py:691) — fair-value formula untouched.
+- [bot/strategies/vig_stack_series.py:37](bot/strategies/vig_stack_series.py:37) `VIG_STACK_MIN_EDGE = 0.02` — untouched (Session 68 already proved this isn't the lever).
+- [bot/config.py](bot/config.py) — no new override surface added (`VIG_STACK_FAIR_VALUE_BIAS_OVERRIDES` deferred until Outcome A or B becomes viable per watch-list).
+- Self-checks (`_self_check_edge`, `_self_check_probability_complement`) — untouched.
+- `verify_contract_direction` — untouched.
+- [bot/config.py:640](bot/config.py:640) `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` — untouched. Sessions 53/62 caps don't include KXNHL-/KXNBA-/KXMLB- futures because those families produced 0 trades; Outcome A/B (which would unlock new trades) is not shipping, so no per-family cap entries are needed. **If a future Session 69-followup ships Outcome A or B, that session must add `KXNHL-/KXNBA-/KXMLB-` entries at the Session 53 untested-family $50 tier** per the prompt's Family-cap regression rail.
+- Tests — no new tests (Pattern C ships no behavior change to lock).
+- Bot state files — no migration, no backfill.
+- Telegram throttle (`telegram_throttled_until = 2026-05-08T03:12:48Z`) — irrelevant since no restart needed.
+- Bot restart — NOT needed. CLAUDE.md is not loaded by `bot/main.py`.
+
+**Verification.**
+1. ☑ `grep -rn "calculate_vig_stack" bot/ tests/ --include="*.py" | grep -v __pycache__` → confirms parlay-only usage at `math_engine.py:312` (def) + `scanner_sports.py:265` (call) + parlay test files.
+2. ☑ `grep -n "yes_fair\|no_fair_cents\|vig_factor" bot/strategies/vig_stack_series.py` → confirms the actual fair-value derivation at lines 691-697.
+3. ☑ Phase 1 cross-cohort + weather query reproduces the table above on production `bot/state/clv.json` (NHL n=14 / NBA n=0 / MLB n=0; weather 3 of 6 families positive).
+4. ☑ `git diff bot/ tests/ tools/` empty (only `CLAUDE.md` + `README.md` edited).
+5. ☑ No bot restart. Single PID under launchd unaffected. Telegram throttle irrelevant.
+
+**Operating Posture observation.** This is the FOURTH consolidator/§10-driven Phase-1 (after Sessions 67 stable-floor Pattern B, 67-investigate, 68 NHL futures threshold). The Phase-0 step caught a **file misidentification** — the user wrote `math_engine.calculate_vig_stack` but the actual formula lives in `vig_stack_series.py`. Mirror of Session 67's "gate-name vs floor-value" scope correction. Re-scoping took ~10 minutes; shipping a `math_engine.py` change against a parlay function would have been worse than wallpaper. The mechanism finding (H1 — proportional vig redistribution) is robust, but the cross-cohort verification rail caught what discipline rails are for: even with a correct mechanism, the cross-sport data isn't there (NBA/MLB n=0), AND the weather regression check FAILED (3 of 6 weather families show the same bias, meaning the formula change has 6× the blast radius the prompt assumed). Outcome C preserves the search frontier without committing to a noisy production change. The watch-list trigger explicitly names the infrastructure prerequisites so the future Session 69-followup has a clear unlock path. Mirror of Session 67's Pattern B halfway ship (Session 67 had enough evidence to ship the lever empty; Session 69 doesn't yet).
+
+**No code change. No test change. No bot restart.** Pure investigation + doc update.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
