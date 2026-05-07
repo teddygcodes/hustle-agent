@@ -308,3 +308,78 @@ def test_high_edit_volume_does_not_exceed_throttle(monkeypatch, tmp_path):
     assert sent_at[:5] == [0.0] * 5
     assert all((b - a) >= 1.0 for a, b in zip(sent_at[5:], sent_at[6:]))
     assert sent_at[-1] >= 95.0
+
+
+# --- Session 58.5: shutdown short-circuit ---
+
+
+def test_notifier_skips_retries_when_stopping(monkeypatch, tmp_path, caplog):
+    """Session 58.5: when _stopping=True, exceptions short-circuit immediately,
+    logging ONCE at INFO and skipping the 3-retry loop. Catches the residual
+    HTTPXRequest race that Session 58's GlintBot.stop() reorder doesn't.
+    """
+    from bot import notifier
+
+    calls = {"n": 0}
+
+    class FakeBot:
+        async def send_message(self, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("This HTTPXRequest is not initialized!")
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(notifier.asyncio, "sleep", fake_sleep)
+
+    # Simulate: stop() has been called and set the flag, but in-flight
+    # send_message is still awaiting when the HTTPXRequest tears down.
+    n._stopping = True
+
+    with caplog.at_level("INFO", logger="glint.notifier"):
+        asyncio.run(n.send_message("auto-scan announce"))
+
+    # Single attempt, no retries, no sleep
+    assert calls["n"] == 1
+    assert sleeps == []
+    # INFO log fired once
+    assert "skipped during shutdown" in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+def test_notifier_normal_retry_when_not_stopping(monkeypatch, tmp_path):
+    """Session 58.5: when _stopping=False (default), preserve Session 52's
+    retry-on-NetworkError contract. Regression guard against the flag
+    accidentally short-circuiting normal-operation transient failures.
+    """
+    from bot import notifier
+
+    calls = {"n": 0}
+
+    class FakeBot:
+        async def send_message(self, **kwargs):
+            calls["n"] += 1
+            raise NetworkError("transient network blip")
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+
+    # Default state: _stopping is False. Verify it explicitly.
+    assert n._stopping is False
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(notifier.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(n.send_message("normal blip"))
+
+    # Full retry contract preserved: 3 attempts (max_retries + 1)
+    assert calls["n"] == n._TELEGRAM_MAX_RETRIES + 1
+    # Backoff sleeps fired (1.0 then 2.0 from 1.0 * 2^attempt_idx)
+    assert len(sleeps) == n._TELEGRAM_MAX_RETRIES

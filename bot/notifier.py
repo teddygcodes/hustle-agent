@@ -662,6 +662,12 @@ class TelegramNotifier:
         self._RATE_LIMIT = 20  # max messages per 60 seconds
         self._edit_throttle = EditThrottle()
         self._edit_dedup_hashes: dict[int, bytes] = {}
+        # Session 58.5: short-circuits in-flight retries during shutdown.
+        # Defense-in-depth for Battle Scar #17 — if GlintBot.stop()'s
+        # watcher-cancel ordering ever regresses, this flag still catches
+        # the symptom and surfaces ONE INFO line per restart instead of
+        # 121 warnings. Set to True at the start of stop().
+        self._stopping = False
 
     async def initialize(self):
         """Build and initialize the Telegram application."""
@@ -694,6 +700,11 @@ class TelegramNotifier:
         """Stop the Telegram bot."""
         if not self.app:
             return
+        # Session 58.5: signal in-flight _telegram_call retries to short-circuit
+        # BEFORE we tear down the HTTPXRequest. Order is load-bearing — flag must
+        # land before updater.stop() so any in-flight retry sees it on the next
+        # exception bubble.
+        self._stopping = True
         try:
             if self.app.updater.running:
                 await self.app.updater.stop()
@@ -847,6 +858,21 @@ class TelegramNotifier:
                 result = await coro_factory()
             except Exception as e:
                 last_exc = e
+
+                # Session 58.5: short-circuit retries during shutdown.
+                # HTTPXRequest is being torn down; retries on it will all
+                # fail with the same error, just creating log spam. Place
+                # this BEFORE branching on exception class so it catches
+                # whatever flavor surfaces (RuntimeError 'not initialized',
+                # httpx.ReadError, NetworkError-wrapped variants).
+                if self._stopping:
+                    logger.info(
+                        "Telegram %s skipped during shutdown: %s",
+                        kind,
+                        type(e).__name__,
+                    )
+                    return None
+
                 has_retry = attempt_idx < self._TELEGRAM_MAX_RETRIES
 
                 if self._is_flood_error(e):

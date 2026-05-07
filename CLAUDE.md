@@ -3842,6 +3842,42 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 58.5 — `_stopping` flag short-circuits notifier-shutdown retry log spam (May 7, ~45min, defense-in-depth + log cleanup)
+
+**Trigger.** Session 58 closed 119 of 121 `HTTPXRequest is not initialized` errors per restart by reordering [bot/main.py:GlintBot.stop()](hustle-agent/bot/main.py:397) to cancel `_active_watchers` before `await self.notifier.stop()`. **2 residual errors per restart remained** — observed as a `send_message` race on `_live_scan_loop`'s `"Auto-scan: started N new watcher(s)"` announce ([bot/main.py:1138-1141](hustle-agent/bot/main.py:1138)) mid-await when SIGTERM lands. Notifier teardown shuts down the HTTPXRequest while the in-flight POST is still awaiting → `RuntimeError('HTTPXRequest is not initialized!')` (or PTB-wrapped `httpx.ReadError` / `NetworkError`) → Session 52's retry-with-backoff at [bot/notifier.py:840](hustle-agent/bot/notifier.py:840) retries 3× on a dead HTTPXRequest → final ERROR + traceback chain. Bounded smaller race than Battle Scar #17, but worth eliminating because (a) confused log readers ("did Session 58 actually fix it?"), (b) doubles as defense-in-depth if Battle Scar #17 ever regresses, (c) ~15 LOC fix.
+
+**What shipped.**
+
+1. **[bot/notifier.py:665](hustle-agent/bot/notifier.py:665)** — `TelegramNotifier.__init__` declares `self._stopping = False` next to the other instance booleans. Documented as defense-in-depth for Battle Scar #17 in the inline comment.
+2. **[bot/notifier.py:693-700](hustle-agent/bot/notifier.py:693)** — `stop()` sets `self._stopping = True` BEFORE `app.updater.stop()` / `app.stop()` / `app.shutdown()`. Order is load-bearing per gotcha #1 — flag must land before HTTPXRequest teardown so any in-flight retry sees it on the next exception bubble.
+3. **[bot/notifier.py:846-863](hustle-agent/bot/notifier.py:846)** — inside `_telegram_call`'s `except Exception as e:` block, BEFORE branching on `_is_flood_error` / `isinstance(e, (NetworkError, TimedOut))`: `if self._stopping: logger.info("Telegram %s skipped during shutdown: %s", kind, type(e).__name__); return None`. Placement matters per gotcha #2 — catches whatever flavor surfaces (raw RuntimeError, PTB-wrapped NetworkError, httpx.ReadError) without gating on a specific exception class.
+4. **[tests/test_notifier.py](hustle-agent/tests/test_notifier.py)** — 2 new regression tests appended:
+   - `test_notifier_skips_retries_when_stopping`: `FakeBot.send_message` raises `RuntimeError('This HTTPXRequest is not initialized!')`, `n._stopping = True`, asserts `calls["n"] == 1` (single attempt, no retries), `sleeps == []`, and `"skipped during shutdown"` in caplog. Verified to FAIL pre-fix and PASS post-fix.
+   - `test_notifier_normal_retry_when_not_stopping`: `FakeBot.send_message` raises `NetworkError("transient network blip")`, `n._stopping = False` (default, also asserted explicitly), asserts full retry contract preserved (`calls["n"] == n._TELEGRAM_MAX_RETRIES + 1` = 3 attempts; `len(sleeps) == 2` for the 1.0+2.0 backoff). Regression guard against the flag accidentally short-circuiting normal-operation transient failures.
+
+**Tests.** `python3 -m pytest tests/test_notifier.py -v -k "stopping or shutdown"` → 2/2 pass. Full repo `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1419 passed in 27.20s** (Session 58 baseline 1417 + 2 new). 0 failures, 0 regressions.
+
+**Bot restart + acceptance gate verified live.** Pre-restart Telegram cool-down clear (last successful send 04:50:42 UTC; `telegram_throttled_until` in the past). `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` → wrapper PID 93500, child PID 93504, lock 93504 (single-PID per Battle Scar #14 path-rooted check). Bot.log immediately showed Session 58's ordering still firing: `Stopping 5 active watcher(s)` → `Application is stopping` → `Telegram bot stopped` → `Telegram connected — bot is live` within seconds. **Acceptance gate (60s post-restart):** `POST_RESTART_HTTPX_ERRORS = 0` (was 2 pre-fix), `POST_RESTART_SHUTDOWN_INFO = 0`. Both INFO and timestamped-error counts read zero — meaning no in-flight `_live_scan_loop` send_message was racing during this restart cycle (the race is timing-sensitive and didn't fire this round). The unit tests above prove the flag mechanism works mechanically; this restart simply didn't reproduce the in-flight scenario. **Per plan's documented 0/0 branch: ship clean — defense-in-depth contract intact.** Future restarts that DO race the announce send will surface ONE INFO line per restart instead of the 2-error chain, making the residual self-documenting.
+
+**Defense-in-depth value (the structural win).** If Battle Scar #17 ever regresses (Session 58's `GlintBot.stop()` watcher-cancel ordering gets accidentally reverted), the `_stopping` flag still catches the symptom and surfaces ONE INFO line per restart instead of 121 warnings — making the regression MORE visible (single, focused signal) rather than less. Worth more than the log-cleanup itself.
+
+**Methodological note (acceptance gate awk filter).** First acceptance gate run reported `POST_RESTART_HTTPX_ERRORS = 6` — false positive from `awk '$0 > "[2026-05-07 00:51:10]"'` doing lexicographic comparison: untimestamped Python traceback fragments (e.g. `httpx.ReadError`, `telegram.error.NetworkError: httpx.ReadError:`) start with lowercase letters that lexicographically beat the `[`-prefixed marker, so historical fragments swept past the filter. Re-ran with proper timestamp-anchored filter (`awk '/^\[2026-05-07 00:5[1-9]:/...'`) → 0 matches. Future operators: anchor the awk regex to `^\[YYYY-MM-DD HH:MM` rather than relying on string comparison; untimestamped traceback continuation lines are common in this log.
+
+**Out of scope (held).**
+- Reverting or modifying Session 58's `GlintBot.stop()` ordering. That fix is correct; 58.5 only adds the flag-based defensive layer.
+- Refactoring Session 52's retry-with-backoff. Retries are correct for transient network failures during normal operation; the flag only short-circuits during shutdown.
+- Adding the flag to other notifier methods beyond `_telegram_call` — all Telegram I/O goes through `_telegram_call` per Session 52's consolidation; if any caller bypasses it, that's a separate finding.
+- Catching MORE shutdown-time error variants. v1 catches anything raised in `_telegram_call`'s `except Exception`; if new variants surface that bypass the wrapper, extend in followup.
+- Bot restart documentation changes — existing Battle Scars #14 + #15 cover the relevant rules.
+
+**Watch-list trigger.** If a future restart produces NON-ZERO timestamped HTTPXRequest errors AND zero shutdown-skip INFO lines, the flag isn't catching the race — investigate immediately (likely candidates: in-flight call before `stop()` is reached, exception path bypassing `_telegram_call`, flag set too late in `stop()` ordering). If non-zero errors AND non-zero INFO lines, a NEW failure mode bypasses the flag — also investigate.
+
+**No new Battle Scar.** Session 58.5 refines #17, doesn't add a new failure mode. The post-restart contract is now: 0 HTTPXRequest errors expected; ≥1 INFO line per restart that races; investigate any deviation.
+
+**Operating Posture observation.** Three consecutive sessions (56.5, 58, 58.5) shipped Phase-0-disciplined fixes where the original brief's hypothesis was either falsified (58 — "startup race" → actually watcher-task-lifetime) or refined (58.5 — accept the 2-error residual vs. eliminate it via flag). 56.5's calendar drift fix was the same shape — investigate the test failure before assuming it's a real bug. Phase 0 is paying for itself across the operability arc.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
