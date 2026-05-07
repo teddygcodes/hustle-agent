@@ -44,6 +44,21 @@ def test_full_daily_report_renders_against_real_state(tmp_path):
         assert prefix in md, f"missing section header {prefix!r}"
     assert "Last Run Stamp:" in md
     assert "_Sections rendered:" in md
+    assert out.stat().st_size > 1000
+
+
+def test_daily_report_runs_against_current_production_state(tmp_path):
+    """Production-shape state should render a complete non-empty report."""
+    out = daily_report.build_report(
+        datetime(2026, 5, 7, tzinfo=helpers.ET),
+        out_dir=tmp_path,
+    )
+    md = out.read_text()
+    assert out.name == "daily_report_2026-05-07.md"
+    assert out.stat().st_size > 1000
+    for prefix in SECTION_HEADER_PREFIXES:
+        assert prefix in md, f"missing section header {prefix!r}"
+    assert "[section unavailable:" not in md
 
 
 def test_daily_report_has_exactly_ten_sections(tmp_path):
@@ -219,3 +234,17 @@ def test_stdout_matches_file_content(tmp_path, monkeypatch, capsys):
     assert len(files) == 1
     file_content = files[0].read_text()
     assert captured == file_content
+
+
+def test_daily_report_writes_to_expected_path(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(helpers, "REPORTS_DIR", tmp_path)
+    for _, fn_name in helpers.SHARED_SECTIONS:
+        monkeypatch.setattr(helpers, fn_name, lambda *a, **k: "# stub\n")
+
+    rc = daily_report.main(["--date", "2026-05-07"])
+
+    assert rc == 0
+    capsys.readouterr()
+    out = tmp_path / "daily" / "daily_report_2026-05-07.md"
+    assert out.exists()
+    assert out.stat().st_size > 0

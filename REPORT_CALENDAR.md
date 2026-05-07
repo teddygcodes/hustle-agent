@@ -8,7 +8,7 @@ All times are in Eastern Time. The bot wall clock and ET match.
 
 | Routine | Cadence | Next Run | Last Run | Output | Why | Notes |
 |---|---|---|---|---|---|---|
-| Daily report | Daily 3:00 AM ET | (after first fire) | 2026-05-03T17:36Z | `bot/state/reports/daily/daily_report_YYYY-MM-DD.md` | Verify bot health + capture every metric we collect | Health pulse on top (5 rows) + 9 data sections below |
+| Daily report | Daily 3:00 AM ET | (after first fire) | 2026-05-07T05:42Z | `bot/state/reports/daily/daily_report_YYYY-MM-DD.md` | Verify bot health + capture every metric we collect | Health pulse on top (5 rows) + 9 data sections below |
 | Weekly report | Sundays 6:00 AM ET | (after first fire) | 2026-05-03T17:39Z | `bot/state/reports/weekly/weekly_report_YYYY-WNN.md` | Synthesis layer: calibration findings + retuning candidates | Daily content + 6 weekly-only sections (week-over-week deltas, bucket analysis, dataset rebuild, excursion + exit-replay, calibration findings, retuning candidates) |
 | Discovery agent | Daily 6:00 AM ET | (after first fire) | — | `bot/state/discovery/discovery_report_YYYY-MM-DD.md` | Heuristic scan for new patterns, outliers, and emergent cohorts across all bot data | Session 43a framework + 8 heuristics: outlier_pnl, cohort_emergence (Session 43b refined: ticker-count + accept-rate + futures/per-game distinction), threshold_proximity, counterfactual_hotspots, universe_gap, live_tick_anomalies (streaming), cadence_outcome, log_error_spike (streaming). NEW/STABLE/RESOLVED dedup across runs. Pure stdlib, no LLM, no API. |
 

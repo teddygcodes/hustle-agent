@@ -261,7 +261,7 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
             stale_tickers = {x["ticker"] for x in cancelled_stale}
             changed = False
             for pt in paper_trades:
-                if not isinstance(pt, dict) or pt.get("status") != "open":
+                if not isinstance(pt, dict) or pt.get("status") not in ("open", "resting"):
                     continue
                 pt_id = pt.get("id", "")
                 pt_ticker = pt.get("ticker", "")

@@ -191,7 +191,8 @@ class TestExecuteTradeChecks:
         with patch("bot.executor.verify_contract_direction") as mock_dir, \
              patch("bot.executor.get_balance") as mock_bal, \
              patch("bot.executor._check_position_limits") as mock_pos, \
-             patch("bot.executor._verify_edge_still_exists") as mock_edge:
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
             mock_dir.return_value = {
                 "direction_correct": True, "confidence": "high",
                 "explanation": "ok", "warnings": [],
@@ -199,6 +200,7 @@ class TestExecuteTradeChecks:
             mock_bal.return_value = {"balance_dollars": 100.0}
             mock_pos.return_value = (True, "ok")
             mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
 
             from bot.executor import execute_trade
             result = execute_trade(opp, sizing)
@@ -221,7 +223,8 @@ class TestExecuteTradePaperHappyPath:
         with patch("bot.executor.verify_contract_direction") as mock_dir, \
              patch("bot.executor.get_balance") as mock_bal, \
              patch("bot.executor._check_position_limits") as mock_pos, \
-             patch("bot.executor._verify_edge_still_exists") as mock_edge:
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
             mock_dir.return_value = {
                 "direction_correct": True, "confidence": "high",
                 "explanation": "ok", "warnings": [],
@@ -229,6 +232,7 @@ class TestExecuteTradePaperHappyPath:
             mock_bal.return_value = {"balance_dollars": 100.0}
             mock_pos.return_value = (True, "ok")
             mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
 
             from bot.executor import execute_trade
             result = execute_trade(opp, sizing)
@@ -247,6 +251,41 @@ class TestExecuteTradePaperHappyPath:
         assert pos["filled"] == 0
         assert pos["paper"] is True
 
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        assert trades[0]["id"] == order_id
+        assert trades[0]["status"] == "resting"
+
+    def test_paper_trade_immediate_fill_creates_open_paper_trade(self, tmp_state):
+        """Marketable paper order writes an active position and open paper trade."""
+        opp = _make_opp(price_cents=45)
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        with patch("bot.executor.verify_contract_direction") as mock_dir, \
+             patch("bot.executor.get_balance") as mock_bal, \
+             patch("bot.executor._check_position_limits") as mock_pos, \
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
+            mock_dir.return_value = {
+                "direction_correct": True, "confidence": "high",
+                "explanation": "ok", "warnings": [],
+            }
+            mock_bal.return_value = {"balance_dollars": 100.0}
+            mock_pos.return_value = (True, "ok")
+            mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 45, "yes_bid": 43}
+
+            from bot.executor import execute_trade
+            result = execute_trade(opp, sizing)
+
+        assert result["success"] is True
+        assert result["order_result"]["status"] == "paper_filled"
+        positions = json.loads(tmp_state["positions"].read_text())
+        assert positions[0]["status"] == "filled"
+        assert positions[0]["filled"] == 5
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert trades[0]["status"] == "open"
+
     def test_paper_order_id_format(self, tmp_state):
         """Paper order ID is PAPER- followed by 8 uppercase hex chars."""
         import re
@@ -256,7 +295,8 @@ class TestExecuteTradePaperHappyPath:
         with patch("bot.executor.verify_contract_direction") as mock_dir, \
              patch("bot.executor.get_balance") as mock_bal, \
              patch("bot.executor._check_position_limits") as mock_pos, \
-             patch("bot.executor._verify_edge_still_exists") as mock_edge:
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
             mock_dir.return_value = {
                 "direction_correct": True, "confidence": "high",
                 "explanation": "ok", "warnings": [],
@@ -264,6 +304,7 @@ class TestExecuteTradePaperHappyPath:
             mock_bal.return_value = {"balance_dollars": 100.0}
             mock_pos.return_value = (True, "ok")
             mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
 
             from bot.executor import execute_trade
             result = execute_trade(opp, sizing)
@@ -287,7 +328,8 @@ class TestSession50PaperTradeFields:
         with patch("bot.executor.verify_contract_direction") as mock_dir, \
              patch("bot.executor.get_balance") as mock_bal, \
              patch("bot.executor._check_position_limits") as mock_pos, \
-             patch("bot.executor._verify_edge_still_exists") as mock_edge:
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
             mock_dir.return_value = {
                 "direction_correct": True, "confidence": "high",
                 "explanation": "ok", "warnings": [],
@@ -295,6 +337,7 @@ class TestSession50PaperTradeFields:
             mock_bal.return_value = {"balance_dollars": 100.0}
             mock_pos.return_value = (True, "ok")
             mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
 
             from bot.executor import execute_trade
             return execute_trade(opp, sizing)
@@ -537,6 +580,13 @@ class TestCheckFillsPaperSim:
             "paper": True,
         }
         tmp_state["positions"].write_text(json.dumps([position]))
+        tmp_state["paper_trades"].write_text(json.dumps([{
+            "id": "PAPER-AABBCCDD",
+            "ticker": "KXHIGHNY-26APR-70",
+            "status": "resting",
+            "entry_price": 0.45,
+            "contracts": 8,
+        }]))
 
         with patch("bot.executor.get_market") as mock_market:
             # Market ask dropped to our limit price — should fill
@@ -552,6 +602,9 @@ class TestCheckFillsPaperSim:
         saved = json.loads(tmp_state["positions"].read_text())
         assert saved[0]["filled"] == 8
         assert saved[0]["status"] == "filled"
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert trades[0]["status"] == "open"
+        assert trades[0]["filled_at"]
 
     def test_paper_resting_does_not_fill_when_ask_above_limit(self, tmp_state):
         """Paper resting order stays resting when ask > limit price."""
@@ -739,7 +792,9 @@ class TestCloseTsThreading:
                        "thesis_supports": "yes", "intended_side": "yes",
                    }), \
              patch("bot.executor._verify_edge_still_exists",
-                   return_value=(True, "ok")):
+                   return_value=(True, "ok")), \
+             patch("bot.executor.get_market",
+                   return_value={"yes_ask": 99, "yes_bid": 43}):
             exc.execute_trade(opp, sizing)
         recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
         # Find the self_check_failed reject in the log stream.
@@ -764,7 +819,9 @@ class TestCloseTsThreading:
                        "thesis_supports": "yes", "intended_side": "yes",
                    }), \
              patch("bot.executor._verify_edge_still_exists",
-                   return_value=(True, "ok")):
+                   return_value=(True, "ok")), \
+             patch("bot.executor.get_market",
+                   return_value={"yes_ask": 99, "yes_bid": 43}):
             exc.execute_trade(opp, sizing)
         recs = [json.loads(l) for l in sandbox.read_text().splitlines() if l.strip()]
         accept = next((r for r in recs if r.get("decision") == "accept"), None)

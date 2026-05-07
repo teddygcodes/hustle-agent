@@ -1052,6 +1052,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         paper_trades = _load_json(PAPER_TRADES_FILE)
         if not isinstance(paper_trades, list):
             paper_trades = []
+        paper_status = "open" if filled > 0 else "resting"
         record = {
             "id": order_result.get("order_id", ""),
             "ticker": ticker,
@@ -1062,7 +1063,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "edge_at_entry": round(opportunity.get("edge", 0), 6),
             "confidence": round(opportunity.get("confidence", opportunity.get("relative_edge", 0)), 4),
-            "status": "open",
+            "status": paper_status,
             "exit_price": None,
             "pnl": None,
             "resolved_at": None,
@@ -1122,6 +1123,7 @@ def check_fills() -> list[dict]:
         return []
 
     updates = []
+    paper_filled_ids: set[str] = set()
     for pos in positions:
         if pos.get("status") not in ("resting", "partial"):
             continue
@@ -1144,6 +1146,7 @@ def check_fills() -> list[dict]:
                 pos["status"] = "filled"
                 logger.info(f"  📝 [PAPER] Fill simulated: {contracts}x {side.upper()} @ {limit_price}¢ on {pos.get('ticker', '?')}")
                 updates.append(pos)
+                paper_filled_ids.add(order_id)
             continue
 
         # Live order: check fill status via Kalshi API
@@ -1182,6 +1185,22 @@ def check_fills() -> list[dict]:
 
     if updates:
         _save_json(POSITIONS_FILE, positions)
+        if paper_filled_ids:
+            paper_trades = _load_json(PAPER_TRADES_FILE)
+            if isinstance(paper_trades, list):
+                changed = False
+                now_iso = datetime.now(timezone.utc).isoformat()
+                for trade in paper_trades:
+                    if (
+                        isinstance(trade, dict)
+                        and trade.get("id") in paper_filled_ids
+                        and trade.get("status") == "resting"
+                    ):
+                        trade["status"] = "open"
+                        trade["filled_at"] = now_iso
+                        changed = True
+                if changed:
+                    _save_json(PAPER_TRADES_FILE, paper_trades)
 
     return updates
 

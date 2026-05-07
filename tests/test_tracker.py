@@ -54,8 +54,11 @@ def _base_position(
 def tracker_env(tmp_path, monkeypatch):
     """Sandbox positions.json and mock get_market for tracker tests."""
     positions_file = tmp_path / "positions.json"
+    paper_trades_file = tmp_path / "paper_trades.json"
     positions_file.write_text("[]")
+    paper_trades_file.write_text("[]")
     monkeypatch.setattr(tracker, "POSITIONS_FILE", positions_file)
+    monkeypatch.setattr(tracker, "PAPER_TRADES_FILE", paper_trades_file)
 
     # Session 17: isolate tracker_cadence's append-only log to tmp_path so
     # tests don't pollute the production bot/state/tracker_cadence.jsonl.
@@ -88,6 +91,7 @@ def tracker_env(tmp_path, monkeypatch):
         "seed": seed,
         "read": read,
         "file": positions_file,
+        "paper_file": paper_trades_file,
         "cadence_file": cadence_file,
     }
 
@@ -95,6 +99,38 @@ def tracker_env(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
+
+class TestRestingOrderPaperLedger:
+
+    def test_settled_market_cancels_matching_resting_paper_trade(self, tracker_env):
+        position = _base_position(
+            ticker="KXSTALE-RESTING",
+            order_id="PAPER-STALE1",
+            side="yes",
+            price_cents=45,
+            filled=0,
+        )
+        position["status"] = "resting"
+        tracker_env["seed"]([position])
+        tracker_env["paper_file"].write_text(json.dumps([{
+            "id": "PAPER-STALE1",
+            "ticker": "KXSTALE-RESTING",
+            "status": "resting",
+            "entry_price": 0.45,
+            "contracts": 10,
+        }]))
+        tracker_env["set_market"](status="inactive", yes_ask=100)
+
+        alerts = tracker.update_positions(called_from="_position_check_loop")
+
+        saved_pos = tracker_env["read"]()[0]
+        assert saved_pos["status"] == "cancelled_stale"
+        assert saved_pos["cancel_reason"] == "market_settled_unfilled"
+        saved_trade = json.loads(tracker_env["paper_file"].read_text())[0]
+        assert saved_trade["status"] == "cancelled_stale"
+        assert saved_trade["cancel_reason"] == "market_settled_unfilled"
+        assert any(a["type"] == "stale_orders_cancelled" for a in alerts)
+
 
 class TestMFEMAEInitialization:
 

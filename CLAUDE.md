@@ -3908,6 +3908,37 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 60 — Daily-report launchd regression + paper ledger consistency fix (May 7, investigation-then-fix, operational/data-integrity)
+
+**Trigger.** Session 59's first `tools/glint_status.py` run surfaced two actionable findings: (a) latest daily report was stale at ~77h (`daily_report_2026-05-03.md`), and (b) `positions.json` active count (14) disagreed with `paper_trades.json` open count (15).
+
+**Phase A diagnosis (D4).** The daily-report script itself was healthy: `tools/daily_report.py --date 2026-05-07` rendered all 10 sections cleanly against current production state. The scheduler was missing: no `~/Library/LaunchAgents/com.hustle-agent.daily-report.plist`, no loaded `launchctl` service, no disabled Glint daily-report service, and no crontab. Session 35 shipped the report generator, but the recurring trigger never landed.
+
+**Phase A fix.** Installed `~/Library/LaunchAgents/com.hustle-agent.daily-report.plist` as a user LaunchAgent, mirroring the discovery-agent pattern: Python 3.14, repo working directory, `PYTHONPATH`, `RunAtLoad=false`, `StartCalendarInterval` at 03:00 ET, stdout/stderr under `/tmp/com.hustle-agent.daily-report.*`. Enabled and bootstrapped it in `gui/501`; `launchctl print gui/501/com.hustle-agent.daily-report` shows the 03:00 calendar trigger. Forward-only manual run generated `bot/state/reports/daily/daily_report_2026-05-07.md`; May 4-6 remain intentionally missing.
+
+**Phase B diagnosis.** Structural/stale orphan, not a transient atomic-write race. The lone extra paper-trade row was `PAPER-BAEB1FC9` / `KXATPCHALLENGERMATCH-26APR14SMIAGU-SMI`, opened `2026-04-15T02:57:14Z`. `trade_history.json` recorded it as `filled=0`, `status=resting`; there was no matching `positions.json` active row, while `paper_trades.json` still had `status=open`. It was an unfilled resting paper order being counted as an open trade.
+
+**Phase B fix.** `bot/executor.py:1055` now writes new paper ledger rows as `resting` when `filled == 0`, and `open` only when the paper order actually has filled contracts. `bot/executor.py:1126` threads filled paper order IDs through `check_fills()` and promotes matching `paper_trades.json` rows from `resting` to `open` when the simulated fill occurs. `bot/tracker.py:264` lets settled-market stale cancellation close matching paper rows with status `open` OR `resting`. One-shot ignored-state cleanup changed only `PAPER-BAEB1FC9` from `open` to `cancelled_stale` with `cancel_reason=market_settled_unfilled`; no auto-healer added.
+
+**Regression tests added.** 5 net-new tests: daily report current-state/output-path coverage, paper immediate-fill ledger status, resting-order stale-cancel paper sync, and production-state `positions.json` vs `paper_trades.json` consistency guard.
+
+**Verification.**
+- `python3 -m pytest tests/test_daily_report.py -v` → 11 passed.
+- `python3 -m pytest tests/test_positions_paper_trades_consistency.py -v` → 1 passed.
+- `python3 -m pytest tests/test_bot_executor.py -v` → 34 passed.
+- `python3 -m pytest tests/test_tracker.py -v` → 19 passed.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1434 passed**.
+- `python3 tools/glint_status.py` → no `daily_report_stale`; no `positions_paper_open_mismatch`.
+- Bot restarted via launchd; old orphan PID 93504 killed; fresh Glint tree is one wrapper PID 43459 + child PID 43478. Anchored post-restart log scan found 0 `HTTPXRequest` / `Traceback` / `ERROR` lines.
+
+**Operating Posture.** This is the SECOND coder session triggered by a `glint_status.py` finding. The planner-tuned consolidator is now actively driving the session backlog; specifically, the watch-list + flag features (not just the snapshot) are surfacing actionable work.
+
+**Methodology lesson re-codified.** Any post-restart log filtering by timestamp used regex anchoring (`^\[2026-05-07 ...`) rather than lexicographic comparison, per Session 58.5.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
