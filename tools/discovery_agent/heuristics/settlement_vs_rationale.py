@@ -142,6 +142,27 @@ def _is_pattern1_tail(trade: dict) -> bool:
     return float(pnl) <= -PATTERN1_LOSS_PCT_OF_NOTIONAL * notional
 
 
+def _is_pattern1_tail_at_cap(trade: dict, family_cap: int) -> bool:
+    """Pattern 1 at-cap tail filter — combines loss-percent AND at-cap notional.
+
+    Used by the family-aggregate counter in _severity_pattern1 to exclude
+    EE-noise: small positions that lost 100% of tiny notional but were never
+    near the family cap. Mirrors the per-finding trigger's at-cap check at
+    _check_pattern1 lines 247-254.
+
+    Discovered Session 67: Pattern 1's family_recent_tail_losses counter
+    was inflating with EE-noise on KXHIGHMIA / KXHIGHAUS — small positions
+    ($10-18 notional) that lost 100% of tiny notional but were never near
+    the $200 family cap. Real at-cap tail losses on KXHIGHMIA in 14d window: 1.
+    Reported by the at-cap-blind family counter: 4. The per-finding trigger
+    correctly required at-cap, but the cross-cohort severity ladder did not.
+    """
+    if not _is_pattern1_tail(trade):
+        return False
+    notional = _notional(trade)
+    return notional >= PATTERN1_NOTIONAL_PCT_OF_CAP * family_cap
+
+
 def _family_recent_window(
     paper_trades: list[dict],
     family: str,
@@ -192,7 +213,10 @@ def _severity_pattern1(
 
     window = _family_recent_window(paper_trades, family, settled_at)
     family_pnl_sum = sum(float(t.get("pnl") or 0) for t in window)
-    tail_losses = [t for t in window if _is_pattern1_tail(t)]
+    # Session 67: family-aggregate counter must use the at-cap-aware filter
+    # to exclude EE-noise. Pre-Session-67 used _is_pattern1_tail (loss-only),
+    # which inflated the counter with small-notional 100%-loss positions.
+    tail_losses = [t for t in window if _is_pattern1_tail_at_cap(t, family_cap)]
     n_tail = len(tail_losses)
 
     base_idx = _SEVERITY_LADDER.index("high")

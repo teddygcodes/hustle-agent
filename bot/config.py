@@ -567,6 +567,50 @@ VIG_STACK_STABLE_FAMILIES = {"KXHIGHMIA", "KXHIGHAUS", "KXINX"}
 # stable family posts a 90+ WR loss > $10 cluster.
 VIG_STACK_WEATHER_MIN_PRICE = 0.93
 
+# Per-family NO-leg floor overrides (Session 67, Pattern B per Session 64
+# architecture). May 7, 2026.
+#
+# By default, every vig_stack family uses VIG_STACK_MIN_NO_ENTRY_PRICE
+# (0.70 stable) or VIG_STACK_WEATHER_MIN_PRICE (0.93 volatile) at the gate
+# site in bot/strategies/vig_stack_series.py:603-636. This dict provides
+# per-family override surface for evidence-based exceptions.
+#
+# Session 67 Phase-1 evidence (n=65 settled CFs at no_price_below_floor
+# stable-family gate, all 65 are KXHIGHMIA + KXHIGHAUS + KXINX):
+#   - KXHIGHMIA: n=34 mean +18.56c (raw), +20.31c (trimmed), realized +$11.75/trade May 1+
+#   - KXHIGHAUS: n=13 mean +14.69c (raw), +18.82c (trimmed), realized +$24.12/trade May 1+
+#   - KXINX:     n=18 mean -0.67c (raw), -0.31c (trimmed), realized -$48.51/trade May 1+
+#   - Combined raw +12.46c, trimmed +14.44c. Threshold sweep monotonic-decreasing
+#     on combined; KXHIGHAUS strong at floor=0.55-0.65; KXINX flat-negative at all bands.
+#
+# Cross-family signal real but ISOLATED to KXHIGHMIA + KXHIGHAUS. KXINX
+# flat-negative at every floor band AND historically losing $48/trade in
+# the current era — not eligible for relaxation. Lowering the global stable
+# floor (Outcome A) was rejected because KXINX would inherit the relaxation.
+# Pattern B = ship the lever, dict empty in production.
+#
+# To activate (future session, per Session 64 cost): uncomment a family line
+# below. Each activation needs a +14d re-validation routine mirroring
+# Session 38a / Session 49 discipline.
+VIG_STACK_FAMILY_FLOOR_OVERRIDES: dict[str, float] = {
+    # "KXHIGHMIA": 0.55,   # uncomment + schedule +14d re-validation when evidence justifies
+    # "KXHIGHAUS": 0.55,   # uncomment + schedule +14d re-validation when evidence justifies
+}
+
+
+def get_vig_stack_floor_for_family(family: str, default: float) -> float:
+    """Return per-family NO-leg floor override or fall back to default.
+
+    Used at the gate sites in bot/strategies/vig_stack_series.py:604,621
+    instead of reading VIG_STACK_MIN_NO_ENTRY_PRICE / VIG_STACK_WEATHER_MIN_PRICE
+    directly. Mirrors Session 64's get_leader_min_for_sport pattern.
+
+    Production state (Session 67): VIG_STACK_FAMILY_FLOOR_OVERRIDES is empty,
+    so every call returns the default. Net behavioral change: zero.
+    """
+    return VIG_STACK_FAMILY_FLOOR_OVERRIDES.get(family, default)
+
+
 # Vig stack per-ladder rung concentration cap (Apr 18, data-driven).
 # On Apr 17, the KXHIGHDEN ladder accumulated 6 rungs across 3 separate scan
 # cycles (13-17 contracts each). The actual Denver high landed in a range

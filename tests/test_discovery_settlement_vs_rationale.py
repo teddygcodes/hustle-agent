@@ -441,3 +441,205 @@ def test_empty_paper_trades_returns_empty():
     """Boundary: no settlements → no findings."""
     findings = SettlementVsRationale().run(_make_ctx([]))
     assert findings == []
+
+
+# -------- Tests 11-13 (Session 67): family-tail counter at-cap refinement --------
+
+def test_pattern1_family_counter_excludes_ee_noise():
+    """Session 67 P0 — family aggregate counter must exclude EE-noise.
+
+    Synthetic family with 1 at-cap tail + 3 small EE-100%-loss positions.
+    Pre-fix (Session 55-66): family_recent_tail_losses reports 4 because
+    _is_pattern1_tail is at-cap-blind. Post-fix (Session 67):
+    family_recent_tail_losses reports 1 because _is_pattern1_tail_at_cap
+    excludes the 3 EE-noise positions whose notional is far below 95% of
+    the $200 family cap.
+
+    Mirrors the real KXHIGHMIA evidence dict bug verified by Phase 0a:
+    KXHIGHMIA-26APR22-B81.5 ($14.11 notional, -$14.11), KXHIGHMIA-26APR24
+    ($18.40, -$18.40), KXHIGHMIA-26APR26 ($10.08, -$10.08) all reporting
+    in family_recent_tail_losses pre-fix.
+    """
+    # Trigger: at-cap KXHIGHMIA tail loss ($199.95 / $200 cap, -100% loss).
+    trigger = _trade(
+        ticker="KXHIGHMIA-26MAY06-TRIGGER",
+        type_="vig_stack",
+        contracts=200,
+        entry_price=1.00,           # notional = $200, at-cap
+        pnl=-200.00,
+        status="lost",
+        timestamp="2026-05-06T08:00:00+00:00",
+        resolved_at="2026-05-06T12:00:00+00:00",
+    )
+    # 3 EE-noise positions: small notional, 100% loss. NOT at-cap.
+    # Mirrors the real Phase 0a forensic shape on KXHIGHMIA.
+    ee_noise = [
+        _trade(
+            ticker="KXHIGHMIA-26APR22-B81.5",
+            type_="vig_stack",
+            contracts=17,
+            entry_price=0.83,        # notional = $14.11, way below $190
+            pnl=-14.11,
+            status="lost",
+            timestamp="2026-04-29T08:00:00+00:00",
+            resolved_at="2026-04-29T12:00:00+00:00",
+            trade_id="PAPER-TEST-EE-1",
+        ),
+        _trade(
+            ticker="KXHIGHMIA-26APR24-B84.5",
+            type_="vig_stack",
+            contracts=20,
+            entry_price=0.92,        # notional = $18.40
+            pnl=-18.40,
+            status="lost",
+            timestamp="2026-04-30T08:00:00+00:00",
+            resolved_at="2026-04-30T12:00:00+00:00",
+            trade_id="PAPER-TEST-EE-2",
+        ),
+        _trade(
+            ticker="KXHIGHMIA-26APR26-T87",
+            type_="vig_stack",
+            contracts=14,
+            entry_price=0.72,        # notional = $10.08
+            pnl=-10.08,
+            status="lost",
+            timestamp="2026-05-01T08:00:00+00:00",
+            resolved_at="2026-05-01T12:00:00+00:00",
+            trade_id="PAPER-TEST-EE-3",
+        ),
+    ]
+    findings = SettlementVsRationale().run(_make_ctx([trigger] + ee_noise))
+    trigger_findings = [f for f in findings
+                        if "KXHIGHMIA-26MAY06-TRIGGER" in f.title]
+    assert len(trigger_findings) == 1, (
+        f"trigger must fire (per-finding gate is at-cap-correct). Got: "
+        f"{[f.title for f in findings]}"
+    )
+    f = trigger_findings[0]
+    # The lock-in: counter excludes the 3 EE-noise positions.
+    assert f.evidence["family_recent_tail_losses"] == 1, (
+        f"Session 67 bug: family_recent_tail_losses must equal 1 (only the "
+        f"trigger), not 4. Got {f.evidence['family_recent_tail_losses']}. "
+        f"EE-noise positions ($14, $18, $10 notional) are NOT at-cap and "
+        f"must be excluded from the family-aggregate counter."
+    )
+
+
+def test_pattern1_per_finding_trigger_unchanged():
+    """Session 67 — per-finding trigger correctness preserved.
+
+    KXHIGHMIA at-cap tail loss alone (no winners, no EE-noise). Trigger MUST
+    still fire (per-finding gate at _check_pattern1 lines 247-254 was already
+    at-cap-correct; Session 67 refactor must not perturb it). With aggregate
+    negative (single tail loss in window) and no demotion clause firing,
+    severity stays HIGH.
+
+    Lock-in: refactor of _severity_pattern1 line 195 (counter helper swap)
+    does NOT break the per-finding trigger.
+    """
+    trigger = _trade(
+        ticker="KXHIGHMIA-26MAY05-T87",   # exact production ticker shape
+        type_="vig_stack",
+        contracts=200,
+        entry_price=1.00,
+        pnl=-199.95,
+        status="lost",
+        timestamp="2026-05-06T08:00:00+00:00",
+        resolved_at="2026-05-06T12:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([trigger]))
+    trigger_findings = [f for f in findings
+                        if "KXHIGHMIA-26MAY05-T87" in f.title]
+    assert len(trigger_findings) == 1, (
+        f"per-finding trigger must fire on isolated at-cap tail. Got: "
+        f"{[f.title for f in findings]}"
+    )
+    f = trigger_findings[0]
+    assert "tail_loss_in_high_cap_family" in f.title
+    # No demotion: family_pnl_sum == -$199.95 (negative) AND no legacy
+    # exclusion fires (settle is post Session-53 deploy + 24h).
+    assert f.severity == "high", (
+        f"isolated tail in negative-aggregate family should stay HIGH "
+        f"(no demotion clause fires). Got {f.severity}."
+    )
+    # n_tail == 1 (the trigger itself) — counter shape unchanged on
+    # this clean case.
+    assert f.evidence["family_recent_tail_losses"] == 1
+
+
+def test_pattern1_severity_demotion_unchanged():
+    """Session 67 — severity demotion ladder fires correctly post-refactor.
+
+    Session 47 ladder: family aggregate > 0 AND n_tail == 1 → demote
+    HIGH → NOTABLE. Session 67's counter-helper swap must not break this.
+
+    The strongest version of this test: single at-cap tail in profitable
+    family WITH EE-noise present. Pre-fix (Session 55-66): EE-noise inflated
+    the counter to n_tail = 4 → demotion clause failed (n_tail != 1) →
+    severity stayed HIGH (WRONG — should have demoted). Post-fix (Session 67):
+    counter correctly reports n_tail = 1 → demotion clause fires →
+    severity = NOTABLE.
+
+    This is the cascading consequence of the family-counter bug — a
+    legitimate single-tail-in-positive-family case was being mis-classified
+    as "pattern" (not demoted) when it should have been "outlier" (demoted).
+    """
+    # Trigger: at-cap tail in KXHIGHAUS (also $200 cap, healthy tier).
+    trigger = _trade(
+        ticker="KXHIGHAUS-26MAY06-TRIGGER",
+        type_="vig_stack",
+        contracts=200,
+        entry_price=1.00,
+        pnl=-200.00,
+        status="lost",
+        timestamp="2026-05-06T08:00:00+00:00",
+        resolved_at="2026-05-06T12:00:00+00:00",
+    )
+    # 5 winners totaling +$300, in 14d window. Trigger contributes -$200.
+    # 3 EE-noise tails contribute -$45 (-$15 each). Aggregate = +$55 (positive).
+    winners = [
+        _trade(
+            ticker=f"KXHIGHAUS-26MAY0{i + 1}-W{i}",
+            type_="vig_stack",
+            contracts=200,
+            entry_price=0.95,
+            pnl=60.00,                # 5 × $60 = $300 wins
+            status="won",
+            timestamp=f"2026-05-0{i + 1}T08:00:00+00:00",
+            resolved_at=f"2026-05-0{i + 1}T12:00:00+00:00",
+            trade_id=f"PAPER-TEST-AUS-WIN-{i}",
+        )
+        for i in range(5)
+    ]
+    # 3 EE-noise tails — same shape as Test 11 (Session 67 founding bug).
+    ee_noise = [
+        _trade(
+            ticker=f"KXHIGHAUS-26APR3{i}-EE{i}",
+            type_="vig_stack",
+            contracts=15,
+            entry_price=1.00,         # notional = $15, way below $190 at-cap
+            pnl=-15.00,
+            status="lost",
+            timestamp=f"2026-04-3{i}T08:00:00+00:00",
+            resolved_at=f"2026-04-3{i}T12:00:00+00:00",
+            trade_id=f"PAPER-TEST-AUS-EE-{i}",
+        )
+        for i in range(3)
+    ]
+    findings = SettlementVsRationale().run(_make_ctx([trigger] + winners + ee_noise))
+    trigger_findings = [f for f in findings
+                        if "KXHIGHAUS-26MAY06-TRIGGER" in f.title]
+    assert len(trigger_findings) == 1
+    f = trigger_findings[0]
+    # POST-FIX: counter excludes EE-noise → n_tail = 1.
+    assert f.evidence["family_recent_tail_losses"] == 1
+    # Family aggregate POSITIVE: +$300 wins - $200 trigger - $45 EE = +$55.
+    assert f.evidence["family_recent_pnl_sum"] > 0
+    # Demotion fires: HIGH → NOTABLE.
+    # Pre-fix (with EE-noise inflating counter to 4) this would have stayed HIGH.
+    assert f.severity == "notable", (
+        f"Session 67 cascading bug: single at-cap tail in positive family "
+        f"with EE-noise must demote HIGH → NOTABLE post-fix. Got {f.severity}. "
+        f"Pre-fix the counter inflated to 4, demotion clause (n_tail==1) "
+        f"failed, severity stayed HIGH — this test locks the cascading fix."
+    )

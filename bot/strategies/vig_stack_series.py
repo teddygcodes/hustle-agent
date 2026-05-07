@@ -25,6 +25,7 @@ from bot.config import (
     VIG_STACK_STABLE_FAMILIES,
     VIG_STACK_WEATHER_MIN_PRICE,
     WEATHER_SERIES_TICKERS,
+    get_vig_stack_floor_for_family,
 )
 from bot.math_engine import _self_check_edge
 from bot.strategies import Market, Opportunity
@@ -599,9 +600,13 @@ class VigStackSeries:
             return None
 
         # Family-aware NO entry price floor (Apr 18 evening, data-driven).
+        # Session 67: per-family override surface via get_vig_stack_floor_for_family.
+        # In production VIG_STACK_FAMILY_FLOOR_OVERRIDES is empty → effective floor
+        # equals strategy default → behavior preserved byte-identical.
         fam = ticker.split("-")[0] if ticker else ""
         if fam in VIG_STACK_STABLE_FAMILIES:
-            if no_ask_prob < self._stable_min_no:
+            stable_floor = get_vig_stack_floor_for_family(fam, self._stable_min_no)
+            if no_ask_prob < stable_floor:
                 self._telem[sub]["no_price_below_floor"] += 1
                 decisions.log_decision(
                     ticker=ticker, opp_type=opp_type,
@@ -609,7 +614,7 @@ class VigStackSeries:
                     gates=_vig_stack_gate_fingerprint("no_price_below_floor"),
                     decision="reject", reason="no_price_below_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
-                           "floor": self._stable_min_no,
+                           "floor": stable_floor,
                            "family": fam,
                            "close_ts": market.close_ts},
                 )
@@ -618,7 +623,8 @@ class VigStackSeries:
                     "no_price_below_floor"))
                 return None
         else:
-            if no_ask_prob < self._volatile_min_no:
+            volatile_floor = get_vig_stack_floor_for_family(fam, self._volatile_min_no)
+            if no_ask_prob < volatile_floor:
                 self._telem[sub]["non_stable_below_weather_floor"] += 1
                 decisions.log_decision(
                     ticker=ticker, opp_type=opp_type,
@@ -626,7 +632,7 @@ class VigStackSeries:
                     gates=_vig_stack_gate_fingerprint("non_stable_below_weather_floor"),
                     decision="reject", reason="non_stable_below_weather_floor",
                     extra={"no_ask_prob": round(no_ask_prob, 4),
-                           "floor": self._volatile_min_no,
+                           "floor": volatile_floor,
                            "family": fam,
                            "close_ts": market.close_ts},
                 )

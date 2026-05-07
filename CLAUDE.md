@@ -4112,6 +4112,90 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 67 — settlement_vs_rationale family-tail counter refinement + no_price_below_floor Phase-1 (May 7, ~2h, Outcome B per-family floor override surface)
+
+**Trigger.** Two deliverables bundled because they share infrastructure (`tools/discovery_agent/heuristics/`, `tests/`) and the heuristic refinement informs how the discovery agent surfaces vig_stack-side findings going forward. Session 66's first §10 Strategy Candidates render had surfaced `no_price_below_floor/None: 65 settled CFs, mean CLV +12.5¢ at 69% +CLV` as a 7d-stable NOTABLE finding; manual investigation of the May 6 KXHIGHMIA-26MAY05-T87 −$199.95 settlement separately showed Pattern 1's `family_recent_tail_losses` evidence dict reading 4 when only 1 was a true at-cap tail.
+
+**Phase 0a verification (Deliverable 1, real-data forensic).**
+- Read [tools/discovery_agent/heuristics/settlement_vs_rationale.py:132-142](tools/discovery_agent/heuristics/settlement_vs_rationale.py:132): `_is_pattern1_tail` is loss-percent-only, NO at-cap check. **The at-cap-blind helper.**
+- Line 195: `tail_losses = [t for t in window if _is_pattern1_tail(t)]` is the family-aggregate counter — **the leak site.**
+- Lines 247-254: `_check_pattern1` per-finding trigger DOES apply at-cap check (`if notional < PATTERN1_NOTIONAL_PCT_OF_CAP * family_cap: return []`). Per-finding trigger is correct; do NOT modify.
+- `_severity_pattern1` already takes `family_cap` parameter (line 170) — plumbing in place.
+- Real-data check on `bot/state/paper_trades.json` (post-Apr-23 KXHIGHMIA, 14d window):
+  - 4 tails by pure -95%-of-notional filter (matches the agent's reported counter)
+  - 1 TRUE at-cap tail (notional >= 0.95 × $200 cap)
+  - 3 EE-noise positions inflating: KXHIGHMIA-26APR22-B81.5 ($14.11 / -$14.11), KXHIGHMIA-26APR24-B84.5 ($18.40 / -$18.40), KXHIGHMIA-26APR26-T87 ($10.08 / -$10.08)
+
+**Phase 0b discovery (Deliverable 2 scope correction).** Brief framed the 65 CFs at `no_price_below_floor` as measuring the volatile-family floor (0.93). Direct query showed otherwise:
+- All 65 CFs are 100% **stable-family**: KXHIGHMIA n=34, KXHIGHAUS n=13, KXINX n=18 — measuring the **stable-family 0.70 floor**.
+- Reading [bot/strategies/vig_stack_series.py:603-636](bot/strategies/vig_stack_series.py:603) confirmed gate-name → floor-value mapping: `no_price_below_floor` is the STABLE branch (`if fam in VIG_STACK_STABLE_FAMILIES`), `non_stable_below_weather_floor` is the VOLATILE branch.
+- Brief's out-of-scope explicitly excluded touching the stable-family floor. AskUserQuestion to user → user chose **Expand: stable cohort** → run Session 38a-style Phase-1 against the stable cohort with adjusted threshold sweep around the 0.70 floor.
+- Volatile cohort exists separately (`non_stable_below_weather_floor` n=287 mean +4.65¢) — out of scope this session per user decision.
+
+**Phase 1 evidence (Deliverable 2, stable cohort).**
+
+| Check | Bar | Combined (n=65) | KXHIGHMIA (n=34) | KXHIGHAUS (n=13) | KXINX (n=18) |
+|---|---|---|---|---|---|
+| Survivorship n_no | >= 3 | 45 ✓ | 27 ✓ | 9 ✓ | 9 ✓ |
+| Survivorship % | >= 15% | 69% ✓ | 79% ✓ | 69% ✓ | 50% ✓ |
+| Per-cohort EV (raw) | >= +5¢ | +12.46¢ ✓ | +18.56¢ ✓ | +14.69¢ ✓ | **-0.67¢ ✗** |
+| Per-cohort EV (trimmed) | >= +3¢ | +14.44¢ ✓ | +20.31¢ ✓ | +18.82¢ ✓ | **-0.31¢ ✗** |
+
+Cross-family raw mean +12.46¢, trimmed +14.44¢ (drop top-1/bot-1 per family) — both clear +0¢ bar. Threshold sweep monotonic-decreasing on combined: floor=0.50 +17.15¢ / 0.55 +8.35¢ / 0.60 +1.03¢ / 0.65 -12.41¢ / 0.68 -12.89¢. Per-family: KXHIGHAUS strong-positive at 0.55-0.65 (+18.50¢ / +18.50¢ / +9.75¢); KXHIGHMIA marginal at 0.55 (+6.54¢) only; KXINX flat-positive only at 0.55 (+6.60¢, ↓ deeply negative at 0.60+).
+
+Historical realized — stable-family vig_stack realized P&L is overwhelmingly positive: pre-Filter-F era +$1.98/trade, Filter-F era +$1.60/trade, Session-2 era +$5.17/trade, current May 1+ era +$8.45/trade. Per-family May 1+: KXHIGHAUS +$24.12/trade (n=9) STRONG, KXHIGHMIA +$11.75/trade (n=9) STRONG, **KXINX -$48.51/trade (n=3) STRONGLY NEGATIVE**.
+
+Cross-cohort context (Session 47 discipline): all-vig_stack settled CFs = 1939 records, mean +1.46¢. This gate at +12.46¢ is a clear positive outlier vs baseline. Volatile gate at +4.65¢ on n=287.
+
+**Decision: Outcome B (per-family override surface).** Signal real and isolated to KXHIGHMIA + KXHIGHAUS. Outcome A (lower the global stable floor) rejected because KXINX would inherit the relaxation despite flat-negative per-cohort EV AND -$48/trade historical. Outcome C (HOLD) rejected because the per-family + historical-realized + cross-cohort + monotonic threshold evidence collectively clears Session 38a-style methodology. Outcome D (defer) rejected because sample is mature (n=65 settled, n_no=45) and historical realized robust across 4 eras. Pattern B mirrors Session 64 architecture exactly: ship the lever, leave the override dict empty in production until evidence justifies activation.
+
+**What shipped.**
+- [tools/discovery_agent/heuristics/settlement_vs_rationale.py](tools/discovery_agent/heuristics/settlement_vs_rationale.py) — added `_is_pattern1_tail_at_cap(trade, family_cap)` helper next to `_is_pattern1_tail`. Modified `_severity_pattern1` line 195 to use the at-cap-aware filter for the family-aggregate counter. Per-finding trigger at `_check_pattern1` lines 247-254 NOT touched (already correct).
+- [bot/config.py:570-619](bot/config.py:570) — added `VIG_STACK_FAMILY_FLOOR_OVERRIDES: dict[str, float] = {}` (commented activation lines for KXHIGHMIA / KXHIGHAUS at 0.55, ready to uncomment + schedule re-validation when justified). Added `get_vig_stack_floor_for_family(family, default) -> float` helper. Inline 25-line evidence comment block citing Phase-1 numbers + Pattern B rationale.
+- [bot/strategies/vig_stack_series.py](bot/strategies/vig_stack_series.py) — imported helper. Wired into both gate branches at lines 603-636: `stable_floor = get_vig_stack_floor_for_family(fam, self._stable_min_no)` and same for volatile. `extra` dict's `floor` key now logs the resolved floor (override-aware) rather than the strategy default. Strategy `__init__` parameters `stable_min_no` / `volatile_min_no` not changed — override applies at gate site, not at construction.
+- [tests/test_discovery_settlement_vs_rationale.py](tests/test_discovery_settlement_vs_rationale.py) — appended 3 new tests (Tests 11-13): `test_pattern1_family_counter_excludes_ee_noise` (counter math lock), `test_pattern1_per_finding_trigger_unchanged` (trigger correctness preserved), `test_pattern1_severity_demotion_unchanged` (cascading demotion-ladder consequence).
+- [tests/test_vig_stack_family_floor_overrides.py](tests/test_vig_stack_family_floor_overrides.py) — NEW FILE, 4 cases mirroring Session 64's `test_per_sport_leader_min.py`: `test_dict_empty_in_production`, `test_per_family_override_resolution`, `test_helper_does_not_mutate_override_dict`, `test_per_family_floor_does_not_affect_other_families` (anti-aliasing).
+
+**Tests.**
+- `python3 -m pytest tests/test_discovery_settlement_vs_rationale.py -v` → **15/15 pass** (12 baseline + 3 new). 0.05s.
+- `python3 -m pytest tests/test_vig_stack_family_floor_overrides.py tests/test_vig_stack_series_strategy.py -v` → **27/27 pass** (4 new + 23 existing strategy golden-file tests). 0.06s. Byte-identical strategy behavior preservation locked.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1478 passed, 1 failed in 30.75s**. Failure is `test_positions_paper_trades_consistency.py::test_paper_trades_open_count_matches_positions_active` — pre-existing live-state race (KXIPLGAME-26MAY07RCBLSG-LSG active position not yet synced through paper_trades.json), confirmed independent of Session 67 via stash → run → unstash cycle. Effective: 1479 passed (1472 baseline + 7 new = 1479 expected).
+- `python3 -c "from bot.config import VIG_STACK_FAMILY_FLOOR_OVERRIDES; assert VIG_STACK_FAMILY_FLOOR_OVERRIDES == {}"` → Pattern B dict empty in production confirmed.
+- `python3 -c "from bot.config import get_vig_stack_floor_for_family, VIG_STACK_MIN_NO_ENTRY_PRICE, VIG_STACK_WEATHER_MIN_PRICE; assert get_vig_stack_floor_for_family('KXHIGHMIA', VIG_STACK_MIN_NO_ENTRY_PRICE) == 0.70; assert get_vig_stack_floor_for_family('KXHIGHCHI', VIG_STACK_WEATHER_MIN_PRICE) == 0.93"` → production gate behavior unchanged (defaults flow through helper).
+
+**Real-data verification.** `python3 -m tools.discovery_agent.main` → 10 NEW, 21 STABLE, 1 RESOLVED, 0 errors. The two Pattern 1 findings on production data confirm the fix:
+
+| Finding | Pre-fix family_recent_tail_losses | Post-fix | Severity (post-fix) |
+|---|---|---|---|
+| KXHIGHMIA-26MAY05-T87 (-$199.95) | 4 (per Phase 0a forensic) | **1** ✓ | demoted HIGH → **NOTABLE** |
+| KXHIGHAUS-26MAY04-B82.5 (-$200.00) | 3 (per session brief) | **1** ✓ | demoted HIGH → **NOTABLE** |
+
+Both findings now correctly demote because family aggregate is positive (KXHIGHMIA +$27.69, KXHIGHAUS +$218.04) AND `n_tail == 1` clause fires. Pre-fix the inflated counter prevented demotion, mis-classifying isolated tails as patterns. **Two fewer false-HIGH findings on `glint_status.py §10` Strategy Candidates next run.**
+
+**Bot restart status: DEFERRED per Battle Scar #15.** Telegram cool-down active until 2026-05-08T03:12:48 UTC (~9h remaining). Pre-restart `telegram_throttled_count_24h: 3`. Per the codified rule "do NOT restart Glint while Telegram is still cooling down — each restart can re-hit Telegram with sendMessage burst, extending the outage." Mirrors Session 52's deferred-restart shape. **Net behavioral impact of deferred restart: zero** — the production override dict is empty, so the post-Session-67 gate code path returns the strategy default (0.70 stable / 0.93 volatile) byte-identical to the pre-Session-67 direct attribute reads. Tyler can restart manually after cool-down clears (next morning UTC).
+
+**Watch-list trigger — re-evaluate per-family floor relaxation when ALL of:**
+- KXINX accumulates n>=20 settled CFs at this gate AND mean CLV crosses positive (currently n=18 mean -0.67¢ — not eligible), OR
+- KXHIGHMIA settled-CF count reaches n>=80 with cross-cohort mean trimmed >=+10¢ stable for 7 consecutive days, OR
+- KXHIGHAUS strengthens to >=+25¢ trimmed at n>=30 (single-family activation candidate)
+- AND a +14d re-validation routine is scheduled BEFORE activation (mirror Session 38a / Session 49 / Session 22 discipline)
+
+**What did NOT change.**
+- KXHIGHAUS / KXHIGHMIA / KXINX entries in `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` — Phase-0 forensic shows both healthy families NET POSITIVE per-trade May 1+; KXINX cap stays at $50 per Session 53. Cap reduction would hurt P&L without evidence.
+- `VIG_STACK_FAMILY_FLOOR_OVERRIDES` activation — Pattern B ships the lever; activation requires its own session with +14d re-validation routine.
+- Other settlement_vs_rationale patterns (Pattern 2 disabled_sport_settlement, Pattern 3 outsized_notional_post_size_multiplier) — untouched.
+- Per-finding trigger at `_check_pattern1` — already correct (applies at-cap check itself); only the family-aggregate counter had the at-cap-blind bug.
+- Volatile-family floor `VIG_STACK_WEATHER_MIN_PRICE = 0.93` — separate cohort (`non_stable_below_weather_floor` n=287 mean +4.65¢); future session if Tyler wants to investigate the smaller-signal volatile lead.
+- `MOMENTUM_DISABLED_SPORTS`, `MOMENTUM_LEADER_MIN`, all live_momentum surfaces — untouched.
+- `bot/main.py`, `bot/executor.py`, `bot/scanner.py`, `bot/tracker.py`, `bot/live_watcher.py` — untouched.
+- Bot state files (paper_trades, positions, decisions, clv) — untouched.
+
+**Operating Posture observation.** This is the FIRST session triggered by a Session 66 §10 Strategy Candidates render that ran the full Session 38a-style Phase-1 methodology against a re-scoped cohort. The scope-mismatch discovery (gate-name vs floor-value) was made via Phase 0b BEFORE any production change — exemplifies "verify before locking scope" discipline mirroring Sessions 18.5 (TRAILING_STOP root cause was peak-tracking bug, not config), 19a (port divergence root cause was sample selection + window, not port bug), 41 (SL-axis-flat ruled out plausible config tunes), 56.5 (calendar drift in fixture), 58 (watcher-task-lifetime). The brief asked the question; Phase 0 answered "the question is correctly asked at the wrong cohort." Re-scoping took 30 minutes; the wrong-cohort path would have spent 1.5h investigating the volatile floor and produced an Outcome C / D ship that misses the real signal in the stable cohort.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
