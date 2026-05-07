@@ -3966,6 +3966,29 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 62 — KXMLBGAME family-cap D6 fix for `vig_stack_futures` sizing (May 7, urgent open-position breach)
+
+**Trigger.** First `glint_status.py` run after Session 61 surfaced `position_over_family_cap`: `KXMLBGAME-26MAY082210ATLLAD-LAD` was OPEN at **$199.68** against Session 53's **$50** KXMLBGAME family cap, settling 2026-05-08 22:10 ET. Phase 0 also found a second post-cap KXMLBGAME over-cap order, `KXMLBGAME-26MAY092110ATLLAD-LAD`, resting at **$199.76**.
+
+**Phase 0 diagnosis: D6 — opp_type mis-classification bypassed the family-cap lookup.** The accepted decision for the open breach was `2026-05-07T09:42:51.091575+00:00`, `opp_type=vig_stack_futures`, `contracts=512`, `price_cents=39`, `cost_dollars=199.68`; the second over-cap order was also `opp_type=vig_stack_futures` at `$199.76`. Session 53's gate in `bot/main.py:_handle_opportunity()` only treated `vig_stack_no` and `vig_stack_series` as cap-aware for NO-perspective probability and `family=ticker.split("-", 1)[0]`, so `vig_stack_futures` passed `family=None` into `kelly_size()` and received the legacy `$200` default from `bot/sizing.py`. `kelly_size(..., family="KXMLBGAME")` independently capped a binding scenario at `$50`, confirming sizing itself was not broken. Breach count: **2 post-Session-53 KXMLBGAME entries > cap** (1 filled/open, 1 resting).
+
+**Fix.** Added `_VIG_STACK_SIZING_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_futures")` in `bot/main.py` and used it inside `_handle_opportunity()` for both NO-perspective `win_prob=fair_value` and family extraction. Left `_VIG_STACK_OPP_TYPES` unchanged so TP/SL/edge-flip exit exemptions did not expand in this targeted fix. Scanner classification remains out of scope; the structural follow-up is to revisit why per-game MLB KXMLBGAME is still emitted as `vig_stack_futures`.
+
+**Regression tests added.** +10 tests. `tests/test_main.py` now locks the sizing tuple vs exit tuple distinction, proves `vig_stack_futures` KXMLBGAME passes `family="KXMLBGAME"` and does not flip NO fair value, and verifies the misclassified per-game MLB path sizes at `<= $50`. `tests/test_bot_executor.py` adds the per-family executor ledger sweep that Session 53's Battle Scar should have had: every configured vig_stack family receives cap-clipped sizing and writes a paper trade at or under its family cap. Existing Session 53 `tests/test_sizing.py` seven-family cap sweep still passes.
+
+**Open position decisions.** Tyler chose to let the already-open `$199.68` KXMLBGAME position ride to settlement. Tyler also chose to manually cancel the existing `$199.76` resting over-cap order; that is an operator action, not a code/state mutation in this session. The fix is forward-only and does not resize historical positions/orders.
+
+**Verification.**
+- `python3 -m pytest tests/test_sizing.py tests/test_bot_executor.py tests/test_main.py -v -k "cap or family or vig_stack_futures"` → **20 passed / 68 deselected**.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1444 passed**.
+- Restart deferred: Telegram cooldown gate reported `telegram_throttled_until=2026-05-08T03:12:48.321151+00:00` and `STILL COOLING DOWN — DO NOT RESTART`. Deploy restart should run after that timestamp clears.
+
+**Operating Posture.** This is the FOURTH coder session triggered by `glint_status.py` findings in 24h. The consolidator paid for itself here: it surfaced a live ~$200-vs-$50 cap breach within hours of opening, before settlement could realize the full loss. Because Phase 0 found multiple post-Session-53 KXMLBGAME `vig_stack_futures` accepts, Session 43-investigate's SFPHI singleton framing may be stale; open a focused follow-up for scanner classification rather than bundling it into this cap fix.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.

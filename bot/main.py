@@ -72,6 +72,10 @@ logger = logging.getLogger("glint.main")
 # would. See Battle Scar #9 in CLAUDE.md and Session 36.
 _VIG_STACK_OPP_TYPES = ("vig_stack_no", "vig_stack_series")
 
+# Session 62: sizing/family-cap handling must include vig_stack_futures even
+# though exit exemptions intentionally remain limited to _VIG_STACK_OPP_TYPES.
+_VIG_STACK_SIZING_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_futures")
+
 
 # ---------------------------------------------------------------------------
 # Persistent pending queue helpers
@@ -892,7 +896,7 @@ class GlintBot:
         opp_type    = opp.get("type", "")
         # For vig_stack trades, fair_value is already from the NO perspective
         # (probability that NO wins). Don't flip it.
-        if opp_type in ("vig_stack_no", "vig_stack_series"):
+        if opp_type in _VIG_STACK_SIZING_TYPES:
             win_prob = fair_value
         else:
             win_prob = fair_value if side == "yes" else (1.0 - fair_value)
@@ -909,7 +913,7 @@ class GlintBot:
         ticker = opp.get("ticker", "")
         family = (
             ticker.split("-", 1)[0]
-            if opp_type in ("vig_stack_no", "vig_stack_series") and ticker
+            if opp_type in _VIG_STACK_SIZING_TYPES and ticker
             else None
         )
         sizing = kelly_size(

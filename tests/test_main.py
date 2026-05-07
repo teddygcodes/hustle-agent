@@ -464,6 +464,97 @@ def test_vig_stack_opp_types_constant():
     assert "" not in _VIG_STACK_OPP_TYPES
 
 
+def test_vig_stack_sizing_types_include_futures_without_exit_exemption():
+    """Session 62: futures need vig_stack sizing/caps, but not TP/SL exemption."""
+    from bot.main import _VIG_STACK_OPP_TYPES, _VIG_STACK_SIZING_TYPES
+
+    assert "vig_stack_series" in _VIG_STACK_SIZING_TYPES
+    assert "vig_stack_no" in _VIG_STACK_SIZING_TYPES
+    assert "vig_stack_futures" in _VIG_STACK_SIZING_TYPES
+    assert "vig_stack_futures" not in _VIG_STACK_OPP_TYPES
+    assert "live_momentum" not in _VIG_STACK_SIZING_TYPES
+
+
+def test_handle_opportunity_vig_stack_futures_uses_family_and_no_probability(monkeypatch):
+    """D6 regression: misclassified KXMLBGAME futures still pass family cap data."""
+    from bot import main as botmain
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    seen = {}
+
+    def fake_kelly_size(**kwargs):
+        seen.update(kwargs)
+        return {
+            "contracts": 10,
+            "price_cents": kwargs["price_cents"],
+            "total_cost": 3.90,
+            "reason": "sized",
+        }
+
+    def fake_execute_trade(_opp, sizing):
+        return {"success": True, "order_result": {"count": sizing["contracts"]}}
+
+    monkeypatch.setattr(botmain._outcome_tracker, "store_alert", lambda _opp: None)
+    monkeypatch.setattr(botmain, "PAPER_MODE", True)
+    monkeypatch.setattr(botmain, "kelly_size", fake_kelly_size)
+    monkeypatch.setattr(botmain, "execute_trade", fake_execute_trade)
+    monkeypatch.setattr(botmain, "format_opportunity", lambda _opp: "formatted")
+
+    opp = {
+        "ticker": "KXMLBGAME-26MAY082210ATLLAD-LAD",
+        "type": "vig_stack_futures",
+        "recommended_side": "no",
+        "edge": 0.0412,
+        "relative_edge": 0.1056,
+        "confidence": 0.80,
+        "market": {"yes_ask": 61, "no_ask": 39},
+        "edge_result": {"fair_value": 0.4312},
+    }
+
+    asyncio.run(bot._handle_opportunity(opp, balance=10_500.0))
+
+    assert seen["family"] == "KXMLBGAME"
+    assert seen["probability"] == 0.4312
+    assert seen["price_cents"] == 39
+
+
+def test_vig_stack_futures_per_game_mlb_respects_family_cap(monkeypatch):
+    """Session 62: KXMLBGAME per-game MLB tagged as futures still sizes <= $50."""
+    from bot import main as botmain
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    executed = {}
+
+    def fake_execute_trade(_opp, sizing):
+        executed.update(sizing)
+        return {"success": True, "order_result": {"count": sizing["contracts"]}}
+
+    monkeypatch.setattr(botmain._outcome_tracker, "store_alert", lambda _opp: None)
+    monkeypatch.setattr(botmain, "PAPER_MODE", True)
+    monkeypatch.setattr(botmain, "execute_trade", fake_execute_trade)
+    monkeypatch.setattr(botmain, "format_opportunity", lambda _opp: "formatted")
+
+    opp = {
+        "ticker": "KXMLBGAME-26MAY082210ATLLAD-LAD",
+        "type": "vig_stack_futures",
+        "recommended_side": "no",
+        "edge": 0.10,
+        "relative_edge": 0.20,
+        "confidence": 0.80,
+        "market": {"yes_ask": 50, "no_ask": 50},
+        "edge_result": {
+            "fair_value": 0.78,
+            "kalshi_price": 0.50,
+            "self_check_passed": True,
+        },
+    }
+
+    asyncio.run(bot._handle_opportunity(opp, balance=10_000.0))
+
+    assert executed["reason"] == "sized"
+    assert executed["total_cost"] <= 50.0
+
+
 # ---------------------------------------------------------------------------
 # Battle Scar #3 follow-up — _release_lock PID-aware (May 3, 2026 incident)
 # ---------------------------------------------------------------------------

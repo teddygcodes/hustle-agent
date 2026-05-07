@@ -312,6 +312,60 @@ class TestExecuteTradePaperHappyPath:
         assert re.match(r"^PAPER-[0-9A-F]{8}$", result["order_result"]["order_id"])
 
 
+class TestSession62FamilyCapExecutor:
+    @pytest.mark.parametrize(
+        "family,expected_cap",
+        [
+            ("KXINX", 50),
+            ("KXMLBGAME", 50),
+            ("KXHIGHCHI", 150),
+            ("KXHIGHDEN", 150),
+            ("KXHIGHNY", 150),
+            ("KXHIGHAUS", 200),
+            ("KXHIGHMIA", 200),
+        ],
+    )
+    def test_per_family_cap_enforced_at_executor(self, tmp_state, family, expected_cap):
+        """Session 62: cap-clipped vig_stack sizing persists <= family cap."""
+        from bot.executor import execute_trade
+        from bot.sizing import kelly_size
+
+        ticker = f"{family}-26MAY082210TEST-YES"
+        opp = _make_opp(
+            opp_type="vig_stack_futures",
+            side="no",
+            price_cents=50,
+            fair_value=0.78,
+            edge=0.10,
+            relative_edge=0.20,
+        )
+        opp["ticker"] = ticker
+        opp["title"] = "Session 62 family cap regression"
+        opp["market"] = {"yes_ask": 50, "no_ask": 50}
+        opp["edge_result"]["self_check_passed"] = True
+
+        sizing = kelly_size(
+            edge=0.10,
+            probability=0.78,
+            balance=10_000.0,
+            price_cents=50,
+            confidence=0.80,
+            family=family,
+        )
+        assert sizing["total_cost"] <= float(expected_cap)
+
+        with patch("bot.executor.get_market") as mock_market, \
+             patch("bot.decisions.log_decision"):
+            mock_market.return_value = {"yes_ask": 50, "no_ask": 50}
+            result = execute_trade(opp, sizing)
+
+        assert result["success"] is True
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        written_cost = trades[0]["contracts"] * trades[0]["entry_price"]
+        assert written_cost <= float(expected_cap)
+
+
 # ---------------------------------------------------------------------------
 # Session 50 — paper_trades.json observability fields (confidence/dqs/sport)
 # ---------------------------------------------------------------------------
