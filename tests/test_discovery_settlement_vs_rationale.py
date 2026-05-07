@@ -143,6 +143,88 @@ def test_disabled_sport_settlement_regression():
     assert pattern2[0].evidence["ticker"] == "KXWTACHALLENGERMATCH-26MAY05-T1"
 
 
+# -------- Test 2b (Session 57): deploy-window race excluded --------
+
+def test_disabled_sport_deploy_window_race_excluded():
+    """Session 57 P0: entries on the disable date BUT before the commit
+    timestamp must NOT fire as regressions.
+
+    The MOMENTUM_DISABLED_SPORTS commit b1f08ff was authored 2026-04-20
+    22:31 ET = 2026-04-21 02:31:54 UTC. 9 entries fired between
+    2026-04-20T02:24Z and 2026-04-20T20:12Z — all 6+ hours BEFORE the
+    commit existed. Pre-Session-57 the heuristic used calendar-midnight
+    (2026-04-20T00:00 UTC) as the cutoff, flagging these 9 as critical
+    regressions even though they pre-date the disable's existence by hours.
+
+    Locks in the commit-timestamp cutoff. If the heuristic ever drifts
+    back to calendar-midnight, these representative entries fire 0
+    regressions; revert this test only after auditing every Pattern 2
+    finding it would surface.
+    """
+    # Three of the actual flagged tickers from the May 6 discovery report,
+    # exact entry timestamps from paper_trades.json.
+    entries = [
+        _trade(
+            ticker="KXATPCHALLENGERMATCH-26APR19TOKSHA-SHA",
+            type_="live_momentum",
+            contracts=20,
+            entry_price=0.71,
+            pnl=3.2,
+            status="exited_early",
+            timestamp="2026-04-20T02:24:59.689717+00:00",  # earliest leaked entry
+            resolved_at="2026-04-20T02:35:42.031615+00:00",
+        ),
+        _trade(
+            ticker="KXWTAMATCH-26APR20VEKJEA-VEK",
+            type_="live_momentum",
+            contracts=20,
+            entry_price=0.81,
+            pnl=-16.2,
+            status="lost",
+            timestamp="2026-04-20T11:55:55.836942+00:00",
+            resolved_at="2026-04-20T16:50:40.914259+00:00",
+        ),
+        _trade(
+            ticker="KXATPCHALLENGERMATCH-26APR20ZINKUZ-ZIN",
+            type_="live_momentum",
+            contracts=20,
+            entry_price=0.81,
+            pnl=2.2,
+            status="exited_early",
+            timestamp="2026-04-20T20:12:57.556120+00:00",  # latest leaked entry
+            resolved_at="2026-04-20T20:29:12.290211+00:00",
+        ),
+    ]
+    findings = SettlementVsRationale().run(_make_ctx(entries))
+    pattern2 = [f for f in findings if "disabled_sport_settlement" in f.title]
+    assert pattern2 == [], (
+        f"deploy-window-race entries (pre-commit b1f08ff @ 2026-04-21T02:31:54 "
+        f"UTC) must NOT fire as regressions. Got: {[f.title for f in pattern2]}"
+    )
+
+
+def test_disabled_sport_post_commit_entry_still_fires():
+    """Bookend to deploy-window-race test: an entry AFTER the commit
+    timestamp on a disabled sport MUST still fire CRITICAL. Locks in
+    that the cutoff is tight enough to catch real post-deploy regressions.
+    """
+    post_commit = _trade(
+        ticker="KXWTACHALLENGERMATCH-26APR21-POSTCOMMIT",
+        type_="live_momentum",
+        contracts=20,
+        entry_price=0.75,
+        pnl=-15.0,
+        status="lost",
+        timestamp="2026-04-21T03:00:00+00:00",  # 28 minutes post-commit
+        resolved_at="2026-04-21T05:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([post_commit]))
+    pattern2 = [f for f in findings if "disabled_sport_settlement" in f.title]
+    assert len(pattern2) == 1
+    assert pattern2[0].severity == "critical"
+    assert pattern2[0].evidence["sport"] == "wta_challenger"
+
+
 # -------- Test 3: outsized_notional_post_size_multiplier regression --------
 
 def test_outsized_notional_post_multiplier_regression():

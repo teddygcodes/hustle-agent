@@ -74,16 +74,28 @@ SESSION_53_DEPLOY_TS = dt.datetime(
 # When a sport was added to MOMENTUM_DISABLED_SPORTS. Only entries AFTER this
 # timestamp count as regressions; legacy pre-disable entries that happen to
 # settle later are not regressions (the disable list correctly didn't apply
-# at entry-time). Without this filter, every pre-Apr-20 settlement on a
+# at entry-time). Without this filter, every pre-disable settlement on a
 # now-disabled sport would surface as a CRITICAL false positive (~24 noise
 # findings on real data per Session 55 verification).
 #
-# Sources (CLAUDE.md):
-#   atp_challenger, wta, wta_challenger — Apr 20 Session 2 blanket tennis kill
+# Session 57 (May 6 2026): tightened from calendar-midnight to actual COMMIT
+# timestamp. The Apr 20 disable was committed at 22:31:54 ET (b1f08ff) =
+# 2026-04-21 02:31:54 UTC. Pre-Session-57 the cutoff was 2026-04-20 00:00:00
+# UTC — the *start* of Apr 20 UTC, which is 26 hours before the disable
+# actually existed. 9 entries fired between 02:24 UTC and 20:12 UTC on Apr 20
+# (all 6+ hours BEFORE the commit existed) and got flagged as critical
+# regressions on the May 6 first-real-deploy run. Calendar-precision was
+# wrong; commit-timestamp is the right cutoff. Mirror Session 56.5
+# discipline: when the heuristic's date math drifts from production's
+# actual timeline, fix the heuristic, not the data.
+#
+# Sources:
+#   atp_challenger, wta, wta_challenger — git blame bot/config.py:172
+#     b1f08ff (Tyler Gilstrap 2026-04-20 22:31:54 -0400) blanket tennis kill
 MOMENTUM_DISABLED_SINCE = {
-    "atp_challenger": dt.datetime(2026, 4, 20, 0, 0, 0, tzinfo=dt.timezone.utc),
-    "wta": dt.datetime(2026, 4, 20, 0, 0, 0, tzinfo=dt.timezone.utc),
-    "wta_challenger": dt.datetime(2026, 4, 20, 0, 0, 0, tzinfo=dt.timezone.utc),
+    "atp_challenger": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
+    "wta": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
+    "wta_challenger": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
 }
 
 # ----- Pattern 3 sizing tolerance -----
