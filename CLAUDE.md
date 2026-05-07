@@ -453,6 +453,18 @@ May 5 correctness review found production `live_watcher._auto_bet_momentum` stil
 
 **Analysis consequence:** Session 19c and Session 49 live_momentum sizing evidence is provisional until 14 days of post-Session-54 data accumulates. Do not re-tune those conclusions from pre-fix dollar notionals.
 
+### 17. Watcher asyncio tasks must be cancelled before notifier teardown (Session 58, May 7)
+
+May 7 incident: each bot restart between 23:43:45 and 00:00:10 May 6-7 produced ~234 `RuntimeError('This HTTPXRequest is not initialized!')` errors over a 16+ minute window, even though only one Application/Bot existed. The OLD process logged "Bot stopped" almost immediately, but its `LiveGameWatcher` asyncio tasks (spawned via `_live_scan_loop` / `handle_watch` as standalone `asyncio.create_task`, NOT in the `gather()`'d task list) kept running their `while self.active: await self._tick_momentum(); await asyncio.sleep(LIVE_POLL_INTERVAL)` loops on a notifier whose HTTPXRequest had just been shut down by `await self.app.shutdown()`. Each tick fired `notifier.edit_message_by_id` → fail → Session 52 retry-with-backoff logged a warning + 2 retries + final error → next tick same cycle. Session 52's hardening is correct for transient failures but masked this lifetime bug as warning spam instead of a crash that would surface in `_run_watcher`'s exception handler. The OLD process's `asyncio.run()` finally GC'd the orphaned tasks ~16 minutes later — at which point errors stopped.
+
+**Rule:** in `GlintBot.stop()`, iterate `self._active_watchers` and call BOTH `watcher.stop()` (sets `self.active = False`) AND `task.cancel()` (interrupts in-progress `asyncio.sleep`) for every entry, **then** await with a 5s timeout for cleanup, **then** call `self.notifier.stop()`. Pattern mirrors `handle_unwatch`'s discipline. Ordering is load-bearing: if notifier is torn down first, in-flight ticks fire HTTPXRequest errors during the unwind window. Implementation at [bot/main.py:397-435](hustle-agent/bot/main.py:397).
+
+**Verification (May 7):** acceptance gate measured 121 errors in 2-min post-restart window with the bug → **2 errors** with the fix (98.3% reduction); zero errors after 10s past stop boundary. The 2 residual errors are from `send_message` (not `edit_message_text`) — a smaller race for in-flight messages that complete within `_live_scan_loop`'s announce path during stop. Out of scope for this fix; tracked as a separate bounded race.
+
+**Operating Posture observation: self-healing infrastructure (Session 52 retry-with-backoff) can mask underlying lifetime bugs that would otherwise surface as crashes.** When adding hardening, also add a regression test for the underlying root cause, not just the symptom.
+
+Regression tests at `tests/test_main.py::test_stop_cancels_*` (5 cases — cancel/order/empty/exception/timeout). Property test for the post-restart 0-error gate is the live verification.
+
 ---
 
 ## Data-Driven Tuning (The Apr 14 Audit)
@@ -3763,7 +3775,70 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 - Re-investigating WTA / atp_challenger disable decisions (Sessions 38a-2 / 30-followup made them; they stand).
 - Bundling Session 55's KXHIGHMIA / KXHIGHAUS family-cap leads (separate session, awaits May 14 day-14 routine data).
 
-**Watch list — heuristic precision drift recurrence.** If a third heuristic surfaces the same pattern (calendar approximation diverges from production timeline), promote to Battle Scar #17 and add a `git_blame_commit_timestamp_for_session_X` helper convention.
+**Watch list — heuristic precision drift recurrence.** If a third heuristic surfaces the same pattern (calendar approximation diverges from production timeline), promote to Battle Scar #18 and add a `git_blame_commit_timestamp_for_session_X` helper convention. (Original note targeted #17; Session 58 took #17 for watcher-cancellation-before-notifier-teardown — see Battle Scars list above.)
+
+---
+
+### ☑ Session 58 — Notifier `HTTPXRequest is not initialized` failures: NOT a startup race; watcher asyncio tasks tick on dead notifier post-stop (May 7, ~3h, fix in `bot/main.py:GlintBot.stop()`)
+
+**Trigger.** Tyler authored a Session 58 brief framing the recurring `RuntimeError('HTTPXRequest is not initialized!')` errors as a startup race — "after restart, the live status-card editor fails for an unknown duration before normal operation resolves it." Brief proposed Fix A (reorder startup), Fix B (readiness gate inside `edit_message_by_id`), Fix C (lazy re-init).
+
+**Phase-0 diagnostics flipped the diagnosis.** Live log analysis on `bot/logs/bot.log` since the 2026-05-06 23:43:46 restart showed:
+- 234 `HTTPXRequest is not initialized` errors AND 105 successful `editMessageText 200 OK` calls — **interleaved, indefinite**, NOT separated by a startup window. 5-min bucket distribution (23:40 = 34/42, 23:45 = 134/70, 23:50 = 132/100) confirmed errors persist concurrent with successes.
+- Two specific failing tickers (`KXATPMATCH-26MAY06FUCPRI-PRI`, `KXATPMATCH-26MAY06POPBER-BER`) failed every tick; 4-5 OTHER watchers (KXATPMATCH-CINBLO, KXNBAGAME-LALOKC, KXNHLGAME-ANAVGK, KXWTAMATCH-STAWAL) succeeded concurrently through the same notifier.
+- Verified by grep: bot has exactly ONE `Application.builder().token().build()` (at [bot/notifier.py:672](hustle-agent/bot/notifier.py:672)). No second `Bot(` constructor anywhere in `bot/`. No second event loop. No `run_in_executor` wrapping notifier calls.
+- Initially suspected Battle Scar #14 (cross-bot orphan) — found PID 33057 lurking but it was Bob's process (writing to `/Users/tylergilstrap/Desktop/bob/bot/logs/bot.log`), not Glint's. False alarm.
+
+**Diagnosis D5 — locked.** Reading the log around the 23:43:45 transition revealed the actual mechanism:
+
+1. The OLD Glint process (PID before 34917) received a stop signal at 23:43:45 (likely Telegram /STOP, /RESTART, or `launchctl bootout`). It logged: `Application is stopping`, `Application.stop() complete`, `Telegram bot stopped`, `Bot stopped`.
+2. `bot/notifier.py:stop()` called `await self.app.shutdown()` which shut down the underlying `HTTPXRequest`. The bot's `_request` is now in the "not initialized" state for any subsequent calls.
+3. **`bot/main.py:GlintBot.stop()` did NOT cancel `self._active_watchers`.** Each watcher is an `asyncio.create_task(self._run_watcher(...))` spawned standalone (NOT part of the `await asyncio.gather(*tasks)` task list at [bot/main.py:391](hustle-agent/bot/main.py:391)), so they survive `gather()`'s exit. Each watcher's tick loop is `while self.active: await self._tick_momentum(); await asyncio.sleep(LIVE_POLL_INTERVAL)`. `self.active` is never set to False during stop.
+4. The OLD process's watchers (FUCPRI started May 6 13:39:37, POPBER started 17:45:38 — both pre-23:43:45) kept ticking every 10s — calling `notifier.edit_message_by_id` → `app.bot.edit_message_text` → `RuntimeError('HTTPXRequest is not initialized!')` → Session 52's retry-with-backoff retried 3× and gave up → next tick same cycle.
+5. Within the same second (23:43:45), a NEW process started ("✨ Glint Trading Bot — Starting..."). It built a fresh Application/Bot/HTTPXRequest. Its OWN watchers (spawned at 23:46:31 via scan_live_matches, the 5 fresh `Auto-started momentum watcher` lines) succeeded. Both processes wrote to the same `bot.log` (Python loggers append; no exclusive lock), making the symptom look like "concurrent successes and failures through one notifier."
+6. **At 2026-05-07 00:00:10** — 16 minutes 25 seconds after the OLD process logged "Bot stopped" — the OLD process's `asyncio.run()` finally GC'd the lingering tasks. After this moment, **0 HTTPXRequest errors** in the log until the next restart.
+
+**Why this was masked for so long:** Session 52 (May 3) added retry-with-backoff for transient Telegram failures. Without retry, the watchers would have raised an unhandled exception on the first tick after notifier shutdown and `_run_watcher`'s `except Exception` handler would have caught it, logged a CRASH, removed the watcher from `_active_watchers`. The retry kept them alive (in the dead state) until process exit. Operating Posture: self-healing infrastructure can mask underlying lifetime bugs.
+
+**What shipped (5 commits, branch `main`).**
+- [bot/main.py:397-435](hustle-agent/bot/main.py:397) — `GlintBot.stop()` extended with explicit watcher cancellation BEFORE notifier teardown. Mirrors `handle_unwatch`'s pattern at [bot/main.py:830-837](hustle-agent/bot/main.py:830). Cancels all `_active_watchers`, awaits a 5s `asyncio.wait_for` grace period (bounded so a stuck watcher can't block process shutdown), THEN calls `self.notifier.stop()`. The cancel-then-shutdown order is load-bearing: if notifier is torn down first, in-flight ticks fire HTTPXRequest errors during the unwind window. ~20 LOC net add.
+- [tests/test_main.py](hustle-agent/tests/test_main.py) — 5 new regression tests under "Session 58":
+  - `test_stop_cancels_active_watchers_and_clears_dict` — both `watcher.stop()` and `task.cancel()` invoked on every entry, dict cleared
+  - `test_stop_cancels_watchers_BEFORE_notifier_shutdown` — load-bearing ordering invariant; if a future refactor reorders, this test fails immediately
+  - `test_stop_with_no_active_watchers_skips_cancellation` — empty `_active_watchers` doesn't break stop() flow
+  - `test_stop_handles_watcher_stop_exception` — best-effort discipline; one bad watcher doesn't block others
+  - `test_stop_bounded_by_5s_timeout_when_task_doesnt_unwind` — stuck watcher can't block process shutdown
+- This Session 58 ☑ block + Battle Scar #17 entry above.
+
+**Tests.** `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1417 passed in 31.30s** (Session 57 baseline 1412 + 5 new). 0 failures.
+
+**Acceptance gate verified live (per Battle Scars #3 + #14 + #15).** Two restart cycles:
+1. **First restart (00:19:23 May 7).** OLD process (PID 34917) had pre-fix code. SIGTERM via `launchctl kickstart -k`. Stop() ran without watcher cancellation. Old watchers ticked on dead notifier for ~2 minutes until process exit. **121 errors in 2-min post-restart window** — confirms the pre-fix bug shape on a different cohort.
+2. **Second restart (00:24:21 May 7).** OLD process now PID 66039 — has my fix. SIGTERM via `launchctl kickstart -k`. Log shows the new fix path firing: `Stopping 5 active watcher(s)` immediately followed by `Bot stopped` within the same second. **2 errors in 2-min post-restart window — 98.3% reduction.** The 2 residual errors are from `send_message` (not `edit_message_text`) — an in-flight `_live_scan_loop` announce message that was mid-await when stop() fired. Bounded smaller race; out of scope for this fix.
+3. **Zero errors after 00:24:30** (10s past the stop boundary). New bot (PID 70300) running healthy: 5 fresh watchers spawned at 00:27:17, editMessageText 200 OK fires at every tick, getUpdates 200 OK every ~5s, heartbeat fresh.
+
+**What did NOT change.**
+- `bot/notifier.py` — untouched. Session 52's retry/backoff/edit-throttle/dedup discipline preserved as-is.
+- `bot/live_watcher.py` — untouched. The watcher's tick loop and exit logic unchanged.
+- `bot/strategies/`, `bot/executor.py`, `bot/scanner.py` — all untouched.
+- Bot config (`bot/config.py`) — untouched. No threshold or sport-list changes.
+- `bot/state/` — untouched. No migration, no backfill.
+- Discovery agent code — untouched. The 10-heuristic chassis is unaffected.
+
+**Out of scope (held).**
+- Refactoring spawn paths to put watchers in the `gather()`'d task list (bigger architectural change; D5 fix is the surgical one).
+- D1-style "drop status_msg_id on edit failure" defense-in-depth — original plan candidate but not load-bearing for the actual bug. Skip per CLAUDE.md "stay surgical."
+- The 2-error `send_message` residual race during stop. Bounded; small. Open Session 58-followup if it ever crosses a 5-error threshold per restart.
+- Reviewing or modifying Session 52's retry-with-backoff. That hardening is correct for transient network failures; this fix addresses a separate lifetime issue.
+- Touching `python-telegram-bot` library version.
+- Any other Telegram path optimizations.
+- Any bot/strategy P&L tuning.
+
+**Watch list — Battle Scar #17 recurrence.** If a future asyncio-task-lifetime bug surfaces (unrelated to watchers), check whether the same pattern applies: standalone `asyncio.create_task` calls that aren't in `gather()`'s task list need explicit cancellation in `stop()`. Other places this could matter: `_run_watcher` (already done by stop()), any future task-spawn site like `_dispatch_position_alerts` or scheduler-spawned tasks. Audit at PR time when adding new task-spawn paths.
+
+**Operating Posture observation.** Tyler's brief was a defensible hypothesis (errors-after-restart = startup race). Phase-0 diagnostics flipped the diagnosis: errors persist concurrent with successes, indefinitely, on a specific subset of watchers. **This is the prime-directive workflow working correctly.** Investigation BEFORE locking in a fix saved us from shipping a Fix-A-style startup-ordering refactor that wouldn't have addressed the actual mechanism. Mirror Sessions 18.5 (TRAILING_STOP root cause was peak-tracking bug, not config), 19a (port divergence root cause was sample selection + window, not port bug), 41 (SL-axis-flat ruled out three plausible config tunes), and 56.5 (calendar-drift in fixture, not a real regression). Every one of these would have wasted effort if the operator had skipped Phase 0.
+
+**Cost of skipping Phase 0:** Fix A would have refactored startup ordering, passed tests, restarted the bot, and STILL shown 121-error windows on the next restart cycle — at which point the operator concludes "the fix didn't work" and may try Fix B or Fix C, each with worse blast radius. Phase 0 took ~45 minutes; the wrong-mechanism-fix path costs days of false confidence + cleanup.
 
 ---
 
