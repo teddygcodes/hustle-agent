@@ -111,8 +111,6 @@ Active strategies live in `ACTIVE_STRATEGIES` in `config.py:578`. **Only these f
 |---|---|---|---|
 | `vig_stack_series` | `kalshi_series.py` | Mutually-exclusive ladders (weather, S&P ranges) where YES prices sum > 100¢. Buy the cheap NOs. Structural arb, no prediction. **Currently net loser** due to volatile-family ladders (hot-weather cities + fast-moving indices). Filter F stable families `KXHIGHMIA / KXHIGHAUS / KXINX` enter freely; volatile families require NO ≥ 0.93 (Apr 20, raised from 0.90 after bucket analysis showed only [92-96¢) is breakeven). | 54 settled, **−$110.62**, 29W/25L (54%) |
 | `vig_stack_futures` | `kalshi_series.py` | Same math on championship futures: NBA (17% vig), NHL (22% vig), MLB (6% vig). Gated by Filter F same as series. | 0 settled |
-| `sports_monotonicity_arb` | `scanner_sports_arb.py` | Riskless arb: spread/total threshold contracts must be monotonic. Violations = free money. | 0 real fills yet |
-| `sports_consistency_arb` | `scanner_sports_arb.py` | Riskless arb: P(championship) ≤ P(individual series win). | 0 real fills yet |
 
 ### ACTIVE via live_watcher (separate from `ACTIVE_STRATEGIES`)
 
@@ -129,6 +127,8 @@ All disabled strategies have `# Disabled: reason` comments directly below the `A
 - `weather` (single-market) — 17% WR, NWS bias model too imprecise for individual strikes (**note:** vig_stack applied to the same weather ladders works — that's different math)
 - `btc/eth/sol/xrp/doge/bnb_price_edge` — all crypto disabled (`CRYPTO_ENABLED = False`), vol model overestimates intraday movement
 - `live_latency_arb` — replaced by `live_momentum` watcher system (2-min scan too slow)
+- `sports_monotonicity_arb` — Disabled Session 56 (2026-05-06): opportunity dict shape mismatch with executor — execution would be one-sided directional, not riskless. 0 history fills. Rebuild via paired execution (atomic both-legs-or-refund) when justified.
+- `sports_consistency_arb` — Disabled Session 56 (2026-05-06): same shape bug as `sports_monotonicity_arb`. 0 history fills.
 
 **The audit lives in `bot/state/strategy_audit.json`.** Every strategy has: status, real_trades, real_pnl, real_wr, ghost_trades (from paper fill bug era), concerns, borrowed_concepts. Update it when strategies are added/removed/settled.
 
@@ -3658,6 +3658,115 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 56 — Disable sports_arb strategies + remove stale LIVE_TRAILING_STOP reference (May 6, ~45 min, 4-layer defense-in-depth + dead-code cleanup)
+
+**Trigger.** Codex review on May 6 surfaced two correctness bugs in `bot/`:
+
+1. **`sports_monotonicity_arb` and `sports_consistency_arb` are dormant-loaded one-sided directional bets, not riskless arbs.** Both scanners emit opportunity dicts whose top-level `ticker` + `recommended_side` describe a single leg; the two-leg arb metadata sits in a sibling `arb_pair` field that `executor.execute_trade()` never reads. Verified by grep — `arb_pair` appears at [bot/scanner_sports_arb.py:198](bot/scanner_sports_arb.py:198) and [bot/scanner_sports_arb.py:273](bot/scanner_sports_arb.py:273) only; zero hits in `bot/main.py` or `bot/executor.py`. Result: any "MONOTONICITY ARB" or "CONSISTENCY ARB" trigger fires as a one-sided directional bet at $200-Kelly sizing labeled `confidence=0.95` / "guaranteed profit." 0 historical fills (we got lucky); dormant-loaded code path that would fire on the first real Kalshi violation. If `PAPER_MODE` ever flips to `False` before paired-leg execution is built, the first real trigger is real money at one-sided risk.
+2. **`bot/live_watcher.py` referenced `LIVE_TRAILING_STOP`, a constant removed from `bot/config.py` in Session 18.5** (CLAUDE.md Session 19a flagged it during pre-flight grep but never cleaned it up). The reference at [bot/live_watcher.py:2746](bot/live_watcher.py:2746) (pre-fix) sat inside an `if self._trailing_active.get(ticker):` guard at [bot/live_watcher.py:2745](bot/live_watcher.py:2745). The `_trailing_active` dict was initialized to `{}` and `pop`-from / read but **never written** anywhere in the codebase — verified by grep, no `_trailing_active[ticker] = True` exists. Both the read at line 2739 (status-card "[TRAILING]" label) and the deeper branch at 2745-2746 were unreachable code, with the unreachable branch additionally referencing a deleted constant. NameError waiting on a code path that never executes today.
+
+**Decision.** Fastest, smallest, lowest-risk fix for Bug #1 is **disable both arb strategies with 4-layer defense-in-depth.** Bug #2 is a tiny dead-code cleanup bundled because it's same-area. Real arb execution (paired both-legs-or-refund) is a future ~3-4h coder session; do NOT open it speculatively.
+
+**What shipped.**
+
+1. **Fix #1 Layer 1 — `bot/config.py:736` `ACTIVE_STRATEGIES` removal** (load-bearing). Removed `"sports_monotonicity_arb"` and `"sports_consistency_arb"` from the list. The downstream filter at [bot/scanner.py:672-681](bot/scanner.py:672) drops any opportunity whose `type` is not in `ACTIVE_STRATEGIES` before it reaches the executor. This single change is sufficient to stop the bug; layers 2-4 are defense-in-depth. Inline comment block cites Codex review + sizing math + watch-list trigger.
+2. **Fix #1 Layer 2 — defensive early-return in `bot/scanner_sports_arb.py`.** Changed `return opportunities` to `return []` at the function exits of `scan_monotonicity_violations` (line 90) and `scan_championship_series_violations` (line 301). Side-effects (`_attribute(markets)` calls at lines 108-111 and 338-342, which write universe attribution via `on_market_seen`) are preserved by exiting at function-end rather than function-top (CLAUDE.md Common Gotcha #3). **`scan_game_vig` (line 439) NOT touched** — it emits `vig_stack_futures`, a separate active strategy.
+3. **Fix #1 Layer 3 — `tests/test_active_strategies.py` (new file, 7 cases).** `test_sports_monotonicity_arb_not_in_active_strategies` + `test_sports_consistency_arb_not_in_active_strategies` (Layer 1 pin), `test_vig_stack_strategies_still_active` (sanity guard), `test_scan_monotonicity_violations_returns_empty_after_session_56` + `test_scan_championship_series_violations_returns_empty_after_session_56` with mock Kalshi markets containing real violations (Layer 2 regression — protects against future re-add to ACTIVE_STRATEGIES that bypasses the early-return), `test_strategy_gate_drops_disabled_arb_opps` (property test against scanner.py:672-681 filter), `test_scanner_sports_arb_session_56_comments_present` (locks the Session 56 marker in the source).
+4. **Fix #1 Layer 4 — CLAUDE.md Strategies table update.** Both arb rows moved from ACTIVE table to "DISABLED (data-driven kills)" list with one-line Session 56 evidence note. Watch-list trigger added below.
+5. **Fix #2 — Dead `_trailing_active` infrastructure removed.** Four sites in `bot/live_watcher.py`: the dict init at line 443, the `pop` at line 2572, the status-card `trailing` variable + concatenation at line 2739, and the `if self._trailing_active.get(...)` branch at lines 2745-2746 (which was the LIVE_TRAILING_STOP reference). ~6 net LOC deleted. The actual production trailing-stop logic at [bot/live_watcher.py:2267](bot/live_watcher.py:2267) uses `MOMENTUM_DQS_TRAIL_STOP` and is unaffected.
+6. **`tests/test_live_watcher.py` extended (2 cases, `TestSession56DeadInfraRemoval`).** `test_live_trailing_stop_constant_not_referenced` asserts `"LIVE_TRAILING_STOP"` does not appear in `bot/live_watcher.py` source (mirrors Session 51's `test_canonical_schema_used_throughout` pattern). `test_trailing_active_attribute_removed` does the same for `_trailing_active`. Both regression-locks for the dead-code deletion.
+
+**Verification.**
+1. ☑ Targeted: `python3 -m pytest tests/test_active_strategies.py tests/test_live_watcher.py::TestSession56DeadInfraRemoval -v` → **9/9 pass** in 0.06s.
+2. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=short -q` → **1406 passed, 3 failed in 31.86s**. The 3 failures are the pre-existing `tests/test_discovery_sfphi_regression.py` cohort_emergence fixture-vs-current-date drift documented in the Session 55 ☑ block ("3 pre-existing SFPHI failures unrelated to Session 55... not caused by this PR"). 0 regressions caused by Session 56. Plan estimated 1402 passed (1397 baseline + 5 new); shipped 9 tests instead of 5 → 1406 actual.
+3. ☑ `git diff bot/` shows 3 surgical changes (config.py + scanner_sports_arb.py + live_watcher.py) — no other production files touched.
+
+**Bot restart.** Bot restart needed because [bot/live_watcher.py](bot/live_watcher.py) was modified (live module loaded into the running process). Per Battle Scar #14 path-rooted single-PID discipline + Battle Scar #15 Telegram cool-down check before restart.
+
+**Out of scope (held).**
+- **Paired-leg execution.** Building `executor.execute_arb_pair(opportunity)` with atomic both-legs-or-refund. Bigger lift; defer until evidence shows arb opportunities common enough to justify. With 0 history fills, that bar is high. Filed in plan footer as Session 56-followup brief sketch.
+- **Disable-list regression hunt** (the original Session 56 plan — 9 entries on currently-disabled sports leaking through). Becomes Session 57. Same urgency tier (active capital exposure) but smaller per-event impact than the arb shape; ships independently after Session 56.
+- **`LiveMomentumStrategy` production wiring** (Session 19a port → live_watcher). Codex called it out; CLAUDE.md acknowledges it; not blocking. Separate session if/when we want backtests + production to share a code path.
+- **Architecture concerns** (JSON state vs SQLite ledger, broad `except Exception`, paper-fill realism, threshold-knob proliferation, weather-vig coupling). Valid but "build for live mode" concerns; not today's correctness fixes.
+- **Backfilling historical state.** Nothing to backfill — 0 sports_arb trades have ever fired. The strategy-gate filter at [bot/scanner.py:676](bot/scanner.py:676) was already blocking them in practice; Layer 2 just adds defense-in-depth at the source.
+- **`tests/test_backtest.py:185-194` and `tests/test_universe.py:223-230`** reference the arb strategy names but as test fixtures for back-tester error handling and universe attribution — not as scanner logic tests. Verified continuing to pass post-disable; no test edits needed.
+
+**Watch-list trigger.** Re-enable `sports_monotonicity_arb` / `sports_consistency_arb` only via paired execution (atomic both-legs-or-refund). Trigger to consider Session 56-followup: arb violations at **≥10 observations/week with consistent edge ≥3¢ for ≥2 consecutive weeks**. The discovery agent's `cohort_emergence` heuristic (Session 43a/43b) is the natural surfacing path — it already tracks per-(opp_type, sport) cohort emergence including for currently-disabled strategies. Until that bar fires, leave disabled.
+
+**Operating Posture observation.** This is a defense-correct-shape session — Codex flagged two real bugs, both with documented prior context (Session 18.5 removed the constant; Session 19a flagged the dangling reference; the arb shape bug was implicit in the scanner.py filter being load-bearing). The Operating Posture rule "defensive instincts are weaker than investigative" applies to PROFIT mysteries, not to known-buggy code paths. When the docs say "this gate is the only thing preventing real money loss," tightening the gate is the correct move, not investigation. The 4-layer defense reflects that: the gate works today (Layer 1), but the strategy assumptions are wrong (Layer 2 makes the scanner self-disable so future operators must deliberately re-enable both layers AND fix the executor). Mirror of Session 36's vig_stack-NO @ 95¢ filter shape: structural correctness fix, not a tuning move.
+
+---
+
+### ☑ Session 56.5 — Restore SFPHI regression test (May 6, ~30min, doc + test only — no bot/ touch, no restart)
+
+**Trigger.** [tests/test_discovery_sfphi_regression.py](tests/test_discovery_sfphi_regression.py) is the P0 regression-lock for the discovery agent's founding example (Session 43a brief: *"If this test ever breaks, the agent has lost its founding example. P0 regression."*). It had failed for **3 consecutive sessions (54 → 55 → 56)**, each documented as "pre-existing, not caused by this session." Per Session 37 anti-pattern (10 documented baseline failures cleaned up at once), that's exactly how documented-baseline-failures grow from 3 → 10+ over months. Session 56.5 stops the drift while the fix is small.
+
+**Diagnosis (calendar drift, NOT a real regression).** Fixture `_seed_sfphi_fixture` hardcoded `now = dt.datetime(2026, 4, 30, 12, 0, ...)` plus two hardcoded SFPHI ISO timestamps. The `cohort_emergence` heuristic at [tools/discovery_agent/heuristics/cohort_emergence.py:93](tools/discovery_agent/heuristics/cohort_emergence.py:93) uses **real wall-clock** `ctx.loaded_at` to compute its 7d/30d windows. As real time advanced past Apr 30, fixture rows bled from "recent 7d" into "prior 30d." Confirmed empirically on May 7 UTC ~01:36: recent_cutoff = Apr 30 01:36; the fixture's 5 decisions at `now - {0,4,8,12,16}h` from `now=Apr30@12:00` had 2 of 5 (Apr 30 00:00 and Apr 29 20:00) bleed into prior. The moment ANY decision lands in prior, `if key in prior_map: continue` triggered → cohort_emergence emitted 0 findings → 3 of 4 tests failed. Outlier_pnl was on the same calendar-bound clock (its 30d lookback against the hardcoded `resolved_at=2026-05-01T00:59:30...` would have broken next).
+
+**What shipped.**
+
+1. **[tests/test_discovery_sfphi_regression.py:25](tests/test_discovery_sfphi_regression.py:25)** — `_seed_sfphi_fixture` now anchors `now = dt.datetime.now(dt.timezone.utc)` (was hardcoded Apr 30 datetime). SFPHI `timestamp` and `resolved_at` are now `(now - dt.timedelta(hours=12)).isoformat()` and `(now - dt.timedelta(hours=2)).isoformat()` respectively. Window-bucket math sanity: 5 decisions at `now - {0,4,8,12,16}h` all comfortably inside last 7d; 20 baseline decisions at `now - {10,...,29}d` comfortably inside [7d, 37d] prior; SFPHI `resolved_at = now - 2h` well inside outlier_pnl's 30d lookback; 15 baseline trades at `now - {10,...,24}d` provide the cohort denominator. Pattern matches the fixture's own existing baseline-trade discipline at lines 55-56 — same `now - dt.timedelta(...)` shape, just propagated to the SFPHI record + the fixture's anchor.
+2. **`test_sfphi_fixture_dates_are_relative`** (new test) — discipline-lock at commit-time mirroring Session 51's `test_canonical_schema_used_throughout` pattern. Inspects `_seed_sfphi_fixture` source, asserts `datetime.now` (or `dt.datetime.now`) appears AND no hardcoded full-date ISO strings (regex `"20\d{2}-\d{2}-\d{2}T`) survive. Without this guard, the 3-session calendar drift will silently recur the next time someone hardcodes a date for convenience.
+3. NO changes to `bot/`, `tools/discovery_agent/heuristics/`, or any production code path. The heuristics work correctly on real production data; only the fixture was stale.
+
+**Verification.**
+
+1. ☑ Targeted: `python3 -m pytest tests/test_discovery_sfphi_regression.py -v` → **5/5 pass** (was 1/4 pre-fix; +1 new safeguard).
+2. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1410 passed**, 0 failures (was 1406 passed + 3 failed pre-fix). Plan estimated 1407; actual 1410 reflects unrelated test additions since the baseline snapshot — the only Session-56.5-attributable change is the +1 safeguard test.
+3. ☑ `git diff bot/` empty. `git diff tools/discovery_agent/` empty. Only `tests/test_discovery_sfphi_regression.py` and `CLAUDE.md` edited.
+4. ☑ No bot restart. Test-only changes.
+
+**Discovery agent's P0 founding-example contract restored.** Future sessions can now distinguish "pre-existing failure" from "real regression" cleanly — the test will fail only if the actual founding-example contract has been violated, not because the fixture clock has drifted.
+
+**Watch-list (called out in commit message).** Other tests in `tests/` that hardcode `dt.datetime(2026, ...)` literals are candidates for the same drift. Stay surgical this session — flag any seen in passing as a future small follow-up rather than bundling.
+
+**Out of scope (held).** Session 57 (disable-list regression hunt for the 9 post-disable entries on `atp_challenger`/`wta`/`wta_challenger` surfaced by `settlement_vs_rationale`) — Tyler's sequencing: 56.5 ships first, then 57. No production code touched. No heuristic logic changed. No new dep (freezegun deliberately rejected in favor of the simpler relative-date approach).
+
+---
+
+### ☑ Session 57 — Disabled-sport "leak" was heuristic precision drift, not a bot bug (May 6, ~1.5h, tools/ + tests/ only — no bot/ touch, no restart)
+
+**Trigger.** Session 55's `settlement_vs_rationale` first real-data run (May 6) flagged 9 post-Apr-20 `live_momentum` entries on `atp_challenger`/`wta`/`wta_challenger` as critical regressions. The session brief framed this as a contract violation in the bot's gate at [bot/live_watcher.py:1158](hustle-agent/bot/live_watcher.py:1158), with branches A (sport misclassification) / B (cache-stale-config) / C (WATCH bypass) / D (other) prepared. Phase 0 forensic investigation flipped the diagnosis: the bot is fine; the heuristic is the false-positive source.
+
+**Phase 0 diagnosis (the actual mechanism).** All 9 flagged entries fired between **2026-04-20T02:24Z and 2026-04-20T20:12Z** — single calendar day, between 02:24 UTC and 20:12 UTC. Per `git blame bot/config.py:172`, commit `b1f08ff` (the disable that added these sports to `MOMENTUM_DISABLED_SPORTS`) was authored by Tyler at **2026-04-20 22:31:54 -0400 = 2026-04-21 02:31:54 UTC**. **Every leaked entry pre-dates the commit by 6+ hours.** They're pre-deploy artifacts — entries that fired before the disable was even authored. The bot's gate has worked correctly for the entire 16 days since: zero post-Apr-21 entries on disabled tennis sports exist in `paper_trades.json`, and today's `cohort_emergence` finding (`live_momentum (sport=atp_challenger) appeared 9 times in last 7d, 0 accepts, 0 trades`) confirms the gate is firing on attempts and rejecting them, exactly as designed.
+
+**Why the heuristic flagged them.** [tools/discovery_agent/heuristics/settlement_vs_rationale.py:83-87](hustle-agent/tools/discovery_agent/heuristics/settlement_vs_rationale.py:83) used calendar-midnight (`dt.datetime(2026, 4, 20, 0, 0, 0, tzinfo=dt.timezone.utc)`) as the disable cutoff. That's the *start* of Apr 20 UTC — 26 hours before the disable's commit time. The 9 Apr 20 UTC entries pass `entry_ts >= disabled_since` even though they pre-date the disable's existence by hours. Same shape as Session 56.5's fixture-drift: the heuristic's date math drifted from production's actual deploy timeline. Pre-flight Explore agents had already confirmed the bot's gate sites at [bot/live_watcher.py:1158, :1183](hustle-agent/bot/live_watcher.py:1158) work correctly; the WATCH-bypass hypothesis was refuted in pre-flight (handle_watch shares `_tick_momentum`'s gate path); pre-flight pointed at sport misclassification as top suspect. Phase 0 ruled out all four bot-side branches by reading the data directly.
+
+**What shipped (commits on `main`).**
+
+1. **[tools/discovery_agent/heuristics/settlement_vs_rationale.py:73-95](hustle-agent/tools/discovery_agent/heuristics/settlement_vs_rationale.py:73)** — `MOMENTUM_DISABLED_SINCE` cutoffs tightened from `2026-04-20T00:00:00Z` → `2026-04-21T02:31:54Z` (the actual `b1f08ff` commit timestamp) for all three disabled sports. ~3 line value changes plus a 12-line evidence comment block citing the commit SHA + Session 56.5 discipline mirror + the 9-entry calendar-precision regression.
+2. **[tests/test_discovery_settlement_vs_rationale.py](hustle-agent/tests/test_discovery_settlement_vs_rationale.py)** — 2 new regression tests under "Test 2b (Session 57)":
+   - `test_disabled_sport_deploy_window_race_excluded` (P0): replays 3 of the actual flagged tickers (KXATPCHALLENGERMATCH-26APR19TOKSHA-SHA earliest, KXWTAMATCH-26APR20VEKJEA-VEK midday, KXATPCHALLENGERMATCH-26APR20ZINKUZ-ZIN latest) with their exact production timestamps. Asserts `pattern2 == []` post-fix. Verified to FAIL pre-fix (3 critical findings emitted) and PASS post-fix (0 findings).
+   - `test_disabled_sport_post_commit_entry_still_fires` (bookend): asserts a synthetic Apr 21 03:00 UTC entry (28 minutes post-commit) on `wta_challenger` STILL fires CRITICAL. Locks in that the cutoff is tight enough to catch real post-deploy regressions, not just lax enough to filter the historical false positives.
+3. **CLAUDE.md push-discipline bullet** added to "Style Rules for This Codebase" between "Logs are the audit trail" and "Quick Reference: Where Things Live" sections (~10 LOC). Codifies the Session 56.5 lesson into the Project Guide so future-me enforces commit+push as one operation by default.
+4. This Session 57 ☑ block + the README sync commit (separate commit per discipline).
+
+**Verification.**
+
+1. ☑ Targeted: `python3 -m pytest tests/test_discovery_settlement_vs_rationale.py -v` → **12/12 pass** (10 baseline + 2 new).
+2. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1412 passed**, 0 failures (Session 56.5 baseline 1410 + 2 new = 1412 expected).
+3. ☑ Real-data heuristic re-run via `DiscoveryContext.load() → SettlementVsRationale().run(ctx)`: Pattern 2 went **9 → 0** findings. Pattern 1 (KXHIGHMIA + KXHIGHAUS tail-loss findings, real and unchanged) stayed at 2. Pattern 3 stayed at 0. The fix changes ONLY the false-positive count.
+4. ☑ `git diff bot/` empty. Only `tools/discovery_agent/heuristics/settlement_vs_rationale.py`, `tests/test_discovery_settlement_vs_rationale.py`, `CLAUDE.md`, `README.md` edited.
+5. ☑ No bot restart. The heuristic is a read-only tool not imported by `bot/main.py`; the bot's gate has been correct all along.
+
+**The 9 historical entries.** Net P&L sum −$12.80 across the 9 (3.2 + 4.0 − 2.0 − 14.0 + 3.8 − 16.2 + 3.2 + 3.0 + 2.2). NOT backfilled per forward-only precedent (Session 36, 50, etc.) — they sit in `paper_trades.json` as evidence that the heuristic now correctly excludes pre-deploy entries from regression flags, not as live trades that need reversal.
+
+**Operating Posture observation.** This is the **first coder session triggered by a Session 55 heuristic finding** (six days after Session 55 shipped). It validates the cross-AI panel decision (Session 55) to ship the deterministic heuristic over the LLM Glint Analyst proposal: the heuristic surfaced the lead 12 hours after deploy at $0 cost. The lead turned out to be a precision drift IN the heuristic itself rather than a bot-side regression — but that's exactly the kind of "agent investigates itself" pattern Sessions 43-investigate, 44, 45, 46, 47, and 56.5 have established. Sometimes the agent's findings teach you the agent's own boundaries before they teach you about the bot.
+
+**Battle Scar candidate considered, declined.** The pattern "heuristics that filter on calendar-midnight when the actual production change happened mid-day" is real but currently a single occurrence (Sessions 56.5 + 57). One more instance and it's a Battle Scar; one is a discipline note. Discipline note: when a heuristic filters by deploy date, use the actual commit timestamp from `git blame`, not a calendar-derived approximation. `MOMENTUM_DISABLED_SINCE` and Session 56.5's `_seed_sfphi_fixture` are now both on this discipline.
+
+**Out of scope (held).**
+- Modifying any bot code path (`bot/main.py`, `bot/live_watcher.py`, `bot/config.py`, `bot/strategies/`, `bot/executor.py`).
+- Backfilling or reversing the 9 historical entries (forward-only).
+- Touching `MOMENTUM_DISABLED_SPORTS` membership.
+- Defense-in-depth Branch B (live config attribute access) — no evidence of cache-stale config has surfaced; the bot's import-cache is fine in practice because config changes ride with restarts.
+- Re-investigating WTA / atp_challenger disable decisions (Sessions 38a-2 / 30-followup made them; they stand).
+- Bundling Session 55's KXHIGHMIA / KXHIGHAUS family-cap leads (separate session, awaits May 14 day-14 routine data).
+
+**Watch list — heuristic precision drift recurrence.** If a third heuristic surfaces the same pattern (calendar approximation diverges from production timeline), promote to Battle Scar #17 and add a `git_blame_commit_timestamp_for_session_X` helper convention.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
@@ -4078,6 +4187,7 @@ For live_momentum: cross-intersection doesn't apply. Use journal_analysis findin
 - **Config constants have comments with data.** If you add a new threshold, include the evidence or mark it `# tuned by feel — revisit after 20 resolved`.
 - **Telegram messages are terse.** No prose. Bullets, numbers, action verbs. Emojis sparingly and only to highlight state (💰 profit, ❌ failure, ⏭️ skip, 🎯 edge, ♻️ restart, 🛑 stop).
 - **Logs are the audit trail.** Log edge decisions, trade decisions, exit decisions. Don't log "starting loop" spam. INFO for actionable events, WARNING for safety-gate failures, ERROR for exceptions.
+- **Every session ends with `git push origin main`.** Both code commits AND the mandatory README sync commit must be pushed before marking the session complete. Use `git status` to verify "Your branch is up to date with 'origin/main'." Per Sessions 53/54/56.5 lessons learned: documented gaps in commit-but-not-push and CLAUDE.md-but-not-README-sync recur unless enforced at session-end. The discipline is one operation: commit + push together. README sync is mandatory after every session — see Session 56.5 entry for the pattern.
 
 ---
 
