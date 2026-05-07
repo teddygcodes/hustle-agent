@@ -22,7 +22,10 @@ def _seed_sfphi_fixture(repo: Path) -> None:
     state = repo / "bot" / "state"
     state.mkdir(parents=True, exist_ok=True)
     (repo / "bot" / "logs").mkdir(parents=True, exist_ok=True)
-    now = dt.datetime(2026, 4, 30, 12, 0, tzinfo=dt.timezone.utc)
+    # Session 56.5: anchor relative to wall-clock NOW so cohort_emergence's
+    # 7d/30d windows (which use real ctx.loaded_at) don't drift the fixture
+    # rows out of bucket as the calendar advances. See CLAUDE.md Session 56.5.
+    now = dt.datetime.now(dt.timezone.utc)
 
     sfphi = {
         "id": "PAPER-4A16F5D2",
@@ -31,13 +34,13 @@ def _seed_sfphi_fixture(repo: Path) -> None:
         "side": "no",
         "entry_price": 0.44,
         "contracts": 454,
-        "timestamp": "2026-04-30T12:09:55.855881+00:00",
+        "timestamp": (now - dt.timedelta(hours=12)).isoformat(),
         "edge_at_entry": 0.0137,
         "confidence": 0.8,
         "status": "exited_early",
         "exit_price": 0.82,
         "pnl": 172.52,
-        "resolved_at": "2026-05-01T00:59:30.955474+00:00",
+        "resolved_at": (now - dt.timedelta(hours=2)).isoformat(),
         "exit_reason": "auto_take_profit",
     }
 
@@ -156,3 +159,23 @@ def test_findings_jsonl_is_parseable(tmp_path: Path):
     parsed = [json.loads(line) for line in jsonl.read_text().splitlines() if line.strip()]
     assert len(parsed) >= 2
     assert all("fingerprint" in r and "evidence" in r for r in parsed)
+
+
+def test_sfphi_fixture_dates_are_relative():
+    """Session 56.5 discipline-lock: fixture must anchor to datetime.now(),
+    not hardcoded ISO date strings. Mirrors Session 51's
+    `test_canonical_schema_used_throughout` pattern. Without this guard,
+    the 3-session calendar drift documented in Sessions 54/55/56 will
+    silently recur the next time someone hardcodes a date for convenience."""
+    import inspect
+    import re
+
+    src = inspect.getsource(_seed_sfphi_fixture)
+    assert "datetime.now" in src or "dt.datetime.now" in src, (
+        "Fixture must anchor to datetime.now() — see CLAUDE.md Session 56.5"
+    )
+    bad = re.findall(r'"20\d{2}-\d{2}-\d{2}T', src)
+    assert not bad, (
+        f"Fixture contains hardcoded ISO datetime strings {bad!r}. "
+        f"Use `now - dt.timedelta(...)` instead — see CLAUDE.md Session 56.5."
+    )
