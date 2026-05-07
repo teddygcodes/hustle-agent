@@ -2150,7 +2150,7 @@ Worth checking: did the bot get restarted on Apr 27 between 16:14 UTC and 20:14 
 
 **Asymmetry worth noting (side observation, not actionable yet):** the original Apr 20 disable was based on n=17 trades for atp_challenger but n=1 for wta_challenger. A future re-evaluation of `MOMENTUM_DISABLED_SPORTS` scope (Session 31+ candidate) should split per-circuit and require ≥30 settled challenger CFs *with at least 5 leader-loss settlements* before considering re-enable.
 
-**Watch-list trigger (fired/evaluated by Session 61):** when challenger CFs in the research dataset accumulate **≥30 rows with `outcome_clv_cents` populated AND ≥5 rows with `outcome_settlement=no_won`**, re-run this probe. Session 61 re-ran it at n=398 / leader-loss=122 and held both challenger circuits disabled because both per-circuit EVs were negative. Future challenger re-checks should require materially new data (rough default: another 200+ combined settled challenger CFs after 2026-05-07, or either circuit reaching mean CLV >= +5c with n_no_won >= 100) rather than re-opening on the already-consumed n>=30 / leader-loss>=5 threshold.
+**Watch-list trigger (Session 65 update, post-Session-61 Outcome B):** re-evaluate per-circuit when challenger CFs accumulate **n>=600 combined AND n_no_won>=100** (~200 more after the Session 61 baseline of n=398/leader-loss=122), OR when per-circuit divergence appears (one circuit isolated positive distinct from the other — manual cross-check, surfaces in glint_status.py as the n>=600 detail line until reached). Updated bar after Session 61 evaluated the original threshold and shipped Outcome B (both challengers disabled, per-circuit EVs negative). Reflects "ask again only when the answer might genuinely be different than Outcome B," not "ask every glint run."
 
 **Out of scope (resisted):** no edits to `bot/config.py`, `bot/live_watcher.py`, or `tools/live_momentum_dataset.py`. No re-enable. No bot restart. No UFC investigation (separate rabbit hole — defer to May 2).
 
@@ -4053,6 +4053,35 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 - `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1459 passed** (1454 baseline + 5 new), 0 failures.
 - `python3 tools/glint_status.py` → L2570 / L3147 NOT_YET_TRIGGERED at new n>=80 / mean>=5c bar (n=35).
 - No bot restart required. Pattern B is null-op behavior change.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
+### ☑ Session 65 — Housekeeping bundle: 3 small fixes (May 7, ~30 min, no production code touched)
+
+**Trigger.** Three small items queued across multiple sessions, bundled to avoid micro-session overhead. Mirror of Session 56.5's housekeeping shape — small, focused, low-risk, restores baseline cleanliness.
+
+**Phase A — Session 30-followup watch-list trigger threshold raised.** [tools/glint_status.py:698-708](hustle-agent/tools/glint_status.py:698) now checks `n >= 600 AND losses >= 100` (was `n >= 30 AND losses >= 5`). Original bar was met long ago at n=398/leader-loss=122 and Session 61 evaluated it (Outcome B, both challengers stay disabled). The unraised bar made glint_status.py flag `TRIGGERED` on every run — boy-who-cried-wolf shape that risks obscuring genuinely-new triggers. Prose at [CLAUDE.md L2153](hustle-agent/CLAUDE.md:2153) updated to lead with the new threshold and document Session 61 as historical context. Same Session-64 architectural pattern as the no_leader/wta bar raise at L716-728.
+
+**Phase B — glint_status.py NEW-findings counter consistency.** [tools/glint_status.py:385-395](hustle-agent/tools/glint_status.py:385) — verdict NEW count now derived from `new_fingerprints` (same source as §6 body) rather than the `Findings: N NEW, ...` summary regex. When the discovery report's summary line and NEW-findings list disagree internally, the two sites previously diverged ("Verdict: 2 NEW" while body said "none this run"). Fix preserves report-summary regex as the seed for stable/resolved counts (which §6 body doesn't independently recount). One-line change + comment explaining the choice.
+
+**Phase C — `bot/tools/` untracked legacy directory removed.** Two files (empty `__init__.py` from Apr 16 + standalone `clv_by_strategy.py`, 2533 bytes, mid-Apr 2026). Verified zero imports of `bot.tools` across `bot/`, `tools/`, `tests/` before deletion. `clv_by_strategy.py` only imported stdlib (`json`, `pathlib`, `statistics`); no transitive ties. Untracked since before this session series; every recent ship report explicitly noted "pre-existing untracked `bot/tools/` remains untouched." Session 52's gitignore-audit discipline says don't carry untracked-but-orphaned cruft. Pure working-tree deletion (no `git rm` needed; files were never tracked).
+
+**Test ladder (2 new tests, 1 existing test refactored, baseline 1459 → 1461):**
+- `test_watchlist_evaluator_threshold_check` — refactored to use new n>=600 / losses>=100 threshold (was n>=30 / losses>=5).
+- `test_session30_followup_post_session65_threshold` — parametrized property test: locks against re-regression to old bar shape across 6 (n, losses, expected) cases including Session 61 baseline (n=398/122 → NOT_YET_TRIGGERED), old bar (n=30/5 → NOT_YET_TRIGGERED), and new bar exactly (n=600/100 → TRIGGERED).
+- `test_count_discovery_findings_new_count_matches_fingerprints` — synthetic discovery report with summary saying 5 NEW but only 2 fingerprints in the list section; asserts `discovery['new'] == 2` (fingerprint-derived) and that verdict line + §6 body show consistent "2 NEW" downstream.
+
+**Verification.**
+- `python3 -m pytest tests/test_glint_status.py -v` → 12/12 pass.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1461 passed** (1459 baseline + 2 net new), 0 failures.
+- `python3 tools/glint_status.py | grep "Session 30-followup"` → `NOT_YET_TRIGGERED ... current n=426 / leader-loss=132` (was `TRIGGERED`).
+- Verdict line and §6 body both report 0 NEW today (consistent; pre-fix divergence example "Verdict: 2 NEW" vs body "none this run" no longer architecturally possible from the same dict).
+- `ls bot/tools 2>&1` → "No such file or directory."
+- No bot restart. No `bot/` runtime code touched. Battle Scar #15 cooldown does not apply.
+
+**Operating Posture observation.** Long-pending housekeeping items can accumulate into noise that obscures real findings. The watch-list `TRIGGERED` line for an already-evaluated decision is a boy-who-cried-wolf shape — the next genuinely-new TRIGGERED item is harder to spot when one item flags every run. Bundling 3 small fixes prevents per-session overhead and restores the watch-list / verdict-counter / untracked-tree surfaces to a clean baseline. This mirrors Session 37's test-failure cleanup discipline, applied to housekeeping prose / parser / untracked-files surface rather than test failures.
 
 **README sync.** Committed separately per push discipline.
 

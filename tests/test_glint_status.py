@@ -132,11 +132,11 @@ def test_watchlist_evaluator_threshold_check():
     triggers = [{
         "line": 12,
         "session": "Session synthetic",
-        "text": "Watch-list trigger: when challenger CFs accumulate >=30 rows and >=5 leader-loss rows",
+        "text": "Watch-list trigger: when challenger CFs accumulate n>=600 combined and n_no_won>=100",
     }]
     data = {
-        "challenger_cf_n": 30,
-        "challenger_leader_loss_n": 5,
+        "challenger_cf_n": 600,
+        "challenger_leader_loss_n": 100,
         "lm_ee_count": 0,
         "lm_per_trade_pnl": 0.0,
         "wta_cf_n": 0,
@@ -211,3 +211,82 @@ def test_consolidator_completes_in_under_2s():
     assert "# Glint Status" in md
     assert "## 9. Flags" in md
     assert elapsed < 2.0
+
+
+def test_session30_followup_post_session65_threshold():
+    # Session 65: original n>=30 + n_no_won>=5 trigger was evaluated by Session 61
+    # (Outcome B). New bar is n>=600 combined AND n_no_won>=100. At the Session 61
+    # baseline (n=398/leader-loss=122), the trigger now shows NOT_YET_TRIGGERED.
+    triggers = [{
+        "line": 2153,
+        "session": "Session 30-followup",
+        "text": (
+            "Watch-list trigger (Session 65 update): re-evaluate per-circuit when "
+            "challenger CFs accumulate n>=600 combined AND n_no_won>=100"
+        ),
+    }]
+    base = {
+        "lm_ee_count": 0,
+        "lm_per_trade_pnl": 0.0,
+        "wta_cf_n": 0,
+        "wta_mean_clv": None,
+        "no_leader_wta_n": 0,
+        "no_leader_wta_mean_clv": None,
+        "post_apr23_lm_settled": 0,
+        "lm_sport_counts": {},
+        "httpx_errors_since_restart": 0,
+        "shutdown_skip_info_since_restart": 0,
+    }
+    cases = [
+        # (n, losses, expected_status)
+        (398, 122, "NOT_YET_TRIGGERED"),  # Session 61 baseline; below new bar
+        (30, 5, "NOT_YET_TRIGGERED"),     # Old bar exactly; locks against re-regress
+        (599, 100, "NOT_YET_TRIGGERED"),  # Just below new n bar
+        (600, 99, "NOT_YET_TRIGGERED"),   # n meets, losses below
+        (600, 100, "TRIGGERED"),          # New bar exactly
+        (1000, 250, "TRIGGERED"),         # Well above
+    ]
+    for n, losses, expected in cases:
+        out = glint.evaluate_watchlist_triggers(
+            triggers,
+            {**base, "challenger_cf_n": n, "challenger_leader_loss_n": losses},
+        )
+        assert out[0]["status"] == expected, (
+            f"n={n}/losses={losses}: expected {expected}, got {out[0]['status']}"
+        )
+
+
+def test_count_discovery_findings_new_count_matches_fingerprints(tmp_path: Path):
+    # Session 65: when discovery_report's summary line and NEW findings list
+    # disagree internally, count_discovery_findings should report the count
+    # derived from fingerprints (same source as §6 body) so the verdict line
+    # and §6 body show the same NEW count downstream.
+    paths = glint.paths_for(tmp_path)
+    paths.discovery_dir.mkdir(parents=True, exist_ok=True)
+    report = (
+        "# Discovery Report 2026-05-07\n\n"
+        "Findings: 5 NEW, 1 STABLE, 0 RESOLVED.\n\n"
+        "## NEW findings\n\n"
+        "- fingerprint `fp_synthetic_a` -- something\n"
+        "- fingerprint `fp_synthetic_b` -- something else\n\n"
+        "## STABLE findings\n\n"
+        "(stable section)\n"
+    )
+    findings_jsonl = (
+        json.dumps({"fingerprint": "fp_synthetic_a", "severity": "low", "title": "A", "summary": "first"}) + "\n"
+        + json.dumps({"fingerprint": "fp_synthetic_b", "severity": "low", "title": "B", "summary": "second"}) + "\n"
+    )
+    today = "2026-05-07"
+    (paths.discovery_dir / f"discovery_report_{today}.md").write_text(report)
+    (paths.discovery_dir / f"discovery_findings_{today}.jsonl").write_text(findings_jsonl)
+    now = datetime(2026, 5, 7, 16, tzinfo=timezone.utc)
+    discovery = glint.count_discovery_findings(paths, now)
+    # 'new' count derives from fingerprints (2), not the summary regex (5)
+    assert discovery["new"] == 2
+    assert len(discovery["new_fingerprints"]) == 2
+    # Verdict line and §6 body now agree on the NEW count
+    metrics = _minimal_metrics(now)
+    verdict = glint.render_verdict(metrics, [], discovery, [], now)
+    body = glint.render_discovery_section(discovery)
+    assert "2 NEW discovery findings" in verdict
+    assert "**2 NEW**" in body

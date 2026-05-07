@@ -387,6 +387,13 @@ def count_discovery_findings(paths: Paths, now_utc: datetime) -> dict:
     for fp in re.findall(r"fingerprint `([^`]+)`", new_section):
         new_fingerprints.add(fp)
 
+    # Session 65: derive verdict NEW count from new_fingerprints (same source as
+    # §6 body) rather than the report summary regex. When the report's summary
+    # line and NEW-findings list disagree internally, this keeps verdict and
+    # body counts consistent downstream. The summary regex above remains as the
+    # initial seed for stable/resolved counts (which the body doesn't recount).
+    counts["new"] = len(new_fingerprints)
+
     findings = _load_jsonl(finding_path)
     return {
         "source_note": source_note,
@@ -695,10 +702,16 @@ def evaluate_watchlist_triggers(triggers: list[dict], data: dict) -> list[dict]:
         status = "MANUAL_CHECK_REQUIRED"
         detail = f"see CLAUDE.md L{trig['line']}"
 
-        if "challenger cfs" in low and "30" in low and "5" in low:
+        if "challenger cfs" in low and "600" in low and "100" in low:
+            # Session 65: bar raised after Session 61 Outcome B.
+            # Original n>=30 + n_no_won>=5 was met at n=398/leader-loss=122
+            # and produced Outcome B (both challengers disabled, per-circuit
+            # EVs negative). Re-fire only when materially new data is in:
+            # n>=600 combined AND n_no_won>=100. Per-circuit divergence is a
+            # separate manual cross-check (out of evaluator scope).
             n = data["challenger_cf_n"]
             losses = data["challenger_leader_loss_n"]
-            status = "TRIGGERED" if n >= 30 and losses >= 5 else "NOT_YET_TRIGGERED"
+            status = "TRIGGERED" if n >= 600 and losses >= 100 else "NOT_YET_TRIGGERED"
             detail = f"current n={n} / leader-loss={losses}"
         elif "ee cohort" in low and "80" in low:
             ee = data["lm_ee_count"]
