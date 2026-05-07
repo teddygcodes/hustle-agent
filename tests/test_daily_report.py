@@ -1,13 +1,13 @@
 """Tests for tools/daily_report.py — Session 35 daily report orchestrator.
 
 Same correctness shape as the Session-24 weekly digest tests, adapted for the
-new 10-section layout:
+new 11-section layout:
 
-  - Smoke: 10 section headers render against real on-disk state.
+  - Smoke: 11 section headers render against real on-disk state.
   - Date arg parsing (valid + invalid).
   - Crash invariant: if one section's renderer raises, the OUTPUT FILE EXISTS
     with the affected section showing `[section unavailable: ...]` and the
-    other 9 sections still render.
+    other 10 sections still render.
   - Default date = yesterday in ET when --date omitted.
   - Footer present.
 """
@@ -25,9 +25,10 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import tools._report_helpers as helpers  # noqa: E402
 import tools.daily_report as daily_report  # noqa: E402
+import tools.glint_status as glint_status  # noqa: E402
 
 
-SECTION_HEADER_PREFIXES = [f"# {n}. " for n in range(1, 11)]
+SECTION_HEADER_PREFIXES = [f"# {n}. " for n in range(1, 12)]
 
 
 # ───────────────────────────────────────────────────────────── smoke + structure
@@ -61,15 +62,15 @@ def test_daily_report_runs_against_current_production_state(tmp_path):
     assert "[section unavailable:" not in md
 
 
-def test_daily_report_has_exactly_ten_sections(tmp_path):
+def test_daily_report_has_exactly_eleven_sections(tmp_path):
     out = daily_report.build_report(helpers.yesterday_in_et(), out_dir=tmp_path)
     md = out.read_text()
     headers = [
         line for line in md.splitlines()
         if line.startswith("# ") and not line.startswith("## ")
     ]
-    # Title + 10 numbered section headers = 11.
-    assert len(headers) == 11, f"expected 11 H1 lines (1 title + 10 sections), got {len(headers)}: {headers}"
+    # Title + 11 numbered section headers = 12.
+    assert len(headers) == 12, f"expected 12 H1 lines (1 title + 11 sections), got {len(headers)}: {headers}"
 
 
 # ───────────────────────────────────────────────────────────── date parsing
@@ -111,7 +112,7 @@ def test_crash_in_one_section_does_not_break_report(tmp_path, monkeypatch):
 
     assert out.exists()
     md = out.read_text()
-    # All 10 section headers still appear (header explicit + body fallback).
+    # All 11 section headers still appear (header explicit + body fallback).
     for prefix in SECTION_HEADER_PREFIXES:
         assert prefix in md, f"missing section header {prefix!r}"
     # The unavailable marker is present and names the exception.
@@ -121,7 +122,7 @@ def test_crash_in_one_section_does_not_break_report(tmp_path, monkeypatch):
     assert "# 6. Live momentum events" in md
     # Footer reflects the skipped section.
     assert "5. CF coverage" in md
-    assert "Sections rendered: 9/10" in md
+    assert "Sections rendered: 10/11" in md
 
 
 def test_crash_invariant_partial_file_survives_mid_run(tmp_path, monkeypatch):
@@ -205,6 +206,73 @@ def test_empty_data_renders_no_data_sentinels(tmp_path, monkeypatch):
     for header, sentinel in sentinels:
         assert header in md, f"missing {header}"
         assert sentinel in md, f"section {header!r} should render sentinel {sentinel!r}"
+
+
+def test_strategy_candidates_section_failure_is_safe(tmp_path, monkeypatch):
+    def boom(**_kwargs):
+        raise RuntimeError("strategy candidate parse failed")
+
+    monkeypatch.setattr(helpers, "render_strategy_candidates", boom)
+    out = daily_report.build_report(helpers.yesterday_in_et(), out_dir=tmp_path)
+    md = out.read_text()
+
+    assert "# 11. Strategy Candidates" in md
+    assert "[section unavailable:" in md
+    assert "strategy candidate parse failed" in md
+    assert "Sections rendered: 10/11" in md
+
+
+def _section_body(markdown: str, heading: str) -> str:
+    lines = markdown.splitlines()
+    start = None
+    for idx, line in enumerate(lines):
+        if line.strip() == heading:
+            start = idx + 1
+            break
+    assert start is not None, f"missing heading {heading!r}"
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    end = len(lines)
+    for idx in range(start, len(lines)):
+        if lines[idx].startswith("---"):
+            end = idx
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def test_daily_and_glint_strategy_candidate_bodies_match(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    discovery_dir.mkdir()
+    (discovery_dir / "discovery_findings_2026-05-07.jsonl").write_text(
+        json.dumps({
+            "fingerprint": "fp_same",
+            "heuristic": "cohort_emergence",
+            "severity": "info",
+            "title": "same candidate body",
+            "summary": "same",
+            "evidence": {},
+        }) + "\n"
+    )
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(helpers, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(helpers, "CLAUDE_MD", claude)
+
+    for _, fn_name in helpers.SHARED_SECTIONS:
+        monkeypatch.setattr(helpers, fn_name, lambda *a, **k: "# stub\n")
+
+    daily_path = daily_report.build_report(
+        datetime(2026, 5, 7, tzinfo=helpers.ET),
+        out_dir=tmp_path,
+        now_utc=datetime(2026, 5, 7, 16, tzinfo=timezone.utc),
+    )
+    daily_body = _section_body(daily_path.read_text(), "# 11. Strategy Candidates")
+    glint_body = _section_body(
+        glint_status.render_strategy_candidates_section(datetime(2026, 5, 7, 16, tzinfo=timezone.utc)),
+        "## 10. Strategy Candidates",
+    )
+
+    assert daily_body == glint_body
 
 
 # ──────────────────────────────────────────────────────── footer + last-run

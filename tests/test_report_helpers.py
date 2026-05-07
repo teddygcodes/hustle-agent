@@ -17,7 +17,7 @@ import gzip
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -336,3 +336,175 @@ def test_extract_headline_metric_first_line_only():
     md = "ignored\n| Decisions volume | 100 | ok |\n| Decisions volume | 200 | ok |\n"
     line = h.extract_headline_metric(md, r"\| Decisions volume \|")
     assert line and "100" in line and "200" not in line
+
+
+# ───────────────────────────────────────────── strategy candidates renderer
+
+def _write_discovery_findings(root: Path, day: str, rows: list[dict]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(row) + "\n" for row in rows)
+    (root / f"discovery_findings_{day}.jsonl").write_text(text)
+
+
+def _finding(
+    fingerprint: str,
+    heuristic: str,
+    severity: str,
+    title: str,
+    evidence: dict | None = None,
+) -> dict:
+    return {
+        "fingerprint": fingerprint,
+        "heuristic": heuristic,
+        "severity": severity,
+        "title": title,
+        "summary": f"summary for {title}",
+        "evidence": evidence or {},
+    }
+
+
+def test_strategy_candidates_filter_includes_only_strategy_heuristics(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+
+    included = [
+        "concurrent_attack_angles",
+        "cohort_emergence",
+        "counterfactual_hotspots",
+        "threshold_proximity",
+        "outlier_pnl",
+        "settlement_vs_rationale",
+        "universe_gap",
+    ]
+    operational = ["log_error_spike", "live_tick_anomalies", "cadence_outcome"]
+    rows = [
+        _finding(f"fp_{name}", name, "info", f"included {name}")
+        for name in included
+    ] + [
+        _finding(f"fp_{name}", name, "high", f"excluded {name}")
+        for name in operational
+    ]
+    _write_discovery_findings(discovery_dir, "2026-05-07", rows)
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    for name in included:
+        assert f"included {name}" in body
+    for name in operational:
+        assert f"excluded {name}" not in body
+    assert "Candidates: **7 active**" in body
+
+
+def test_strategy_candidates_sort_by_severity_then_stability(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+
+    _write_discovery_findings(discovery_dir, "2026-05-05", [
+        _finding("fp_info_old", "counterfactual_hotspots", "info", "old info"),
+    ])
+    _write_discovery_findings(discovery_dir, "2026-05-07", [
+        _finding("fp_info_old", "counterfactual_hotspots", "info", "old info"),
+        _finding("fp_info_new", "counterfactual_hotspots", "info", "new info"),
+        _finding("fp_notable", "cohort_emergence", "notable", "middle notable"),
+        _finding("fp_high", "settlement_vs_rationale", "high", "top high"),
+    ])
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    assert body.index("top high") < body.index("middle notable") < body.index("old info")
+    assert body.index("old info") < body.index("new info")
+
+
+def test_strategy_candidates_days_stable_is_inclusive_and_gap_tolerant(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+
+    _write_discovery_findings(discovery_dir, "2026-05-01", [
+        _finding("fp_gap", "counterfactual_hotspots", "info", "gap tolerant"),
+    ])
+    _write_discovery_findings(discovery_dir, "2026-05-03", [
+        _finding("fp_gap", "counterfactual_hotspots", "info", "gap tolerant"),
+    ])
+    _write_discovery_findings(discovery_dir, "2026-05-07", [
+        _finding("fp_gap", "counterfactual_hotspots", "info", "gap tolerant"),
+        _finding("fp_today", "cohort_emergence", "info", "today only"),
+    ])
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    assert "`fp_gap` | 7d |" in body
+    assert "`fp_today` | 1d |" in body
+
+
+def test_strategy_candidates_resolved_when_absent_from_latest_run(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+
+    _write_discovery_findings(discovery_dir, "2026-05-06", [
+        _finding("fp_resolved", "universe_gap", "notable", "yesterday candidate"),
+    ])
+    _write_discovery_findings(discovery_dir, "2026-05-07", [
+        _finding("fp_active", "cohort_emergence", "info", "today candidate"),
+    ])
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    assert "### RESOLVED (last 14d)" in body
+    assert "yesterday candidate" in body
+    assert "| 2026-05-07 | 2026-05-06 | `universe_gap` | yesterday candidate" in body
+
+
+def test_strategy_candidates_renders_all_active_without_truncation(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text("")
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+
+    rows = [
+        _finding(
+            f"fp_{i}",
+            "counterfactual_hotspots",
+            "info",
+            f"Active Candidate {i} with a deliberately long title that must render in full",
+        )
+        for i in range(12)
+    ]
+    _write_discovery_findings(discovery_dir, "2026-05-07", rows)
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    for i in range(12):
+        assert f"Active Candidate {i} with a deliberately long title that must render in full" in body
+    assert body.count("Active Candidate") == 12
+
+
+def test_strategy_candidates_annotates_matching_watchlist_refs(tmp_path, monkeypatch):
+    discovery_dir = tmp_path / "discovery"
+    claude = tmp_path / "CLAUDE.md"
+    claude.write_text(
+        "### \u2611 Session 64 \u2014 WTA follow-up\n\n"
+        "**Watch-list trigger.** Re-evaluate per-sport `MOMENTUM_LEADER_MIN` "
+        "for WTA if the no_leader/wta sub-cohort reaches n=80.\n"
+    )
+    monkeypatch.setattr(h, "DISCOVERY_DIR", discovery_dir)
+    monkeypatch.setattr(h, "CLAUDE_MD", claude)
+    _write_discovery_findings(discovery_dir, "2026-05-07", [
+        _finding(
+            "fp_watch",
+            "counterfactual_hotspots",
+            "info",
+            "no_leader/wta: 35 settled CFs, mean CLV +9.3c",
+            {"skip_reason": "no_leader", "sport": "wta"},
+        ),
+    ])
+
+    body = h.render_strategy_candidates(today=date(2026, 5, 7))
+    assert "Session 64 L3" in body

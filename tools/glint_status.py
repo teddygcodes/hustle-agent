@@ -792,7 +792,14 @@ def next_calendar_entries(paths: Paths, now_utc: datetime, limit: int = 5) -> li
     return entries[:limit]
 
 
-def build_baseline(now_utc: datetime, metrics: dict, discovery: dict, flags: list[Flag]) -> dict:
+def build_baseline(
+    now_utc: datetime,
+    metrics: dict,
+    discovery: dict,
+    flags: list[Flag],
+    strategy_candidates: dict | None = None,
+) -> dict:
+    strategy_candidates = strategy_candidates or {}
     return {
         "ts": now_utc.isoformat(),
         "total_pnl": metrics["total_pnl"],
@@ -802,6 +809,11 @@ def build_baseline(now_utc: datetime, metrics: dict, discovery: dict, flags: lis
         "open_positions_count": metrics["open_positions_count"],
         "exposure": metrics["exposure"],
         "discovery_findings_new": discovery["new"],
+        "strategy_candidates_active": int(strategy_candidates.get("active", 0)),
+        "strategy_candidates_high": int(strategy_candidates.get("high", 0)),
+        "strategy_candidates_notable": int(strategy_candidates.get("notable", 0)),
+        "strategy_candidates_info": int(strategy_candidates.get("info", 0)),
+        "strategy_candidates_resolved_14d": int(strategy_candidates.get("resolved", 0)),
         "errors_in_log": sum(1 for f in flags if f.id == "log_errors_since_restart"),
         "telegram_last_success": metrics["bot_state"].get("telegram_last_send_success_at"),
         "flags": sorted(f.id for f in flags if f.severity in {"WARN", "CRITICAL"}),
@@ -833,6 +845,10 @@ def render_diff(last: dict | None, current: dict, now_utc: datetime) -> str:
     pos_delta = int(current.get("open_positions_count", 0)) - int(last.get("open_positions_count", 0))
     exposure_delta = float(current.get("exposure", 0.0)) - float(last.get("exposure", 0.0))
     findings_delta = int(current.get("discovery_findings_new", 0)) - int(last.get("discovery_findings_new", 0))
+    candidates_delta = (
+        int(current.get("strategy_candidates_active", 0))
+        - int(last.get("strategy_candidates_active", 0))
+    )
     open_now = set(current.get("open_tickers") or [])
     open_last = set(last.get("open_tickers") or [])
     settled_now = set(current.get("settled_trade_ids") or [])
@@ -847,6 +863,14 @@ def render_diff(last: dict | None, current: dict, now_utc: datetime) -> str:
         f"- Positions: {last.get('open_positions_count', 0)} -> {current.get('open_positions_count', 0)} ({_fmt_int_delta(pos_delta)} net; {len(open_last - open_now)} closed, {len(open_now - open_last)} new)",
         f"- Exposure: { _fmt_money(float(last.get('exposure', 0.0)), signed=False) } -> { _fmt_money(float(current.get('exposure', 0.0)), signed=False) } ({_fmt_money_delta(exposure_delta)})",
         f"- Findings NEW: {last.get('discovery_findings_new', 0)} -> {current.get('discovery_findings_new', 0)} ({_fmt_int_delta(findings_delta)})",
+        (
+            f"- Strategy candidates active: {last.get('strategy_candidates_active', 0)} -> "
+            f"{current.get('strategy_candidates_active', 0)} ({_fmt_int_delta(candidates_delta)}; "
+            f"H {current.get('strategy_candidates_high', 0)} / "
+            f"N {current.get('strategy_candidates_notable', 0)} / "
+            f"I {current.get('strategy_candidates_info', 0)}, "
+            f"{current.get('strategy_candidates_resolved_14d', 0)} resolved 14d)"
+        ),
         f"- Newly settled trade records: {len(settled_now - settled_last)}",
     ])
     new_flags = sorted(flags_now - flags_last)
@@ -880,7 +904,14 @@ def write_snapshot_md(path: Path, text: str) -> bool:
         return False
 
 
-def render_verdict(metrics: dict, flags: list[Flag], discovery: dict, watch: list[dict], now_utc: datetime) -> str:
+def render_verdict(
+    metrics: dict,
+    flags: list[Flag],
+    discovery: dict,
+    watch: list[dict],
+    now_utc: datetime,
+    strategy_candidates: dict | None = None,
+) -> str:
     critical = [f for f in flags if f.severity == "CRITICAL"]
     warn = [f for f in flags if f.severity == "WARN"]
     triggered = [w for w in watch if w["status"] == "TRIGGERED"]
@@ -891,6 +922,15 @@ def render_verdict(metrics: dict, flags: list[Flag], discovery: dict, watch: lis
         label = "Degraded"
     else:
         label = "Healthy"
+    candidate_phrase = ""
+    if strategy_candidates is not None:
+        candidate_phrase = (
+            f"{int(strategy_candidates.get('active', 0))} strategy candidates active "
+            f"(H {int(strategy_candidates.get('high', 0))} / "
+            f"N {int(strategy_candidates.get('notable', 0))} / "
+            f"I {int(strategy_candidates.get('info', 0))}), "
+            f"{int(strategy_candidates.get('resolved', 0))} resolved 14d, "
+        )
     return "\n".join([
         "# Glint Status",
         "",
@@ -904,6 +944,7 @@ def render_verdict(metrics: dict, flags: list[Flag], discovery: dict, watch: lis
             f"{_fmt_money(metrics['total_pnl'])} net. "
             f"{len(warn)} WARN, {len(critical)} CRITICAL, "
             f"{discovery['new']} NEW discovery findings, "
+            f"{candidate_phrase}"
             f"{len(triggered)} triggered watch-list checks, {len(manual)} manual checks."
         ),
     ])
@@ -1078,6 +1119,16 @@ def render_flags_section(flags: list[Flag], daily: DailyReport, watch: list[dict
     return "\n".join(out).rstrip()
 
 
+def render_strategy_candidates_section(now_utc: datetime) -> str:
+    today = now_utc.astimezone(helpers.ET).date()
+    body, _reason = helpers._safe_section(
+        helpers.render_strategy_candidates,
+        window_days=14,
+        today=today,
+    )
+    return "\n".join(["## 10. Strategy Candidates", "", body]).rstrip()
+
+
 def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None, persist: bool = True) -> str:
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -1085,6 +1136,13 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     metrics = collect_metrics(paths, now_utc)
     daily = latest_daily_report(paths, now_utc)
     discovery = count_discovery_findings(paths, now_utc)
+    try:
+        strategy_candidates = helpers.summarize_strategy_candidates(
+            window_days=14,
+            today=now_utc.astimezone(helpers.ET).date(),
+        )
+    except Exception:
+        strategy_candidates = {"active": 0, "high": 0, "notable": 0, "info": 0, "resolved": 0}
     anomalies = detect_anomalies(paths, metrics, now_utc)
 
     claude_text = ""
@@ -1104,12 +1162,18 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     if any(w["status"] == "TRIGGERED" for w in watch):
         flags_for_baseline.append(Flag("watchlist_triggered", "WARN", "triggered watch-list checks", None))
 
-    current_baseline = build_baseline(now_utc, metrics, discovery, flags_for_baseline)
+    current_baseline = build_baseline(
+        now_utc,
+        metrics,
+        discovery,
+        flags_for_baseline,
+        strategy_candidates,
+    )
     last = load_last_status(paths.last_status)
     calendar_entries = next_calendar_entries(paths, now_utc)
 
     sections = [
-        render_verdict(metrics, flags_for_baseline, discovery, watch, now_utc),
+        render_verdict(metrics, flags_for_baseline, discovery, watch, now_utc, strategy_candidates),
         render_diff(last, current_baseline, now_utc),
         render_health_section(daily),
         render_pnl_section(metrics, daily, now_utc),
@@ -1118,6 +1182,7 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
         render_anomalies_watchlist(anomalies, watch),
         render_calendar_section(calendar_entries),
         render_flags_section(anomalies, daily, watch),
+        render_strategy_candidates_section(now_utc),
     ]
     output = "\n\n---\n\n".join(s.rstrip() for s in sections).rstrip() + "\n"
 

@@ -19,7 +19,7 @@ import re
 import statistics
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from typing import Iterator
@@ -43,7 +43,9 @@ ET = ZoneInfo("America/New_York") if ZoneInfo else timezone.utc
 STATE_DIR = _REPO_ROOT / "bot" / "state"
 ARCHIVE_DIR = STATE_DIR / "archive"
 REPORTS_DIR = STATE_DIR / "reports"
+DISCOVERY_DIR = STATE_DIR / "discovery"
 LOG_FILE = _REPO_ROOT / "bot" / "logs" / "bot.log"
+CLAUDE_MD = _REPO_ROOT / "CLAUDE.md"
 
 PAPER_TRADES_FILE = STATE_DIR / "paper_trades.json"
 CLV_FILE = STATE_DIR / "clv.json"
@@ -79,6 +81,28 @@ HEARTBEAT_STALE_SECONDS = 120
 STATE_FILE_GROWTH_FLAG_MB = 100.0
 
 LOG_TS_RE = re.compile(r"^\[?(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})")
+DISCOVERY_FINDINGS_RE = re.compile(r"discovery_findings_(\d{4}-\d{2}-\d{2})\.jsonl$")
+WATCHLIST_KEYWORDS_RE = re.compile(
+    r"Watch-list trigger|Watch-list bar|Re-investigate when|re-evaluate when|REVERT if",
+    re.IGNORECASE,
+)
+SESSION_HEADING_RE = re.compile(r"^#{2,4}\s+[☑☐]?\s*(Session [^—\n]+)")
+
+STRATEGY_CANDIDATE_HEURISTICS = frozenset({
+    "concurrent_attack_angles",
+    "cohort_emergence",
+    "counterfactual_hotspots",
+    "threshold_proximity",
+    "outlier_pnl",
+    "settlement_vs_rationale",
+    "universe_gap",
+})
+STRATEGY_CANDIDATE_SEVERITIES = ("high", "notable", "info")
+STRATEGY_CANDIDATE_SEVERITY_RANK = {
+    "high": 0,
+    "notable": 1,
+    "info": 2,
+}
 
 
 # ───────────────────────────────────────────────────────────────── time helpers
@@ -626,6 +650,379 @@ def extract_headline_metric(text: str, label_pattern: str) -> str | None:
         if rx.search(line):
             return line.strip()
     return None
+
+
+# ───────────────────────────────────────────────────── strategy candidates
+
+def _coerce_report_date(today: date | datetime | None) -> date:
+    if today is None:
+        return datetime.now(timezone.utc).astimezone(ET).date()
+    if isinstance(today, datetime):
+        if today.tzinfo is not None:
+            return today.astimezone(ET).date()
+        return today.date()
+    return today
+
+
+def _discovery_finding_paths_for_window(today: date, window_days: int) -> list[tuple[date, Path]]:
+    window_days = max(1, int(window_days))
+    window_start = today - timedelta(days=window_days - 1)
+    candidates: list[tuple[date, Path]] = []
+    if not DISCOVERY_DIR.exists():
+        return candidates
+    for path in DISCOVERY_DIR.glob("discovery_findings_*.jsonl"):
+        m = DISCOVERY_FINDINGS_RE.search(path.name)
+        if not m:
+            continue
+        try:
+            run_date = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
+        if window_start <= run_date <= today:
+            candidates.append((run_date, path))
+    candidates.sort(key=lambda item: item[0])
+    return candidates
+
+
+def _strategy_severity_bucket(severity: object) -> str:
+    sev = str(severity or "info").strip().lower()
+    if sev in {"critical", "high"}:
+        return "high"
+    if sev == "notable":
+        return "notable"
+    return "info"
+
+
+def _one_line(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(str(value).split())
+
+
+def _md_cell(value: object) -> str:
+    return _one_line(value).replace("|", "\\|")
+
+
+def _normalize_match_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9_/.-]+", " ", _one_line(value).lower()).strip()
+
+
+def _extract_strategy_watchlist_refs() -> list[dict]:
+    try:
+        text = CLAUDE_MD.read_text()
+    except OSError:
+        return []
+
+    refs: list[dict] = []
+    lines = text.splitlines()
+    current_session = "Session: unknown"
+    session_start = 0
+    for idx, line in enumerate(lines):
+        m = SESSION_HEADING_RE.match(line)
+        if m:
+            current_session = m.group(1).strip()
+            session_start = idx
+        if not WATCHLIST_KEYWORDS_RE.search(line):
+            continue
+        if current_session == "Session: unknown":
+            continue
+
+        context_start = max(session_start, idx - 8)
+        block = [lines[j].strip() for j in range(context_start, idx + 1) if lines[j].strip()]
+        for nxt in lines[idx + 1: idx + 13]:
+            stripped = nxt.strip()
+            if not stripped:
+                break
+            if stripped.startswith("---") or stripped.startswith("### "):
+                break
+            if (
+                stripped.startswith("-")
+                or stripped.startswith("AND ")
+                or stripped.startswith("OR ")
+                or block[-1].endswith((":", "of:", "when ANY of:"))
+            ):
+                block.append(stripped)
+            else:
+                break
+        ref_text = " ".join(block)
+        refs.append({
+            "line": idx + 1,
+            "session": current_session,
+            "text": ref_text,
+            "match_text": _normalize_match_text(ref_text),
+        })
+    return refs
+
+
+def _candidate_match_terms(finding: dict) -> set[str]:
+    evidence = finding.get("evidence") if isinstance(finding.get("evidence"), dict) else {}
+    source_text = " ".join([
+        _one_line(finding.get("heuristic")),
+        _one_line(finding.get("title")),
+        _one_line(finding.get("summary")),
+        _one_line(finding.get("suggested_action")),
+        _one_line(json.dumps(evidence, sort_keys=True, default=str)),
+    ])
+    normalized = _normalize_match_text(source_text)
+    terms: set[str] = set()
+
+    for phrase in re.findall(r"\b[a-z][a-z0-9_]+/[a-z0-9_]+\b", normalized):
+        terms.add(phrase)
+
+    for left_key, right_key in (
+        ("skip_reason", "sport"),
+        ("skipped_by_gate", "sport"),
+        ("gate", "sport"),
+        ("opp_type", "sport"),
+        ("opp_type", "source"),
+    ):
+        left = _normalize_match_text(evidence.get(left_key))
+        right = _normalize_match_text(evidence.get(right_key))
+        if left and right and right != "none":
+            terms.add(f"{left}/{right}")
+            terms.add(f"{left} {right}")
+
+    for token in (
+        "edge_below_threshold",
+        "high_cap_family",
+        "low_volume",
+        "momentum_leader_min",
+        "no_leader",
+        "no_price_below_floor",
+        "no_vol_growth_first_seen",
+        "no_vol_growth_idle",
+        "non_stable_below_weather_floor",
+        "sports_consistency_arb",
+        "sports_monotonicity_arb",
+        "vig_stack_futures",
+        "vig_stack_series",
+    ):
+        if token in normalized:
+            terms.add(token)
+
+    for ticker_like in re.findall(r"\bkx[a-z0-9]+(?:game|fight|high)?\b", normalized):
+        terms.add(ticker_like)
+
+    return {term for term in terms if len(term) >= 4}
+
+
+def _watch_refs_for_finding(finding: dict, refs: list[dict]) -> list[dict]:
+    terms = _candidate_match_terms(finding)
+    if not terms:
+        return []
+    matched: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for ref in refs:
+        ref_text = ref["match_text"]
+        if not any(term in ref_text for term in terms):
+            continue
+        key = (ref["session"], ref["line"])
+        if key in seen:
+            continue
+        seen.add(key)
+        matched.append(ref)
+    return matched
+
+
+def _strategy_resolved_date(
+    fingerprint: str,
+    run_dates: list[date],
+    seen_by_date: dict[date, set[str]],
+    last_seen: date,
+    latest_date: date,
+) -> date:
+    for run_date in run_dates:
+        if run_date <= last_seen:
+            continue
+        if fingerprint not in seen_by_date.get(run_date, set()):
+            return run_date
+    return latest_date
+
+
+def collect_strategy_candidates(*, window_days: int = 14, today: date | datetime | None = None) -> dict:
+    """Collect strategy-change candidates from recent discovery finding JSONL files.
+
+    Operational discovery heuristics stay out of this surface; the returned
+    records are the seven heuristics that can plausibly change strategy.
+    """
+    today_d = _coerce_report_date(today)
+    window_days = max(1, int(window_days))
+    window_start = today_d - timedelta(days=window_days - 1)
+    dated_paths = _discovery_finding_paths_for_window(today_d, window_days)
+    run_dates = [run_date for run_date, _ in dated_paths]
+    latest_date = run_dates[-1] if run_dates else None
+
+    by_fp: dict[str, dict] = {}
+    seen_by_date: dict[date, set[str]] = defaultdict(set)
+    for run_date, path in dated_paths:
+        for rec in iter_jsonl_tolerant(path):
+            heuristic = str(rec.get("heuristic") or "").strip()
+            if heuristic not in STRATEGY_CANDIDATE_HEURISTICS:
+                continue
+            fingerprint = str(rec.get("fingerprint") or "").strip()
+            if not fingerprint:
+                continue
+            seen_by_date[run_date].add(fingerprint)
+            slot = by_fp.setdefault(fingerprint, {
+                "fingerprint": fingerprint,
+                "first_seen": run_date,
+                "last_seen": run_date,
+                "latest_finding": rec,
+                "dates_seen": set(),
+            })
+            slot["dates_seen"].add(run_date)
+            if run_date < slot["first_seen"]:
+                slot["first_seen"] = run_date
+            if run_date >= slot["last_seen"]:
+                slot["last_seen"] = run_date
+                slot["latest_finding"] = rec
+
+    refs = _extract_strategy_watchlist_refs()
+    active: list[dict] = []
+    resolved: list[dict] = []
+    latest_seen = seen_by_date.get(latest_date, set()) if latest_date is not None else set()
+    for fingerprint, slot in by_fp.items():
+        finding = slot["latest_finding"]
+        first_seen = slot["first_seen"]
+        last_seen = slot["last_seen"]
+        if latest_date is None:
+            continue
+        is_active = fingerprint in latest_seen
+        item = {
+            "fingerprint": fingerprint,
+            "heuristic": str(finding.get("heuristic") or "unknown"),
+            "severity": _strategy_severity_bucket(finding.get("severity")),
+            "source_severity": str(finding.get("severity") or "info").lower(),
+            "title": _one_line(finding.get("title")) or fingerprint,
+            "first_seen": first_seen,
+            "last_seen": last_seen,
+            "days_stable": (latest_date - first_seen).days + 1,
+            "watch_refs": _watch_refs_for_finding(finding, refs),
+            "latest_finding": finding,
+        }
+        if is_active:
+            active.append(item)
+        else:
+            item["resolved_date"] = _strategy_resolved_date(
+                fingerprint, run_dates, seen_by_date, last_seen, latest_date
+            )
+            resolved.append(item)
+
+    active.sort(key=lambda item: (
+        STRATEGY_CANDIDATE_SEVERITY_RANK[item["severity"]],
+        -int(item["days_stable"]),
+        item["heuristic"],
+        item["title"],
+        item["fingerprint"],
+    ))
+    resolved.sort(key=lambda item: (
+        -item["resolved_date"].toordinal(),
+        STRATEGY_CANDIDATE_SEVERITY_RANK[item["severity"]],
+        item["heuristic"],
+        item["title"],
+        item["fingerprint"],
+    ))
+    counts = Counter(item["severity"] for item in active)
+    return {
+        "today": today_d,
+        "window_start": window_start,
+        "window_days": window_days,
+        "latest_date": latest_date,
+        "active": active,
+        "resolved": resolved,
+        "counts": {
+            "active": len(active),
+            "high": counts.get("high", 0),
+            "notable": counts.get("notable", 0),
+            "info": counts.get("info", 0),
+            "resolved": len(resolved),
+        },
+    }
+
+
+def summarize_strategy_candidates(*, window_days: int = 14, today: date | datetime | None = None) -> dict:
+    return collect_strategy_candidates(window_days=window_days, today=today)["counts"]
+
+
+def _watch_refs_cell(refs: list[dict]) -> str:
+    if not refs:
+        return "none"
+    return "; ".join(f"{_md_cell(ref['session'])} L{ref['line']}" for ref in refs)
+
+
+def _strategy_candidate_active_row(item: dict) -> str:
+    return (
+        f"| `{_md_cell(item['heuristic'])}` | {_md_cell(item['title'])} | "
+        f"`{_md_cell(item['fingerprint'])}` | {int(item['days_stable'])}d | "
+        f"{_watch_refs_cell(item['watch_refs'])} |"
+    )
+
+
+def _strategy_candidate_resolved_row(item: dict) -> str:
+    return (
+        f"| {item['resolved_date'].isoformat()} | {item['last_seen'].isoformat()} | "
+        f"`{_md_cell(item['heuristic'])}` | {_md_cell(item['title'])} | "
+        f"`{_md_cell(item['fingerprint'])}` | {int(item['days_stable'])}d | "
+        f"{_watch_refs_cell(item['watch_refs'])} |"
+    )
+
+
+def render_strategy_candidates(*, window_days: int = 14, today: date | None = None) -> str:
+    """Render active/resolved strategy-change candidates from discovery findings."""
+    data = collect_strategy_candidates(window_days=window_days, today=today)
+    latest_date = data["latest_date"]
+    if latest_date is None:
+        return (
+            f"Window: `{data['window_start'].isoformat()}` -> `{data['today'].isoformat()}` "
+            f"({data['window_days']}d).\n\n"
+            "_No discovery_findings files found in this window._"
+        )
+
+    counts = data["counts"]
+    out = [
+        (
+            f"Latest discovery run: `{latest_date.isoformat()}`. "
+            f"Window: `{data['window_start'].isoformat()}` -> `{data['today'].isoformat()}` "
+            f"({data['window_days']}d)."
+        ),
+        (
+            f"Candidates: **{counts['active']} active** "
+            f"(H {counts['high']} / N {counts['notable']} / I {counts['info']}), "
+            f"**{counts['resolved']} resolved** in last {data['window_days']}d."
+        ),
+        "",
+        "### ACTIVE",
+        "",
+    ]
+
+    by_severity: dict[str, list[dict]] = {
+        severity: [item for item in data["active"] if item["severity"] == severity]
+        for severity in STRATEGY_CANDIDATE_SEVERITIES
+    }
+    for severity in STRATEGY_CANDIDATE_SEVERITIES:
+        out.append(f"#### {severity.upper()}")
+        out.append("")
+        rows = by_severity[severity]
+        if not rows:
+            out.append("_None._")
+            out.append("")
+            continue
+        out.append("| Heuristic | Title | Fingerprint | Stable | Watch-list |")
+        out.append("|---|---|---|---:|---|")
+        for item in rows:
+            out.append(_strategy_candidate_active_row(item))
+        out.append("")
+
+    out.append(f"### RESOLVED (last {data['window_days']}d)")
+    out.append("")
+    if not data["resolved"]:
+        out.append("_None._")
+    else:
+        out.append("| Resolved | Last seen | Heuristic | Title | Fingerprint | Stable | Watch-list |")
+        out.append("|---|---|---|---|---|---:|---|")
+        for item in data["resolved"]:
+            out.append(_strategy_candidate_resolved_row(item))
+    return "\n".join(out).rstrip()
 
 
 # ────────────────────────────────────────────────────────────── shared sections

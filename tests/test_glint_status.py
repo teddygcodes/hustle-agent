@@ -290,3 +290,54 @@ def test_count_discovery_findings_new_count_matches_fingerprints(tmp_path: Path)
     body = glint.render_discovery_section(discovery)
     assert "2 NEW discovery findings" in verdict
     assert "**2 NEW**" in body
+
+
+def test_verdict_includes_strategy_candidate_counts():
+    now = datetime(2026, 5, 7, 16, tzinfo=timezone.utc)
+    metrics = _minimal_metrics(now)
+    discovery = {"new": 0}
+    strategy_candidates = {"active": 4, "high": 1, "notable": 2, "info": 1, "resolved": 3}
+
+    verdict = glint.render_verdict(metrics, [], discovery, [], now, strategy_candidates)
+
+    assert "4 strategy candidates active (H 1 / N 2 / I 1), 3 resolved 14d" in verdict
+
+
+def test_baseline_and_diff_track_strategy_candidate_counts():
+    now = datetime(2026, 5, 7, 16, tzinfo=timezone.utc)
+    metrics = _minimal_metrics(now)
+    discovery = {"new": 0}
+    current = glint.build_baseline(
+        now,
+        metrics,
+        discovery,
+        [],
+        {"active": 6, "high": 2, "notable": 3, "info": 1, "resolved": 4},
+    )
+    last = {
+        "ts": "2026-05-07T15:00:00+00:00",
+        "total_pnl": 0,
+        "settled_count": 0,
+        "vig_stack_pnl": 0,
+        "live_momentum_pnl": 0,
+        "open_positions_count": 0,
+        "exposure": 0,
+        "discovery_findings_new": 0,
+        "strategy_candidates_active": 5,
+        "flag_ids": [],
+        "open_tickers": [],
+        "settled_trade_ids": [],
+    }
+
+    md = glint.render_diff(last, current, now)
+
+    assert current["strategy_candidates_active"] == 6
+    assert "Strategy candidates active: 5 -> 6 (+1; H 2 / N 3 / I 1, 4 resolved 14d)" in md
+
+
+def test_glint_strategy_candidates_section_uses_shared_renderer(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(glint.helpers, "render_strategy_candidates", lambda **_kwargs: "SHARED BODY")
+
+    md = glint.render_strategy_candidates_section(datetime(2026, 5, 7, 16, tzinfo=timezone.utc))
+
+    assert md == "## 10. Strategy Candidates\n\nSHARED BODY"

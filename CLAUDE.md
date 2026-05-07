@@ -4087,6 +4087,31 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 
 ---
 
+### ☑ Session 66 — Strategy Candidates safety net in daily_report + glint_status (May 7)
+
+**Trigger.** Discovery agent was surfacing strategy-change candidates daily, but the only first-class status surface was `discovery_report_*.md` / `discovery_findings_*.jsonl`; `glint_status.py` summarized NEW counts and daily reports had no candidate section. Tyler's constraint: "make sure we don't lose anything and we know to always check it."
+
+**What shipped.** [tools/_report_helpers.py](hustle-agent/tools/_report_helpers.py) now has `render_strategy_candidates(window_days=14, today=None)` plus collection/count helpers. It scans recent `bot/state/discovery/discovery_findings_*.jsonl`, includes the seven strategy-relevant heuristics (`concurrent_attack_angles`, `cohort_emergence`, `counterfactual_hotspots`, `threshold_proximity`, `outlier_pnl`, `settlement_vs_rationale`, `universe_gap`), excludes the three operational heuristics, tracks first/last/latest severity per fingerprint, marks absent-from-latest fingerprints as resolved, computes inclusive days-stable, sorts active HIGH/NOTABLE/INFO, and annotates matching CLAUDE watch-list references.
+
+**Report integration.** [tools/glint_status.py](hustle-agent/tools/glint_status.py) now renders `## 10. Strategy Candidates`, includes active/resolved candidate counts in the verdict, and persists candidate count fields into `bot/state/glint_status_last.json` for diff tracking. [tools/daily_report.py](hustle-agent/tools/daily_report.py) now renders `# 11. Strategy Candidates` through `_safe_section`; the section body is byte-identical to Glint's for the same 14d window.
+
+**Today's live output.** `python3 tools/glint_status.py` reports **21 active** candidates (H 3 / N 5 / I 13) and **29 resolved** over 14d. HIGH active: `no_vol_growth_first_seen/nhl_game` plus two `settlement_vs_rationale` high-cap tail-loss findings. `python3 tools/daily_report.py --date 2026-05-07` renders the same body under the daily report.
+
+**Test ladder (11 new tests, baseline 1461 → 1472):**
+- `tests/test_report_helpers.py`: seven-heuristic filter, severity sort, inclusive/gap-tolerant days_stable, resolved detection, no-truncation over 10+ active rows, watch-list annotation.
+- `tests/test_glint_status.py`: verdict candidate counts, baseline/diff candidate fields, §10 shared-renderer wrapper.
+- `tests/test_daily_report.py`: strategy section `_safe_section` failure path and daily/glint body parity.
+
+**Verification.**
+- `python3 -m pytest tests/test_report_helpers.py tests/test_glint_status.py tests/test_daily_report.py --timeout=15 --tb=short -q` → 55 passed.
+- `python3 tools/glint_status.py | grep -A 30 "Strategy Candidates"` → §10 renders today's actual findings in severity order.
+- `python3 tools/daily_report.py --date 2026-05-07` → writes `bot/state/reports/daily/daily_report_2026-05-07.md` with matching Strategy Candidates body.
+- `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1472 passed** (1461 baseline + 11 new), 0 failures.
+
+**README sync.** Updated in-session.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
@@ -4282,11 +4307,12 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
-1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint **wrapper** line (the python child doesn't appear here; its cmdline has no repo path). Wrapper-presence = bot alive (launchd KeepAlive guarantees child respawn). Path-rooted filter is critical: bare `bot.main` grep matches other fleet bots like Bob (see Battle Scar #14). For the python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
-2. `tail -30 bot/logs/bot.log` — verify ticks are firing, no repeated exceptions
-3. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'Active: {len(active)} positions, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"` — verify exposure is under balance
-4. Check `strategy_audit.json → settlement_log` for any settlements since last check
-5. If exposure is maxed out (blocking new trades), note which bets are about to settle and when — that's when capital frees up
+1. `python3 tools/glint_status.py` — check §10 Strategy Candidates: any HIGH severity? Any new since yesterday's diff?
+2. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint **wrapper** line (the python child doesn't appear here; its cmdline has no repo path). Wrapper-presence = bot alive (launchd KeepAlive guarantees child respawn). Path-rooted filter is critical: bare `bot.main` grep matches other fleet bots like Bob (see Battle Scar #14). For the python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
+3. `tail -30 bot/logs/bot.log` — verify ticks are firing, no repeated exceptions
+4. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'Active: {len(active)} positions, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"` — verify exposure is under balance
+5. Check `strategy_audit.json → settlement_log` for any settlements since last check
+6. If exposure is maxed out (blocking new trades), note which bets are about to settle and when — that's when capital frees up
 
 Answer in terms of: single process ✓/✗, exposure vs balance, what's settling soon, any repeated blocked-trade warnings. Don't invent performance numbers — pull them from `trade_history.json` and `strategy_audit.json`.
 

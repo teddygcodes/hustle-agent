@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Daily report — comprehensive markdown report covering 24h of bot state.
 
-Generates ``bot/state/reports/daily/daily_report_YYYY-MM-DD.md`` covering 10
+Generates ``bot/state/reports/daily/daily_report_YYYY-MM-DD.md`` covering 11
 sections: health pulse, scanner activity, decision audit (cohort), trade
 activity, CF coverage, live momentum events (journal), DQS + regime
-distribution, cadence health, errors, state file growth.
+distribution, cadence health, errors, state file growth, strategy candidates.
 
 Discipline (Session 35):
     - First I/O writes the header so a partial report survives a mid-run crash.
@@ -32,11 +32,19 @@ if str(_REPO_ROOT) not in sys.path:
 from tools import _report_helpers as helpers  # noqa: E402
 
 
+STRATEGY_CANDIDATES_SECTION_TITLE = "11. Strategy Candidates"
+
+
 def _parse_date(s: str) -> datetime:
     try:
         return datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=helpers.ET)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(f"invalid --date {s!r}: expected YYYY-MM-DD") from exc
+
+
+def _render_strategy_candidates_section(report_date: datetime) -> str:
+    body = helpers.render_strategy_candidates(window_days=14, today=report_date.date())
+    return f"# {STRATEGY_CANDIDATES_SECTION_TITLE}\n\n{body}"
 
 
 def build_report(
@@ -69,7 +77,14 @@ def build_report(
     )
 
     skipped = helpers.render_shared_sections(out_path, now_utc, window_start, window_end, regime_by)
-    helpers.append_footer(out_path, now_utc, skipped=skipped, total_sections=len(helpers.SHARED_SECTIONS))
+    body, reason = helpers._safe_section(_render_strategy_candidates_section, report_date)
+    if reason is None:
+        helpers.append_section(out_path, body)
+    else:
+        helpers.append_section(out_path, f"# {STRATEGY_CANDIDATES_SECTION_TITLE}\n\n{body}")
+        skipped.append(f"{STRATEGY_CANDIDATES_SECTION_TITLE} ({reason})")
+    total_sections = len(helpers.SHARED_SECTIONS) + 1
+    helpers.append_footer(out_path, now_utc, skipped=skipped, total_sections=total_sections)
     return out_path
 
 
