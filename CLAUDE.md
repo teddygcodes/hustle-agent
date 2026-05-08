@@ -5008,6 +5008,79 @@ Until one of those (or one of Session 74's three) fires, all `no_vol_growth_firs
 
 ---
 
+### ☑ Session 86 — live_momentum CF per-day dedup at emission (May 8, Outcome A, scoped clv.py fix + 3 tests)
+
+**Trigger.** Session 85's "Observation (in-scope; not actioned this session)" surfaced CF over-emission within scan windows: `KXNHLGAME-26APR27PHIPIT-PIT` emits 2× 4 seconds apart, `KXNHLGAME-26MAY03MINCOL-COL` emits 5×, six other tickers emit 2-3× — collapsing 33 raw settled CFs to 17 unique tickers for the `no_vol_growth_first_seen/nhl_game` candidate. Session 84's promotion bar uses raw N (`N≥30 settled CFs` for `counterfactual_hotspots`); under inflated raw N, the bar's effective rigor is ~half its stated value. Session 85 watch-list trigger #2 ("CF de-duplication is fixed AND unique-ticker count still ≥30 in 7d") makes this the highest-stakes follow-up before any future promotion can be honest.
+
+**Phase 0 — verify the premise (three measurements per Sessions 80-85 discipline).**
+
+**Phase 0.1 — re-verified the 33→17 ratio with timing detail.** Direct query on [bot/state/clv.json](bot/state/clv.json) (`status=counterfactual_settled`, `skipped_by_gate=no_vol_growth_first_seen`, `sport=nhl`): N=33 confirmed, 17 unique tickers, 9 tickers with duplicates (1 with 5 emits, 4 with 3 emits, 4 with 2 emits). Inter-emit `recorded_at` deltas: sub-second (KXNHLGAME-26APR29MTLTB-MTL at 96 ms) to multi-day (KXNHLGAME-26MAY03MINCOL-COL spanning May 3 02:39 → May 4 01:22). Sub-scan dupes (deltas <120s) ≈ 3 of 16 over-emits; cross-scan dupes (deltas >120s, after `_prev_scan_volumes` cache reset per Session 74) ≈ 13. Cross-heuristic check on [bot/state/discovery/discovery_findings_*.jsonl](bot/state/discovery/) (the discovery agent's outputs, not CF storage) found a separate `outlier_pnl` 4× pattern that's heuristic-specific to outlier dominance tracking — different layer, out of scope here.
+
+**Phase 0.2 — located the bug.** [bot/clv.py:277-368](bot/clv.py:277) `record_live_momentum_counterfactual_skip` constructs `trade_id = f"CF-LM-{ts.strftime('%Y%m%dT%H%M%SZ')}-{ticker}"` (second precision) and dedups via exact `trade_id` match (clv.py:324-326). Caller [bot/live_watcher.py:141-178](bot/live_watcher.py:141) passes `scan_event_ts=now` where `now=datetime.now(timezone.utc)` is fresh per call, not a scan-root timestamp. Two calls 4 seconds apart format to different seconds → different `trade_id`s → both rows land. The vig_stack equivalent [bot/clv.py:110-186](bot/clv.py:110) `record_counterfactual_skip` is correct — it uses `f"CF-{scan_id}-{ticker}"` where `scan_id` comes from the caller (vig_stack_series.py:762), idempotent on (scan_id, ticker). Session 73's `pair_key` infrastructure ([tools/strategy_lab/](tools/strategy_lab/)) is a different layer and not extensible to live emission.
+
+**Phase 0.3 — quantified the bar's deduped impact** (read-only against current clv.json, NHL candidate):
+
+| Dedup key | N | Bar (N≥30) |
+|---|---|---|
+| Raw rows (current state) | 33 | passes |
+| `(ticker, 120s scan-bucket)` | 31 | passes barely |
+| **`(ticker, day)` — chosen** | **19** | **fails** |
+| `(ticker)` forever | 17 | fails |
+
+Only 2 tickers (BOSBUF, MINCOL) emit across multiple UTC days — both span midnight US-evening NHL games, legitimately distinct trading windows. Day-precision preserves them as separate signals.
+
+**Decision: Outcome A — fix at emission with `(ticker, opp_type, sport, skip_reason, day)` semantic dedup.** Day-granularity matches Kalshi's per-game ticker lifecycle and aligns with Session 85's "17 unique tickers" framing. Per-scan-bucket would have preserved bar promotability today (NHL stays at N=31) but doesn't match user intent ("the bar is currently sandbagging at 2x"). Forever dedup is too aggressive (collapses legitimate cross-day re-emits). Per-day is the natural Kalshi-market grain.
+
+**What shipped (3 commits + push to main).**
+
+1. **[bot/clv.py:317-340](bot/clv.py:317)** — replaced second-precision `trade_id` dedup with semantic `(ticker, opp_type, sport, skip_reason, day)` check. Compares against `scan_event_ts` (with `recorded_at` fallback for robustness) — mirrors original trade_id semantics which were also scan_event_ts-based. The new `trade_id` format `CF-LM-{YYYYMMDD}-{ticker}` is also day-precision so future direct-trade_id consumers see the dedup intent at a glance. Inline comment cites Session 86 + Session 85 quantification + the 30-day historical-inflation transition window.
+
+2. **[tests/test_clv.py](tests/test_clv.py)** — 3 new tests (each fails without the clv.py fix):
+   - `test_per_day_dedup_same_ticker_same_skip_reason`: two 4-second-apart emits collapse to 1 row.
+   - `test_per_day_dedup_cross_day_same_ticker_stays_distinct`: same ticker on May 8 + May 9 = 2 rows (BOSBUF/MINCOL pattern preserved).
+   - `test_per_day_dedup_legacy_second_precision_blocks_new_day_precision`: hand-rolled pre-Session-86 row with second-precision `trade_id` blocks a new same-day emit (transition-window correctness).
+
+   Plus 1 assertion update at line 720 (`CF-LM-20260427T183021Z-...` → `CF-LM-20260427-...`) and 1 stale-comment update at line 728 (`(scan_event_ts, ticker)` → `(ticker, sport, skip_reason, day) (Session 86 dedup semantic)`).
+
+3. **No changes to:** `tools/discovery_agent/heuristics/counterfactual_hotspots.py` (still reads raw row count from clv.json); [tools/glint_status.py](tools/glint_status.py) §10 renderer; Session 84 promotion bar protocol; `bot/live_watcher.py` (caller stays the same — only its dependency changes); existing `bot/state/clv.json` rows (no backfill).
+
+**Bar interpretation transition (operationally important).** Going forward, new `record_live_momentum_counterfactual_skip` calls dedup correctly per-day. Historical second-precision rows persist for 30 days (the `counterfactual_hotspots` lookback window). NHL candidate's raw N drifts from 33 toward ~19 as historical rows age out (~ 2026-06-08). The bar threshold (N≥30) does not change in this ship — Session 87 (or whichever session next promotes the candidate) decides whether to re-tune the threshold, add read-time dedup in the discovery heuristic, or backfill clv.json. Per Session 86 spec: **one concern per ship — emission OR bar, not both.**
+
+**Verification.**
+1. ☑ TDD: per-day dedup test fails before fix (`assert 2 == 1`), passes after (`1 row`).
+2. ☑ Cross-day distinctness test passes (2 rows preserved).
+3. ☑ Legacy mixed-format transition test passes (1 row; semantic check catches the legacy `recorded_at` day match via `scan_event_ts` fallback).
+4. ☑ `tests/test_clv.py` — 46/46 pass (43 baseline + 3 new). Existing `test_idempotent_on_repeat_call` continues to pass: identical `_lm_kwargs()` repeated 3× collapses correctly under the new (ticker, sport, skip_reason, day) check.
+5. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1524 passed in 31.95s** (Session 83/84/85 baseline 1521 + 3 new). 0 failures, 0 skips per Session 70 discipline.
+6. ☑ Battle Scar #15 retired post-Session-71 ([CLAUDE.md:448](CLAUDE.md:448)) — restart safe regardless of cooldown state.
+
+**Watch-list trigger (Session 86 — extends Session 85 trigger #2).** When the NHL candidate is next reconsidered (~ 2026-06-08 after historical rows age out), measure raw N over the most recent 30d on `bot/state/clv.json`. If raw N ≥ 30 with deduped emissions, the bar passes legitimately; if <30, the candidate fails the bar honestly. Either way, do NOT bundle "re-tune bar threshold" with "ship dedup" in the same session. Three follow-up options for the bar interpretation: (a) re-tune `counterfactual_hotspots` N threshold (e.g., from N≥30 to N≥15); (b) add read-time dedup at [tools/discovery_agent/heuristics/counterfactual_hotspots.py:163-168](tools/discovery_agent/heuristics/counterfactual_hotspots.py:163); (c) wait for natural convergence over 30 days. Pick one per ship.
+
+**What did NOT change.**
+- `tools/discovery_agent/`, `tools/glint_status.py` — untouched (out of scope; Session 87 territory).
+- `bot/state/clv.json` — no backfill of the 33 historical NHL rows; they persist for ~30 days then age out of the heuristic's lookback.
+- Session 84 promotion bar — threshold N≥30 unchanged.
+- `bot/live_watcher.py` caller — same call signature; only the imported `record_live_momentum_counterfactual_skip` behavior changes.
+- `record_counterfactual_skip` (vig_stack equivalent) — already correct, untouched.
+- Session 73 strategy_lab `pair_key` infrastructure — different layer, not extensible.
+- `live_momentum` kill OR deep-dive (Tyler explicitly deferred both per spec).
+- §10 renderer text — no "(N unique tickers)" annotation added; that's a Session 87 read-time call.
+
+**Out of scope (held).**
+- Bar threshold re-tune / read-time dedup / clv.json backfill — Session 87 decisions.
+- Cross-scan cycle-delay re-emissions per se — Session 74 framed these as intentional design; per-day dedup addresses them indirectly without touching the cycle-delay code itself.
+- `bot_state.total_pnl` Session 83 cleanup — independent of this restart; the next nightly handles it regardless.
+- Telegram throttle (Battle Scar #15 retired post-Session-71; restart is safe).
+- Test changes that match degraded behavior. Tests lock contracts.
+
+**Operating Posture observation.** Phase 0 caught it again — three measurements ran in parallel verified the premise (33→17 confirmed at sub-second precision), located the actual bug surface (clv.py:321 second-precision trade_id, NOT the discovery agent or the bar), and quantified the bar impact (33→19 under day-dedup, NHL candidate flips from pass to fail). Sessions 79-85's "verify before scope" discipline applies here too: had Session 86 trusted the user's "4-second-apart" framing without re-measurement, it would have missed the sub-second cases (96 ms for MTLTB) and the cross-day legitimate re-emits (BOSBUF, MINCOL). Per Sessions 73 + 83 precedent: **fix the smallest surface that addresses the bug**, document the operational impact, defer adjacent decisions to focused future sessions. This is also the first Outcome A ship to follow Session 85's explicit watch-list trigger architecture (Session 85's trigger #2 → Session 86's fix → Session 87's bar-interpretation decision).
+
+**Cross-references.** Session 73 ☑ block ([CLAUDE.md:4441](CLAUDE.md:4441)) — different layer, similar shape (stateful re-emission inflating per-emit Σ); not directly extensible. Session 84 ☑ block ([CLAUDE.md:4900](CLAUDE.md:4900)) — promotion bar that this fix flips for the NHL candidate. Session 85 ☑ block ([CLAUDE.md:4953](CLAUDE.md:4953)) — original CF over-emission observation + watch-list trigger #2 satisfied by this ship.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
