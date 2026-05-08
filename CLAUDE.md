@@ -4660,42 +4660,6 @@ Plus a 12-line evidence comment explaining the signal-handler mechanism + the "r
 
 ---
 
-### ☑ Session 78 — `heartbeat_stale` threshold split: 90s WARN / 180s CRITICAL (May 7, surgical 12-line fix)
-
-**Trigger.** Tyler's "how is it critical but a false alarm?????" pushback on the prior glint_status snapshot caught a real bug. The snapshot at 23:29 ET flagged `heartbeat_stale` CRITICAL while bot was demonstrably healthy (verified within 2 minutes: heartbeat age 28s, scans firing, watchers ticking, single-PID under launchd). Calling it a "false alarm" was hand-waving — if the tool flags CRITICAL, it should be CRITICAL.
-
-**Phase 0 root cause.** [tools/glint_status.py:550](tools/glint_status.py:550) flagged `heartbeat_stale` CRITICAL at any age > 90s. The bot's `_heartbeat_loop` ([bot/main.py:1108](bot/main.py:1108)) fires every 30s. **90s is only 3× the cycle.** Normal asyncio event-loop jitter (other tasks getting CPU during a heartbeat iteration) routinely pushes a single iteration's age past 90s, then self-recovers within the next 30s cycle. The 90s threshold is too aggressive — it flags healthy operation as CRITICAL when one heartbeat fires late.
-
-The threshold value comes from Battle Scar #6 (Session 7) which expected ≤60s worst-case stale gap, but the actual worst case under jitter is closer to 90-100s for a single missed cycle. The threshold has no margin.
-
-**Surgical fix.** Split heartbeat_stale into WARN at 90s (one missed cycle, watch) and CRITICAL at 180s (≥5× cycle = sustained gap, real wedge per Battle Scar #6 failure signatures). 12 LOC + 12-line evidence comment in [tools/glint_status.py:545-571](tools/glint_status.py:545).
-
-```python
-if age_s > 180:
-    flags.append(Flag("heartbeat_stale", "CRITICAL", ...))
-elif age_s > 90:
-    flags.append(Flag("heartbeat_stale", "WARN", ...))
-```
-
-The Battle Scar #6 failure signatures (heartbeat task wedged, event loop blocked) produce SUSTAINED stale heartbeats, not single-cycle blips — those still hit the 180s CRITICAL bar correctly.
-
-**Verification.** Live `python3 tools/glint_status.py` post-fix: verdict now reads "Degraded" with **0 CRITICAL** flags (was 1 CRITICAL with the spurious heartbeat_stale). Bot's actual heartbeat age 28s — well under both new thresholds, so heartbeat_stale doesn't appear at all.
-
-**7 new parametrized tests** in [tests/test_glint_status.py](tests/test_glint_status.py): age 10s/60s/89s no flag; 95s/150s WARN; 181s/600s CRITICAL. Locks the threshold split as a regression contract.
-
-**Test baseline:** 1519 passed (Session 77) + 7 new = **1526 passed / 0 failed / 0 skipped.**
-
-**Out of scope (held).**
-- §3 health pulse stale-cache issue — separate bug, already on the queue ("future glint_status refinement candidate"). §3 reads from cached daily_report.md (12.2h ago) and surfaces stale "lock mtime 179s stale 🚨" as if current. That contributed to the misleading display but is a different code path (read-cached-md vs live-flag-check). Defer to a separate session.
-- Tuning the heartbeat-loop cycle itself — 30s is fine; the bug was in the threshold, not the cycle.
-- Battle Scar #6 update — failure signatures still apply; only the operator-facing severity classification changed.
-
-**No bot restart needed.** glint_status.py is read-only and not imported by `bot/main.py`. Fix takes effect on the next snapshot run.
-
-**README sync.** Committed separately per push discipline.
-
----
-
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
