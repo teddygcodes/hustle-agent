@@ -130,6 +130,54 @@ def test_heartbeat_loop_swallows_state_io_errors(tmp_path, monkeypatch):
     assert cycles["n"] == 2
 
 
+def test_heartbeat_loop_reaffirms_running_true_each_cycle(tmp_path, monkeypatch):
+    """Session 77: heartbeat loop sets running=True every iteration, even
+    when the loaded state has running=False. Prevents the signal-handler
+    bug at async_main:1510-1513 from leaving stale running=False on disk
+    while the bot is genuinely alive (heartbeat firing).
+
+    Regression mechanism: SIGTERM/SIGINT spawns bot.stop() as a parallel
+    asyncio task without cancelling start()'s gather(). stop() persists
+    running=False but start()'s loops keep running. Pre-Session-77 the
+    disk state diverged from runtime forever; post-Session-77 the
+    heartbeat loop self-corrects within 30s."""
+    from bot import main as botmain
+
+    monkeypatch.setattr(botmain, "LOCK_FILE", tmp_path / "bot.lock")
+
+    saved_states: list[dict] = []
+
+    # Simulate: prior stop() persisted running=False; bot is still alive.
+    def fake_load():
+        return {"running": False, "last_heartbeat": "old"}
+
+    def fake_save(state):
+        saved_states.append(dict(state))
+
+    monkeypatch.setattr(botmain, "_load_bot_state", fake_load)
+    monkeypatch.setattr(botmain, "_save_bot_state", fake_save)
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+
+    cycles = {"n": 0}
+
+    async def fake_sleep(_secs):
+        cycles["n"] += 1
+        if cycles["n"] >= 3:
+            bot._running = False
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+    asyncio.run(bot._heartbeat_loop())
+
+    assert len(saved_states) == 3, f"expected 3 saves, got {len(saved_states)}"
+    for i, state in enumerate(saved_states):
+        assert state.get("running") is True, (
+            f"iteration {i}: heartbeat must set running=True (got {state.get('running')!r}); "
+            "without this, signal-handler-spawned stop() leaves disk stale"
+        )
+
+
 def test_position_check_loop_calls_update_positions_each_cycle(monkeypatch):
     """Session 17: _position_check_loop calls update_positions(called_from=
     '_position_check_loop') once per 30s cycle, independent of scan_interval.

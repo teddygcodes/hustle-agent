@@ -1113,6 +1113,17 @@ class GlintBot:
             try:
                 state = _load_bot_state()
                 state["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+                # Session 77: re-affirm running=True on every heartbeat. The
+                # signal-handler pattern at async_main:1510-1513 spawns
+                # `bot.stop()` as a parallel task on SIGTERM/SIGINT without
+                # cancelling start(). When stop() runs but start()'s gather()
+                # keeps going, running=False persists on disk while the bot
+                # is alive. Heartbeat-driven re-affirmation makes
+                # running=True the invariant "heartbeat loop is alive",
+                # which IS the right semantic — when the process truly
+                # terminates, the heartbeat loop exits and the last-written
+                # state from stop() sticks. Self-corrects within 30s.
+                state["running"] = True
                 _save_bot_state(state)
             except Exception:
                 logger.warning("heartbeat bot_state update failed", exc_info=True)

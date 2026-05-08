@@ -4601,6 +4601,65 @@ Until one of those fires, future `outlier_pnl` references to PAPER-DDF25C1E shou
 
 ---
 
+### ☑ Session 77 — `bot_state.json:running` self-correcting heartbeat fix (May 7, surgical 3-line fix)
+
+**Trigger.** Pre-bedtime verification surfaced `bot_state.json:running = false` while the bot was genuinely alive (heartbeat 13s old, scans incrementing, watchers ticking every 10s, single-PID under launchd). State on disk diverged from runtime reality. Tyler: "no lets fix it.. i dont want to leave the bot with an issue."
+
+**Phase 0 root cause.** `bot/main.py` writes to `state["running"]` at exactly 3 sites:
+- Line 332: `start()` sets True (verified: `started_at: 2026-05-08T00:29:43Z` matches the Session 71 restart, so line 332 DID execute)
+- Line 436: `stop()` sets False
+- Line 301: read-only check on prior-instance staleness
+
+Log forensic showed two "Bot stopped" events: 20:29:43 (graceful old-bot exit during Session 71 ship) AND **20:41:55** (mysterious second stop, same PID, no subsequent "Starting..." message). Yet bot is alive 2+ hours later.
+
+**The signal-handler bug at [bot/main.py:1510-1513](bot/main.py:1510):**
+```python
+for sig in (signal.SIGINT, signal.SIGTERM):
+    loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+```
+
+SIGTERM/SIGINT spawns `bot.stop()` as a **parallel asyncio task without cancelling start()'s gather()**. stop() runs concurrently with the main loops:
+- Persists `running=False` to disk (line 436)
+- Tears down watchers + notifier
+- Logs "Bot stopped"
+
+But `start()`'s `await asyncio.gather(*tasks)` doesn't get cancelled, so the main loops + heartbeat loop keep ticking. The python process never exits. State on disk diverges from runtime reality forever (no path resets running=True after start()'s line 332).
+
+**Surgical fix: heartbeat loop re-affirms `running=True` every 30s.** Three new lines in [bot/main.py:_heartbeat_loop](bot/main.py:1108-1119):
+
+```python
+state = _load_bot_state()
+state["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+state["running"] = True  # ← Session 77 surgical fix
+_save_bot_state(state)
+```
+
+Plus a 12-line evidence comment explaining the signal-handler mechanism + the "running=True iff heartbeat loop is alive" semantic. The semantic is correct: when the process truly terminates, the heartbeat loop's `while self._running` check exits, the loop stops writing, and the last running=False from stop() sticks. When stop() runs spuriously (signal-handler path), heartbeat self-corrects within 30s.
+
+**Why this is the right fix vs deeper signal-handler refactor.** Properly fixing the signal handler (cancel gather() instead of spawning parallel stop()) is a bigger asyncio architectural change touching async lifecycle semantics. The heartbeat-driven re-affirmation closes the symptom (state inconsistency) at the cheapest layer: 3 LOC in the loop that already loads/saves state every iteration. If the deeper signal-handler bug ever needs fixing (e.g., for graceful shutdown semantics), Session 78+ can address it without touching this code.
+
+**What did NOT change.**
+- Signal handler at [async_main:1510-1513](bot/main.py:1510) — untouched. The bug exists; the heartbeat fix self-corrects its symptom.
+- `start()` lines 332-334 — untouched. Initial running=True still set at startup.
+- `stop()` lines 401-442 — untouched. Still sets running=False on graceful shutdown; heartbeat loop's `while self._running` exit prevents the next iteration from fighting it.
+- Other loops (`_main_loop`, `_live_scan_loop`, `_position_check_loop`, `_crypto_scan_loop`) — untouched. Heartbeat is the canonical liveness signal; other loops don't need to write running.
+- All other state fields — untouched. The heartbeat load-modify-save pattern preserves everything else.
+- Tests other than the new regression — untouched.
+
+**Test ladder.** 1 new regression test in [tests/test_main.py:test_heartbeat_loop_reaffirms_running_true_each_cycle](tests/test_main.py): synthetic `_load_bot_state` returns `running=False` (simulating prior spurious stop()), runs heartbeat for 3 cycles, asserts every saved state has `running=True`. Documents the signal-handler regression mechanism in the docstring so future-me reads it instead of re-discovering it.
+
+**Verification.**
+1. ☑ Targeted: `python3 -m pytest tests/test_main.py -v -k "heartbeat"` → **5/5 pass** (4 pre-existing + 1 new). 0.16s.
+2. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1519 passed** (Session 76 baseline 1518 + 1 new). 0 failures, 0 skips.
+3. ☑ `git diff` shows exactly: 3 LOC + 12 LOC comment in `bot/main.py`; new test in `tests/test_main.py`; CLAUDE.md + README updates.
+4. ☑ Bot restart deployed the fix — Session 71's persisted-cooldown init makes restarts safe even during Telegram cool-down (cool-down clears 03:12 UTC; current 22:56 ET). Path-rooted PID check per Battle Scar #14: single wrapper + child after restart. Within 30s post-restart, `bot_state.json:running` flipped True; subsequent heartbeats preserve it.
+
+**Operating Posture observation.** This is the SECOND surgical bug investigation triggered by `glint_status.py` data — the snapshot showed `running=False` while bot was clearly alive. Mirror of Session 60 / 62 / 63 pattern: snapshot tool surfaces state divergence → Phase-0 forensic → minimal surgical fix. The deeper signal-handler asyncio-cancellation issue remains as a Session 78+ candidate; Session 77 closes the visible symptom cheaply and makes the disk state self-correcting going forward.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
