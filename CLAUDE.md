@@ -4484,6 +4484,40 @@ Until at least #1 ships, naive cross-market correlation is unactionable. #2 is t
 
 ---
 
+### ☑ Session 74 — `no_vol_growth_first_seen/nhl_game` Outcome C HOLD (May 8, doc-only, clean §10 HIGH)
+
+**Trigger.** Session 66 §10 surfaced the 7d-stable HIGH `counterfactual_hotspots: no_vol_growth_first_seen/nhl_game` finding: **33 settled CFs, mean CLV +20.91¢, 90.9% +CLV**, survivorship PASS (`n_no=3`, `n_yes=30`). Session 45 had already ruled out the same gate globally after the atp / atp_challenger / nhl_game discovery-agent run, but the larger NHL-game sub-cohort had not been formally written down yet.
+
+**Phase 0 verification.**
+1. **Gate-flow still disqualified.** [bot/live_watcher.py:3129-3133](bot/live_watcher.py:3129) remains `prev_vol = _prev_scan_volumes.get(ticker, 0)` followed by `if prev_vol == 0`. The branch is still a binary first-seen cycle-delay in the running process, not a tunable threshold. No `bot/config.py` constant drives it.
+2. **The NHL-game cohort is real.** Canonical-schema query over `bot/state/clv.json` (`status == counterfactual_settled`, `skipped_by_gate == no_vol_growth_first_seen`, `market_result == 'no'/'yes'`) returns `n=33`, `n_no=3`, `n_yes=30`, `mean=+20.91c`, `+CLV=90.9%`. Survivorship passes under the Session 47 ladder.
+
+**Decision: Outcome C (HOLD, doc-only).** Same gate, same lever, same structural disqualification as Session 45's atp_challenger ruling. The per-cohort signal is real, but the lever does not exist: no threshold can be relaxed 10-20%, and a first-sight entry path / persisted scan-volume memory / shorter scan interval is an architectural redesign, not a parameter tune. The finding is therefore **cycle-delay-disqualified** until architecture changes.
+
+**Watch-list trigger (Session 74 update; canonical for all `no_vol_growth_first_seen/*` findings).** Re-evaluate at any sub-cohort when ANY of:
+- **Architectural change ships** that converts the gate from binary cycle-delay to tunable or otherwise actionable: persisted `_prev_scan_volumes` across restarts, OR a first-sight entry path, OR materially lower `LIVE_SCAN_INTERVAL`. Each is its own session-sized redesign with fresh evidence requirements.
+- **Cross-sport convergence appears:** `nhl_game` + `atp_challenger` + one additional sport all show `n>=30` sustained +CLV, with combined cross-cohort mean `>= +5¢` under the Session 47 ladder. That would suggest deeper structural mis-tuning rather than a single sub-cohort headline.
+- **Realized-trade evidence accumulates:** after a future architectural change unlocks real trades on this surface, `n>=20` realized post-deploy with positive EV opens re-investigation.
+
+Until one of those fires, all `no_vol_growth_first_seen/*` §10 findings are auto-classified as cycle-delay-disqualified. They may continue to surface in §10, but Session 45 + Session 74 are the cross-references: evaluated, real signal, no current lever.
+
+**What did NOT change.**
+- `bot/live_watcher.py`, `bot/config.py`, and all production code — untouched.
+- `tools/discovery_agent/heuristics/counterfactual_hotspots.py` — untouched. The heuristic is correctly surfacing per-cohort signal; this is an actionability disqualification.
+- `tools/glint_status.py` / [tools/_report_helpers.py](tools/_report_helpers.py) — untouched. The existing watch-list cross-reference parser keys off the Session 74 watch-list text (`no_vol_growth_first_seen`, `nhl_game`, `atp_challenger`) without a code change.
+- Tests — no new tests; doc-only baseline preserved.
+- Bot restart — none; no runtime behavior changed.
+
+**Verification.**
+1. ☑ Gate grep confirmed `_prev_scan_volumes` / `no_vol_growth_first_seen` branch unchanged.
+2. ☑ NHL-game CF query returned `n=33`, `n_no=3`, `n_yes=30`, `mean=+20.91c`, `+CLV=90.9%`.
+3. ☑ Doc-only diff check: `git diff bot/ tests/ tools/` empty.
+4. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1511 passed in 33.25s** (0 failed, 0 skipped).
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
