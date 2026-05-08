@@ -546,12 +546,25 @@ def detect_anomalies(paths: Paths, metrics: dict, now_utc: datetime) -> list[Fla
     if last_heartbeat is None:
         flags.append(Flag("heartbeat_missing", "CRITICAL", "Heartbeat missing from bot_state.json.", "Battle Scar #6"))
     else:
+        # Session 78 (post-77): the heartbeat loop fires every 30s
+        # (bot/main.py:_heartbeat_loop). 90s = 3× cycle, which is too tight —
+        # normal asyncio event-loop jitter (other tasks getting CPU during a
+        # heartbeat iteration) routinely pushes age past 90s and self-recovers
+        # within the next cycle. Split: WARN at 90s (one missed cycle, watch
+        # it), CRITICAL at 180s (≥5× cycle = sustained gap, real wedge).
         age_s = (now_utc - last_heartbeat).total_seconds()
-        if age_s > 90:
+        if age_s > 180:
             flags.append(Flag(
                 "heartbeat_stale",
                 "CRITICAL",
-                f"Heartbeat stale: {age_s:.0f}s (> 90s threshold).",
+                f"Heartbeat stale: {age_s:.0f}s (> 180s threshold; multiple missed cycles).",
+                "Battle Scar #6",
+            ))
+        elif age_s > 90:
+            flags.append(Flag(
+                "heartbeat_stale",
+                "WARN",
+                f"Heartbeat stale: {age_s:.0f}s (> 90s threshold; likely jitter, watch).",
                 "Battle Scar #6",
             ))
 

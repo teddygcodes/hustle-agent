@@ -122,6 +122,54 @@ def test_anomaly_detector_no_false_positive_on_normal_state(tmp_path: Path):
     assert [f for f in flags if f.severity in {"WARN", "CRITICAL"}] == []
 
 
+@pytest.mark.parametrize("age_seconds,expected_id,expected_severity", [
+    # Session 78: heartbeat threshold split. Cycle is 30s; pre-78 fired
+    # CRITICAL at >90s (= 3× cycle, too tight — normal jitter trips it).
+    # Post-78: WARN at >90s (one missed cycle), CRITICAL at >180s (≥5×
+    # cycle = sustained gap = real wedge per Battle Scar #6).
+    (10, None, None),                   # fresh — no flag
+    (60, None, None),                   # within one cycle worst-case — no flag
+    (89, None, None),                   # just under WARN threshold — no flag
+    (95, "heartbeat_stale", "WARN"),    # one missed cycle — WARN, NOT CRITICAL
+    (150, "heartbeat_stale", "WARN"),   # still WARN territory
+    (181, "heartbeat_stale", "CRITICAL"),  # ≥5× cycle — sustained gap, CRITICAL
+    (600, "heartbeat_stale", "CRITICAL"),  # ten minutes — definitely wedged
+])
+def test_heartbeat_threshold_split_warn_vs_critical(
+    tmp_path: Path, age_seconds: int, expected_id: str | None, expected_severity: str | None
+):
+    """Session 78: heartbeat_stale flag must split WARN at 90s vs CRITICAL
+    at 180s. Pre-78 the single 90s CRITICAL threshold was 3× the 30s
+    heartbeat cycle, so normal asyncio event-loop jitter routinely tripped
+    CRITICAL on a healthy bot (observed live: 23:29 ET snapshot flagged
+    CRITICAL with bot ticking normally; heartbeat self-recovered at 28s
+    age within 2 minutes). Threshold split makes the flag honest:
+    one-missed-cycle = WARN (watch); multiple-missed-cycles = CRITICAL
+    (real wedge per Battle Scar #6 failure signatures)."""
+    now = datetime(2026, 5, 7, 12, tzinfo=timezone.utc)
+    paths = glint.paths_for(tmp_path)
+    paths.decisions_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.decisions_file.write_text("")
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.log_file.write_text("")
+    metrics = _minimal_metrics(now)
+    metrics["bot_state"]["last_heartbeat"] = (now - timedelta(seconds=age_seconds)).isoformat()
+    flags = glint.detect_anomalies(paths, metrics, now)
+    heartbeat_flags = [f for f in flags if f.id == "heartbeat_stale"]
+    if expected_id is None:
+        assert heartbeat_flags == [], (
+            f"age={age_seconds}s should not flag heartbeat_stale; got {heartbeat_flags}"
+        )
+    else:
+        assert len(heartbeat_flags) == 1, (
+            f"age={age_seconds}s should flag exactly one heartbeat_stale; got {heartbeat_flags}"
+        )
+        assert heartbeat_flags[0].severity == expected_severity, (
+            f"age={age_seconds}s expected severity {expected_severity}, "
+            f"got {heartbeat_flags[0].severity}"
+        )
+
+
 def test_watchlist_parser_extracts_triggers_from_claude_md():
     triggers = glint.extract_watchlist_triggers((REPO_ROOT / "CLAUDE.md").read_text())
     assert len(triggers) >= 10
