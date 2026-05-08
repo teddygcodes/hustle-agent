@@ -717,7 +717,7 @@ class TestLiveMomentumCounterfactual:
         assert r["threshold_value"] == 65.0
         assert r["closing_yes_price"] is None
         assert r["clv_cents"] is None
-        assert r["trade_id"] == "CF-LM-20260427T183021Z-KXATPMATCH-26APR27ALCSIN-ALC"
+        assert r["trade_id"] == "CF-LM-20260427-KXATPMATCH-26APR27ALCSIN-ALC"
         # Regime tagged at write time (Session 14 discipline; 6 writers + this = 7).
         assert "regime" in r
         assert set(r["regime"].keys()) == {
@@ -725,7 +725,7 @@ class TestLiveMomentumCounterfactual:
         }
 
     def test_idempotent_on_repeat_call(self, tmp_clv_file):
-        # Same (scan_event_ts, ticker) -> one record.
+        # Same (ticker, sport, skip_reason, day) → one record (Session 86 dedup semantic).
         for _ in range(3):
             clv.record_live_momentum_counterfactual_skip(**_lm_kwargs())
         assert len(_read(tmp_clv_file)) == 1
@@ -844,3 +844,101 @@ class TestLiveMomentumCounterfactual:
         # Other 3 regime axes still derived from scan_event_ts + ticker.
         assert rec["regime"]["day_of_week"] is not None
         assert rec["regime"]["time_of_day"] is not None
+
+    def test_per_day_dedup_same_ticker_same_skip_reason(self, tmp_clv_file, monkeypatch):
+        """Session 86: same (ticker, sport, skip_reason) within one UTC day → one row only.
+
+        Pre-Session-86 the trade_id used %Y%m%dT%H%M%SZ precision, so two emits 4
+        seconds apart produced different trade_ids and both rows landed. Session 85
+        quantified this on no_vol_growth_first_seen/nhl_game (33 raw → 17 unique).
+        """
+        # Bypass the per-(sport, skip_reason)-per-day cap so this test isolates dedup.
+        monkeypatch.setattr(clv, "_should_emit_live_momentum_cf", lambda **kw: True)
+
+        ts_a = datetime(2026, 5, 8, 14, 30, 22, tzinfo=timezone.utc)
+        ts_b = datetime(2026, 5, 8, 14, 30, 26, tzinfo=timezone.utc)  # 4s later
+
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+            ticker="KXNHLGAME-26MAY08TEST",
+            sport="nhl",
+            skip_reason="no_vol_growth_first_seen",
+            scan_event_ts=ts_a,
+        ))
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+            ticker="KXNHLGAME-26MAY08TEST",
+            sport="nhl",
+            skip_reason="no_vol_growth_first_seen",
+            scan_event_ts=ts_b,
+        ))
+
+        rows = _read(tmp_clv_file)
+        assert len(rows) == 1, f"expected 1 row after per-day dedup, got {len(rows)}: {rows}"
+
+    def test_per_day_dedup_cross_day_same_ticker_stays_distinct(self, tmp_clv_file, monkeypatch):
+        """Session 86: same ticker emitted on May 8 AND May 9 → two rows.
+
+        BOSBUF and MINCOL exhibited this pattern in production data: a game that
+        starts late evening US time spans UTC midnight, and pre-game first-sight
+        on day-of-game (UTC date 1) plus in-game first-sight (UTC date 2) are
+        distinct decision points worth preserving as separate CF records.
+        """
+        monkeypatch.setattr(clv, "_should_emit_live_momentum_cf", lambda **kw: True)
+
+        ts_day1 = datetime(2026, 5, 8, 23, 50, tzinfo=timezone.utc)
+        ts_day2 = datetime(2026, 5, 9, 0, 10, tzinfo=timezone.utc)  # 20 min later, next UTC day
+
+        for ts in (ts_day1, ts_day2):
+            clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+                ticker="KXNHLGAME-26MAY08CROSSDAY",
+                sport="nhl",
+                skip_reason="no_vol_growth_first_seen",
+                scan_event_ts=ts,
+            ))
+
+        rows = _read(tmp_clv_file)
+        assert len(rows) == 2, f"expected 2 cross-day rows, got {len(rows)}: {rows}"
+
+    def test_per_day_dedup_legacy_second_precision_blocks_new_day_precision(
+        self, tmp_clv_file, monkeypatch,
+    ):
+        """Session 86: a pre-Session-86 second-precision row from earlier today
+        blocks a Session-86 day-precision emit for the same (ticker, sport, skip_reason).
+
+        Without the semantic (ticker, sport, skip_reason, day) check, the 30-day
+        transition window would allow same-day double-counts: legacy row
+        (second-precision trade_id) + new row (day-precision trade_id) would both
+        land because trade_id strings don't match.
+        """
+        monkeypatch.setattr(clv, "_should_emit_live_momentum_cf", lambda **kw: True)
+
+        # Hand-write a legacy-format row simulating a pre-Session-86 entry from earlier today.
+        legacy_row = {
+            "ticker": "KXNHLGAME-26MAY08LEGACY",
+            "opp_type": "live_momentum",
+            "sport": "nhl",
+            "side": "yes",
+            "entry_price_cents": 70,
+            "trade_id": "CF-LM-20260508T100000Z-KXNHLGAME-26MAY08LEGACY",  # second precision
+            "scan_event_ts": "2026-05-08T10:00:00+00:00",
+            "recorded_at": "2026-05-08T10:00:00.000+00:00",
+            "status": "counterfactual_open",
+            "skipped_by_gate": "no_vol_growth_first_seen",
+            "contracts": 0,
+            "paper": True,
+        }
+        tmp_clv_file.write_text(json.dumps([legacy_row]))
+
+        ts_now = datetime(2026, 5, 8, 14, 30, 0, tzinfo=timezone.utc)  # later same UTC day
+
+        clv.record_live_momentum_counterfactual_skip(**_lm_kwargs(
+            ticker="KXNHLGAME-26MAY08LEGACY",
+            sport="nhl",
+            skip_reason="no_vol_growth_first_seen",
+            scan_event_ts=ts_now,
+        ))
+
+        rows = _read(tmp_clv_file)
+        assert len(rows) == 1, (
+            f"expected 1 row (legacy second-precision blocks new day-precision), "
+            f"got {len(rows)}: {rows}"
+        )

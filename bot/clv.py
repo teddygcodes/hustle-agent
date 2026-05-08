@@ -318,12 +318,32 @@ def record_live_momentum_counterfactual_skip(
         ts = scan_event_ts or datetime.now(timezone.utc)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        ts_compact = ts.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        trade_id = f"CF-LM-{ts_compact}-{ticker}"
+        day_str = ts.astimezone(timezone.utc).strftime("%Y%m%d")
+        # Session 86: per-(ticker, sport, skip_reason) per UTC day. Pre-Session-86 the
+        # trade_id used second precision; two emits within a few seconds produced
+        # different trade_ids and both rows landed (33 raw → 17 unique on the
+        # no_vol_growth_first_seen/nhl_game cohort per Session 85). The semantic
+        # check below also catches legacy second-precision rows from the same UTC day
+        # during the 30-day historical-inflation transition window.
+        trade_id = f"CF-LM-{day_str}-{ticker}"
 
         records = _load()
-        if any(r.get("trade_id") == trade_id for r in records):
-            return
+        for r in records:
+            if r.get("opp_type") != "live_momentum":
+                continue
+            if r.get("ticker") != ticker:
+                continue
+            if r.get("sport") != sport:
+                continue
+            if r.get("skipped_by_gate") != skip_reason:
+                continue
+            # Compare day-of-scan, not day-of-write: scan_event_ts mirrors the original
+            # trade_id semantics. Fall back to recorded_at if a row predates scan_event_ts.
+            rec_ts = r.get("scan_event_ts") or r.get("recorded_at") or ""
+            # ISO 8601 format e.g. "2026-05-08T14:30:22.123+00:00";
+            # compare YYYY-MM-DD prefix → day_str's YYYYMMDD form.
+            if rec_ts[:10].replace("-", "") == day_str:
+                return
 
         side_norm = str(side or "yes").lower()
         recorded_at = datetime.now(timezone.utc).isoformat()
