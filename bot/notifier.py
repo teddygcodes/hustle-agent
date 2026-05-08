@@ -658,6 +658,31 @@ class TelegramNotifier:
         self._paused = False
         self._quiet_until: Optional[datetime] = None
         self._flood_until: float = 0.0  # unix timestamp when flood ban expires
+        # Session 71: restore Telegram cooldown from bot_state.json on init.
+        # Without this, a restart during a Telegram 429 cooldown produces a fresh
+        # notifier with _flood_until=0, which attempts startup sends and re-hits
+        # the 429, extending the cooldown. Battle Scar #15 was load-bearing because
+        # of this gap. With the gap closed, restarts during cooldown are safe.
+        try:
+            state = _load_bot_state()
+            persisted = state.get(TELEGRAM_THROTTLED_UNTIL)
+            if persisted:
+                until_dt = datetime.fromisoformat(persisted)
+                until_unix = until_dt.timestamp()
+                if until_unix > time.time():
+                    self._flood_until = until_unix
+                    logger.info(
+                        "Restored Telegram cooldown from bot_state.json: %s (%.0fs remaining)",
+                        persisted,
+                        until_unix - time.time(),
+                    )
+                # else: cooldown already expired, leave _flood_until at 0
+        except Exception:
+            logger.warning(
+                "Failed to restore Telegram cooldown from bot_state.json; "
+                "starting with _flood_until=0",
+                exc_info=True,
+            )
         self._send_times: list[float] = []  # timestamps of recent sends for rate limiting
         self._RATE_LIMIT = 20  # max messages per 60 seconds
         self._edit_throttle = EditThrottle()

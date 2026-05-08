@@ -383,3 +383,77 @@ def test_notifier_normal_retry_when_not_stopping(monkeypatch, tmp_path):
     assert calls["n"] == n._TELEGRAM_MAX_RETRIES + 1
     # Backoff sleeps fired (1.0 then 2.0 from 1.0 * 2^attempt_idx)
     assert len(sleeps) == n._TELEGRAM_MAX_RETRIES
+
+
+# ---------------------------------------------------------------------------
+# Session 71: restore _flood_until from bot_state.json on init
+# Closes Battle Scar #15 gap — notifier now READS the throttle field it has
+# always WRITTEN, so a restart during cooldown is safe (startup sends respect
+# the restored cooldown via the existing _check_flood() pre-send check).
+# ---------------------------------------------------------------------------
+
+
+def _notifier_with_persisted_state(monkeypatch, tmp_path, state_dict):
+    """Session 71: write fixture state, redirect BOT_STATE_FILE, construct notifier."""
+    from bot import notifier
+
+    state_file = tmp_path / "bot_state.json"
+    state_file.write_text(json.dumps(state_dict))
+
+    monkeypatch.setattr(notifier, "BOT_STATE_FILE", state_file)
+    monkeypatch.setattr(notifier, "TELEGRAM_CHAT_ID", "12345")
+
+    return notifier.TelegramNotifier()
+
+
+def test_init_restores_flood_until_when_cooldown_in_future(monkeypatch, tmp_path):
+    """Persisted cooldown in the future restores _flood_until on init."""
+    import time as time_mod
+    from datetime import datetime, timezone
+
+    expected_until = time_mod.time() + 3600  # 1 hour from now
+    until_iso = datetime.fromtimestamp(expected_until, timezone.utc).isoformat()
+
+    n = _notifier_with_persisted_state(
+        monkeypatch, tmp_path, {"telegram_throttled_until": until_iso}
+    )
+
+    # Within ±2s of expected (allows for execution time)
+    assert abs(n._flood_until - expected_until) < 2.0
+    assert n._flood_until > time_mod.time()
+
+
+def test_init_does_not_restore_when_cooldown_in_past(monkeypatch, tmp_path):
+    """Expired persisted cooldown leaves _flood_until at 0.0."""
+    import time as time_mod
+    from datetime import datetime, timezone
+
+    past_until = time_mod.time() - 3600  # 1 hour ago
+    until_iso = datetime.fromtimestamp(past_until, timezone.utc).isoformat()
+
+    n = _notifier_with_persisted_state(
+        monkeypatch, tmp_path, {"telegram_throttled_until": until_iso}
+    )
+
+    assert n._flood_until == 0.0
+
+
+def test_init_handles_missing_field_cleanly(monkeypatch, tmp_path, caplog):
+    """No telegram_throttled_until field -> _flood_until stays 0.0, no warning."""
+    with caplog.at_level("WARNING", logger="glint.notifier"):
+        n = _notifier_with_persisted_state(monkeypatch, tmp_path, {"running": True})
+
+    assert n._flood_until == 0.0
+    # No "Failed to restore Telegram cooldown" warning expected
+    assert "Failed to restore Telegram cooldown" not in caplog.text
+
+
+def test_init_handles_malformed_timestamp_gracefully(monkeypatch, tmp_path, caplog):
+    """Malformed timestamp string -> _flood_until stays 0.0, WARNING logged."""
+    with caplog.at_level("WARNING", logger="glint.notifier"):
+        n = _notifier_with_persisted_state(
+            monkeypatch, tmp_path, {"telegram_throttled_until": "not-a-date"}
+        )
+
+    assert n._flood_until == 0.0
+    assert "Failed to restore Telegram cooldown" in caplog.text

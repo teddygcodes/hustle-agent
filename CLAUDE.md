@@ -443,7 +443,7 @@ May 3 incident: Telegram cooled Glint down after sustained `editMessageText` vol
 
 **Edit discipline:** `edit_message_by_id` uses a per-chat `EditThrottle` (1/sec sustained, burst 5) plus message-id keyed SHA1 dedup. Dedup records only after a successful edit. Never add a second Telegram state path or a second cooldown field; `_flood_until` is the in-memory mirror, `bot_state.json:telegram_throttled_until` is the operator-facing state.
 
-**Operational note:** if Telegram is cooling down, do not restart Glint to "see if it works." Each restart can re-hit Telegram while still banned and extend the outage. Ship the code, wait out the cool-down, then Tyler restarts manually.
+**Operational note (post-Session-71):** Restart Glint anytime, cooldown or not. On startup the notifier loads `bot_state.telegram_throttled_until` and restores `_flood_until` if a future cooldown is persisted. The startup announcement and any other early sends respect the restored cooldown via the existing pre-send check at `_check_flood()`. Pre-Session-71 the field was written but never read on init, so restarts during cooldown re-hit the 429 and extended the outage — that constraint is retired.
 
 ### 16. live_momentum sizing must use the configured paper bankroll, not historical constants (Session 54, May 5)
 
@@ -4320,6 +4320,50 @@ Mirrors the Pattern C discipline of Sessions 18.5, 38a-2, 40, 41, 42, 45, 46, 67
 **Operating Posture observation.** This is the FOURTH consolidator/§10-driven Phase-1 (after Sessions 67 stable-floor Pattern B, 67-investigate, 68 NHL futures threshold). The Phase-0 step caught a **file misidentification** — the user wrote `math_engine.calculate_vig_stack` but the actual formula lives in `vig_stack_series.py`. Mirror of Session 67's "gate-name vs floor-value" scope correction. Re-scoping took ~10 minutes; shipping a `math_engine.py` change against a parlay function would have been worse than wallpaper. The mechanism finding (H1 — proportional vig redistribution) is robust, but the cross-cohort verification rail caught what discipline rails are for: even with a correct mechanism, the cross-sport data isn't there (NBA/MLB n=0), AND the weather regression check FAILED (3 of 6 weather families show the same bias, meaning the formula change has 6× the blast radius the prompt assumed). Outcome C preserves the search frontier without committing to a noisy production change. The watch-list trigger explicitly names the infrastructure prerequisites so the future Session 69-followup has a clear unlock path. Mirror of Session 67's Pattern B halfway ship (Session 67 had enough evidence to ship the lever empty; Session 69 doesn't yet).
 
 **No code change. No test change. No bot restart.** Pure investigation + doc update.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
+### ☑ Session 71 — TelegramNotifier reads persisted cooldown on init (May 7, ~30min, closes Battle Scar #15 gap)
+
+**Trigger.** Sessions 52 (May 3) and 58.5 (May 7) hardened the Telegram send path: 429 backoff with retry, persistent throttle state on `bot_state.json:telegram_throttled_until`, and a `_stopping` flag short-circuiting in-flight retries during shutdown. Battle Scar #15 codified the operational rule "**don't restart Glint during a Telegram cooldown**" — each restart was re-hitting Telegram while still banned and extending the outage.
+
+**Why the rule was load-bearing.** The notifier WROTE `telegram_throttled_until` on every 429 ([bot/notifier.py:820](hustle-agent/bot/notifier.py:820)) but never READ it. `__init__` always set `self._flood_until: float = 0.0` ([bot/notifier.py:660](hustle-agent/bot/notifier.py:660)) unconditionally. A fresh process had zero memory of an active cooldown → attempted startup sends (the "Bot online" announcement) → hit 429 again → extended the cooldown. The persistence loop was half-open.
+
+**What shipped (3 files, 1 commit + README sync commit).**
+
+1. **[bot/notifier.py:660-685](hustle-agent/bot/notifier.py:660)** — added load-from-persistent-state block in `TelegramNotifier.__init__`, immediately after `self._flood_until: float = 0.0` and before the existing `_send_times` initialization. ~22 LOC net add. Reuses existing `_load_bot_state()` helper at [bot/notifier.py:53](hustle-agent/bot/notifier.py:53), `TELEGRAM_THROTTLED_UNTIL` constant at [bot/notifier.py:36](hustle-agent/bot/notifier.py:36), and the already-imported `time` + `datetime` modules. NO new helpers, NO new imports. On a future-dated cooldown: parses ISO timestamp, sets `_flood_until` to the unix timestamp, logs INFO with remaining seconds. On expired cooldown: leaves `_flood_until` at 0.0. On any exception (malformed timestamp, missing field handled by `_TELEGRAM_STATE_DEFAULTS`, etc.): logs WARNING and continues. The existing `_check_flood()` pre-send check at [bot/notifier.py:764](hustle-agent/bot/notifier.py:764) consumes the restored value with zero changes needed.
+
+2. **[tests/test_notifier.py](hustle-agent/tests/test_notifier.py)** — appended 4 regression tests + 1 helper. Tests:
+   - `test_init_restores_flood_until_when_cooldown_in_future` — fixture with `telegram_throttled_until = (now + 3600s).isoformat()` → `_flood_until` within ±2s of expected.
+   - `test_init_does_not_restore_when_cooldown_in_past` — fixture with cooldown 1h in the past → `_flood_until == 0.0`.
+   - `test_init_handles_missing_field_cleanly` — fixture without the key → `_flood_until == 0.0`, no WARNING logged.
+   - `test_init_handles_malformed_timestamp_gracefully` — fixture with `"not-a-date"` → `_flood_until == 0.0`, WARNING logged via caplog.
+   Tests follow Session 52/58.5 convention (`monkeypatch.setattr(notifier, "BOT_STATE_FILE", state_file)` + pre-written fixture JSON), NOT mocking `_load_bot_state` directly. This exercises the real `_load_bot_state` code path including its `_TELEGRAM_STATE_DEFAULTS` defaulting.
+
+3. **[CLAUDE.md](CLAUDE.md)** — Battle Scar #15 operational note paragraph replaced with the post-Session-71 rule (restart anytime, cooldown or not). Plus this Session 71 ☑ block.
+
+**Tests.** `python3 -m pytest tests/test_notifier.py -v` → **17/17 pass** (13 baseline + 4 new). Full repo `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1486 passed in 33.32s** (Session 70 baseline 1482 + 4 new). 0 failures.
+
+**Verification (post-restart).**
+1. ☑ Pre-restart: `bot_state.json:telegram_throttled_until` set to a future timestamp.
+2. ☑ Restart via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`.
+3. ☑ Within 30s post-restart: `grep "Restored Telegram cooldown" bot/logs/bot.log` shows the INFO line — confirming the new init path fired.
+4. ☑ Within 2 min post-restart: 429 count unchanged from pre-restart baseline (no new 429s triggered by startup announcement).
+5. ☑ Single-PID per Battle Scar #14: one wrapper + one child python process.
+
+**Battle Scar #15 retired from "operational rule" to "historical reason for the gap, now closed."** The two-line operational note in the Battle Scar entry now points forward — restart anytime, cooldown or not — and remains as documentation for why the gap mattered.
+
+**Out of scope (held).**
+- Modifying the 429 response path at [bot/notifier.py:813-831](hustle-agent/bot/notifier.py:813) (Session 52 hardening preserved as-is).
+- Touching `_stopping` flag (Session 58.5).
+- Touching `EditThrottle` or dedup logic (Session 52).
+- Reading any OTHER `bot_state.json` field on init (only `telegram_throttled_until` is in scope).
+- Writing to `bot_state.json` from this code path.
+- Modifying `_load_bot_state()` or `_save_bot_state()` helpers.
+
+**Operating Posture observation.** Smallest possible surgical fix to retire a Battle Scar. Pre-Session-71 the persistence WAS already in place — Session 52 wrote the field on every 429, Session 35's daily-report health pulse surfaces it as a Telegram delivery row. Session 71 just closes the read side. ~22 LOC + 4 tests + 2 doc edits. The "wait, don't restart" rule was real for the duration of the gap but always solvable by ~30 minutes of init-side wiring. Worth doing because every future restart-during-cooldown incident (and there have been ≥3 documented in Sessions 52/58.5/67) compounds.
 
 **README sync.** Committed separately per push discipline.
 
