@@ -14,6 +14,21 @@ On-demand bridge between Session 48 discovery-agent findings (or any other sourc
 
 The reference example is [`candidates/example_total_points_under.py`](candidates/example_total_points_under.py). It's intentionally a stub (no real edge) — copy it as scaffolding, then replace `evaluate()` with your real model.
 
+### When to set pair_key
+
+Stateful candidates (those that re-emit on every scan while a divergence or
+condition persists) MUST set `pair_key` on each CandidateOpportunity. One-shot
+candidates (one emit per real entry decision) can leave it None.
+
+The lab uses pair_key for per-unique-outcome aggregation. Without it, stateful
+candidates report inflated per-emit P&L — same hypothetical opportunity counted
+35-122 times in Session 72's founding case, sign-flipped on dedup
+(-$4.16 per-unique vs +$2,567 per-emit).
+
+If you're not sure whether your candidate is stateful: check whether evaluate()
+can return a non-None opportunity for the SAME pair across consecutive scans
+on the same divergence. If yes, set pair_key.
+
 ### What `market` looks like
 
 A raw row from `bot/state/universe.jsonl`. Sample keys:
@@ -55,6 +70,7 @@ class CandidateOpportunity:
     confidence: float          # 0.0-1.0 — varies → per-decile breakdown emitted
     reason: str                # short string for the report (reason histogram)
     extra: dict | None = None  # optional; supports `extra={"contracts": 50}` to override default 100 contracts
+    pair_key: str | None = None  # Session 73: stateful-candidate dedup key. See "When to set pair_key" above.
 ```
 
 ## How to read a report

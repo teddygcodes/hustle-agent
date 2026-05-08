@@ -17,6 +17,7 @@ canonical-schema reminder.
 """
 from __future__ import annotations
 
+import statistics
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -179,13 +180,11 @@ def score(
     return scored
 
 
-def aggregate(scored: list[ScoredOpportunity]) -> dict:
-    """Compute summary stats for the report.
+def _compute_basic_metrics(scored: list[ScoredOpportunity]) -> dict:
+    """Compute n_total / n_resolved / mean_clv / win_rate / total_pnl tuple.
 
-    Returns a dict with: ``n_total``, ``n_resolved``, ``n_unresolved``,
-    ``settle_rate``, ``mean_clv_cents``, ``win_rate_pct`` (over resolved),
-    ``total_pnl_cents``, ``per_sport`` (per-sport breakdown), and
-    ``per_confidence_decile`` (when candidates emit confidence variation).
+    Helper called twice by ``aggregate()`` — once on the raw scored list
+    (per-emit) and once on the dedup'd-by-pair_key list (per-unique-outcome).
     """
     n_total = len(scored)
     resolved = [s for s in scored if s.status != UNRESOLVED and s.pnl_cents is not None]
@@ -194,16 +193,97 @@ def aggregate(scored: list[ScoredOpportunity]) -> dict:
 
     if n_resolved:
         clvs = [s.clv_cents for s in resolved if s.clv_cents is not None]
-        mean_clv = sum(clvs) / len(clvs) if clvs else None
+        mean_clv: Optional[float] = sum(clvs) / len(clvs) if clvs else None
         wins = sum(1 for s in resolved if (s.clv_cents or 0) > 0)
-        win_rate = 100.0 * wins / n_resolved
+        win_rate: Optional[float] = 100.0 * wins / n_resolved
         total_pnl = sum(s.pnl_cents for s in resolved)
     else:
         mean_clv = None
         win_rate = None
         total_pnl = 0.0
 
-    # Per-sport breakdown
+    return {
+        "n_total": n_total,
+        "n_resolved": n_resolved,
+        "n_unresolved": n_unresolved,
+        "settle_rate_pct": (100.0 * n_resolved / n_total) if n_total else 0.0,
+        "mean_clv_cents": mean_clv,
+        "win_rate_pct": win_rate,
+        "total_pnl_cents": total_pnl,
+        "total_pnl_dollars": total_pnl / 100.0,
+    }
+
+
+def _dedup_by_pair_key(scored: list[ScoredOpportunity]) -> list[ScoredOpportunity]:
+    """Return the scored list dedup'd by ``opp.pair_key``, first-emit-wins.
+
+    Stateful candidates that re-emit on every scan while a divergence
+    persists set ``pair_key`` so the same hypothetical opportunity isn't
+    counted N times. ``None`` ``pair_key`` (one-shot candidates) keeps
+    every emit as its own unique row — backward-compat for
+    ``example_total_points_under`` and any future one-shot candidate.
+
+    First-emit-wins matches the real-trading semantic: you'd enter the
+    trade once when the divergence first crossed threshold, not N times
+    as it persisted.
+    """
+    seen: set = set()
+    deduped: list[ScoredOpportunity] = []
+    for s in scored:
+        pair_key = s.opp.pair_key
+        if pair_key is None:
+            # Unique sentinel per emit so one-shot candidates' None keys
+            # don't collapse together.
+            key: tuple = ("__none__", id(s))
+        else:
+            key = ("__set__", pair_key)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(s)
+    return deduped
+
+
+def _median_emits_per_pair_key(scored: list[ScoredOpportunity]) -> float:
+    """Median emit count per unique pair_key. None pair_keys count as 1."""
+    if not scored:
+        return 0.0
+    counts: dict = {}
+    for s in scored:
+        pair_key = s.opp.pair_key
+        key: tuple = ("__none__", id(s)) if pair_key is None else ("__set__", pair_key)
+        counts[key] = counts.get(key, 0) + 1
+    return float(statistics.median(counts.values()))
+
+
+def aggregate(scored: list[ScoredOpportunity]) -> dict:
+    """Compute summary stats for the report.
+
+    Returns a dict with two parallel sets of headline metrics:
+
+    - **Per-emit (preserved verbatim from pre-Session-73)**: ``n_total``,
+      ``n_resolved``, ``n_unresolved``, ``settle_rate_pct``,
+      ``mean_clv_cents``, ``win_rate_pct``, ``total_pnl_cents``,
+      ``total_pnl_dollars``.
+    - **Per-unique-pair-key (Session 73 headline)**: same metrics with
+      ``_per_pair_key`` suffix. ``n_unique_pair_keys`` replaces
+      ``n_total`` as the headline count. ``median_emits_per_pair_key``
+      surfaces the amplification ratio (large = stateful candidate
+      emitting many times per real opportunity).
+
+    Plus ``per_sport`` and ``per_confidence_decile`` breakdowns (per-emit
+    only — preserves visible amplification signal in top-5 / per-sport
+    tables, which is itself a useful diagnostic for spotting misbehaving
+    stateful candidates).
+    """
+    # Per-emit metrics (existing semantics)
+    per_emit = _compute_basic_metrics(scored)
+
+    # Per-unique-pair-key metrics (Session 73 — first-emit-wins dedup)
+    deduped = _dedup_by_pair_key(scored)
+    per_pair_key = _compute_basic_metrics(deduped)
+
+    # Per-sport breakdown (per-emit — preserves visible amplification)
     per_sport: dict[str, dict] = {}
     by_sport: dict[str, list[ScoredOpportunity]] = {}
     for s in scored:
@@ -242,16 +322,27 @@ def aggregate(scored: list[ScoredOpportunity]) -> dict:
         }
 
     return {
-        "n_total": n_total,
-        "n_resolved": n_resolved,
-        "n_unresolved": n_unresolved,
-        "settle_rate_pct": (100.0 * n_resolved / n_total) if n_total else 0.0,
-        "mean_clv_cents": mean_clv,
-        "win_rate_pct": win_rate,
-        "total_pnl_cents": total_pnl,
-        "total_pnl_dollars": total_pnl / 100.0,
+        # Per-emit (preserved verbatim)
+        "n_total": per_emit["n_total"],
+        "n_resolved": per_emit["n_resolved"],
+        "n_unresolved": per_emit["n_unresolved"],
+        "settle_rate_pct": per_emit["settle_rate_pct"],
+        "mean_clv_cents": per_emit["mean_clv_cents"],
+        "win_rate_pct": per_emit["win_rate_pct"],
+        "total_pnl_cents": per_emit["total_pnl_cents"],
+        "total_pnl_dollars": per_emit["total_pnl_dollars"],
         "per_sport": per_sport,
         "per_confidence_decile": per_decile,
+        # Per-unique-pair-key (Session 73)
+        "n_unique_pair_keys": per_pair_key["n_total"],
+        "n_resolved_pair_keys": per_pair_key["n_resolved"],
+        "n_unresolved_pair_keys": per_pair_key["n_unresolved"],
+        "settle_rate_pct_per_pair_key": per_pair_key["settle_rate_pct"],
+        "mean_clv_cents_per_pair_key": per_pair_key["mean_clv_cents"],
+        "win_rate_pct_per_pair_key": per_pair_key["win_rate_pct"],
+        "total_pnl_cents_per_pair_key": per_pair_key["total_pnl_cents"],
+        "total_pnl_dollars_per_pair_key": per_pair_key["total_pnl_dollars"],
+        "median_emits_per_pair_key": _median_emits_per_pair_key(scored),
     }
 
 

@@ -13,12 +13,26 @@ series is mathematically self-consistent (P(series) = 0.5 × 0.56 + 0.10 × 0.44
 captures real edge or just structural noise. State-aware math (P(series win |
 series_state, P(game win))) is a future v2 if v1 doesn't show signal.
 
-Pair key: (sport, frozenset({TEAMA, TEAMB}), winner)
+Matchup key (internal state, used for partner lookup):
+(sport, frozenset({TEAMA, TEAMB}), winner)
 - Series ticker: KXNBASERIES-26CLEDETR2-CLE → ("series", "KXNBA", frozenset({"CLE","DET"}), "CLE")
 - Game ticker:   KXNBAGAME-26MAY11DETCLE-CLE → ("game",   "KXNBA", frozenset({"DET","CLE"}), "CLE")
 
 Both map to the same matchup-key ("KXNBA", frozenset({"CLE","DET"}), "CLE")
-when betting on the same team's win.
+when betting on the same team's win — used to look up the series partner
+for a game-side emission.
+
+Pair_key for dedup (Session 73):  ``f"{ticker}|{side}"``  — game-grain.
+
+Per-emit aggregation in Session 72's prototype run inflated +$2,567 across
+5,143 emits (median 35x amplification per unique outcome). Session 72's
+manual re-aggregation at game-grain ("140 unique (ticker, side) keys")
+flipped the sign to -$4.16. Session 73 codifies this via the
+``CandidateOpportunity.pair_key`` field; the lab's headline metric is now
+per-unique-pair-key. Game-grain (vs matchup-grain) is the right dedup key
+because each game-day produces its own settled outcome — multi-game
+playoff series have multiple distinct hypothetical opportunities even
+within a single matchup.
 
 Emission discipline: emit on the GAME side only — clv.json has 0 records on
 KX*SERIES tickers as of 2026-05-07 (series tickers have never been scanned
@@ -207,7 +221,7 @@ class CrossMarketCorrelation:
                 f"Δ={divergence:.1f}c)"
             ),
             extra={
-                "pair_key": f"{sport}/{sorted(teams)}/{winner}",
+                "matchup_key": f"{sport}/{sorted(teams)}/{winner}",
                 "partner_ticker": partner_ticker,
                 "divergence_cents": divergence,
                 "series_yes_ask": series_yes,
@@ -215,6 +229,10 @@ class CrossMarketCorrelation:
                 "scan_id": scan_id,
                 "n_scans_persisted": len(scan_ids),
             },
+            # Session 73 — game-grain dedup key. Each KX*GAME-* ticker is
+            # unique per game-day per matchup-side; this collapses the 35x
+            # median amplification documented in Session 72.
+            pair_key=f"{ticker}|{side}",
         )
 
 

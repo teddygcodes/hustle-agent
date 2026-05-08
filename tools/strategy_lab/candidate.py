@@ -25,7 +25,33 @@ from typing import Optional, Protocol, runtime_checkable
 
 @dataclass
 class CandidateOpportunity:
-    """A single 'would have bet' decision from a candidate strategy."""
+    """A single 'would have bet' decision from a candidate strategy.
+
+    ``pair_key`` (Session 73) distinguishes stateful from one-shot candidates:
+
+    - **Stateful candidates** re-emit on every scan while a divergence /
+      condition persists. Their ``evaluate()`` can return a non-None
+      opportunity for the SAME pair across consecutive scans on the same
+      underlying setup. Examples: ``cross_market_correlation``, future
+      tick-based candidates that detect persistent inefficiencies. These
+      MUST set ``pair_key`` per emit so the lab can dedupe by unique
+      hypothetical opportunity (matches "you'd enter the trade once" real
+      semantics).
+    - **One-shot candidates** emit at most once per real entry decision.
+      Example: ``example_total_points_under``. Leave ``pair_key=None``;
+      the lab counts each emit as its own outcome.
+
+    Without ``pair_key`` on stateful candidates, per-emit Σ P&L gets
+    inflated by amplification: Session 72's founding example saw the same
+    hypothetical opportunity counted 35-122 times (median 35x), flipping
+    sign from per-emit +$2,567 to per-unique-pair-key -$4.16. The lab's
+    headline metric is per-unique-pair-key; per-emit stays as a diagnostic
+    line plus the amplification ratio.
+
+    If unsure: check whether ``evaluate()`` can return a non-None
+    opportunity for the SAME pair across consecutive scans on the same
+    divergence. If yes, set ``pair_key``.
+    """
 
     ticker: str
     side: str  # canonical schema: "yes" | "no"
@@ -35,6 +61,7 @@ class CandidateOpportunity:
     confidence: float  # 0.0-1.0
     reason: str
     extra: Optional[dict] = None
+    pair_key: Optional[str] = None
 
 
 @runtime_checkable

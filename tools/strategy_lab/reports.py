@@ -83,12 +83,49 @@ def render_markdown(
         lines.append("Possible causes: the candidate's filters are too tight, or the market family it targets isn't in the captured universe (e.g., tickers outside `_active_series_tickers()` from `bot/universe.py` or pre-Apr-25 windows before `universe.jsonl` shipped). Check `tools/universe_report.py` for ignored families that might match.\n")
         return "\n".join(lines)
 
-    # Aggregate stats
+    # Aggregate stats — Session 73: per-unique-pair-key is the headline.
     lines.append("## Aggregate (resolved subset)\n")
-    lines.append(f"- Mean CLV: **{_fmt_cents(summary['mean_clv_cents']).strip()}¢**")
-    lines.append(f"- Win rate: **{_fmt_pct(summary['win_rate_pct']).strip()}**")
-    lines.append(f"- Total hypothetical P&L: **{_fmt_dollars(summary['total_pnl_cents'])}**")
-    lines.append(f"- Settle rate: **{summary['settle_rate_pct']:.1f}%**")
+    lines.append("**Per unique pair-key (HEADLINE):**\n")
+    lines.append(
+        f"- Mean CLV: **{_fmt_cents(summary['mean_clv_cents_per_pair_key']).strip()}¢**"
+    )
+    lines.append(
+        f"- Win rate: **{_fmt_pct(summary['win_rate_pct_per_pair_key']).strip()}**"
+    )
+    lines.append(
+        f"- Total hypothetical P&L: "
+        f"**{_fmt_dollars(summary['total_pnl_cents_per_pair_key'])}**"
+    )
+    lines.append(
+        f"- n unique pair-keys: **{summary['n_unique_pair_keys']:,}** "
+        f"(resolved: {summary['n_resolved_pair_keys']:,})"
+    )
+    lines.append("")
+    lines.append(
+        "**Per emit (DIAGNOSTIC — catches stateful candidate amplification):**\n"
+    )
+    lines.append(
+        f"- Mean CLV: {_fmt_cents(summary['mean_clv_cents']).strip()}¢"
+    )
+    lines.append(
+        f"- Win rate: {_fmt_pct(summary['win_rate_pct']).strip()}"
+    )
+    lines.append(
+        f"- Total hypothetical P&L: {_fmt_dollars(summary['total_pnl_cents'])}"
+    )
+    lines.append(
+        f"- n emits: {summary['n_total']:,} "
+        f"(median {summary['median_emits_per_pair_key']:.1f} emits per unique pair-key)"
+    )
+    lines.append(f"- Settle rate: {summary['settle_rate_pct']:.1f}%")
+    lines.append("")
+    lines.append(
+        "> Stateful candidates re-emit on every scan while a divergence "
+        "persists. The per-emit number is inflated by amplification; "
+        "per-unique-pair-key is the headline because it matches \"you'd "
+        "enter the trade once\" real semantics. A large gap between the two "
+        "is itself a signal worth investigating (see Session 73 in CLAUDE.md)."
+    )
     lines.append("")
 
     # Per-sport breakdown

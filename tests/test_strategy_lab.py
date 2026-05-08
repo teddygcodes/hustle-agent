@@ -446,3 +446,315 @@ def test_data_loader_reads_gzipped_archives(lab_state):
     yielded = list(universe_iter)
     assert len(yielded) == 5
     assert {r["ticker"] for r in yielded} == {f"KXARCH-{i:03d}" for i in range(5)}
+
+
+# ---------------------------------------------------------------------------
+# Session 73 — per-pair-key dedup in evaluator.aggregate()
+# ---------------------------------------------------------------------------
+#
+# Founding example: Session 72's cross_market_correlation prototype showed
+# +$2,567 per-emit Σ flipping to -$4.16 per-unique-pair-key Σ on dedup.
+# Stateful candidates re-emit on every scan while a divergence persists;
+# the lab now counts them once per unique outcome to match the real
+# "you'd enter the trade once" semantic.
+#
+# Tests 1-4 exercise the aggregator math directly (constructed
+# ScoredOpportunity instances). Test 5 wires the real cross_market_correlation
+# candidate end-to-end through driver.run() with a synthetic universe +
+# clv fixture mirroring Session 72's amplification shape.
+# ---------------------------------------------------------------------------
+
+def _make_scored(
+    *,
+    pair_key: str | None,
+    pnl_cents: float,
+    sport: str | None = "test_sport",
+    confidence: float = 0.5,
+    ticker: str = "KXTEST",
+) -> "evaluator.ScoredOpportunity":
+    """Build a settled ScoredOpportunity with the given pair_key and pnl."""
+    opp = CandidateOpportunity(
+        ticker=ticker,
+        side="yes",
+        target_price_cents=50.0,
+        fair_value_cents=60.0,
+        edge_cents=10.0,
+        confidence=confidence,
+        reason="test",
+        pair_key=pair_key,
+    )
+    return evaluator.ScoredOpportunity(
+        opp=opp,
+        universe_ts=_ts(1),
+        sport=sport,
+        status="settled",
+        market_result="yes",
+        clv_cents=pnl_cents / 100.0,  # pnl_cents = clv_cents × 100 contracts
+        pnl_cents=pnl_cents,
+        contracts=evaluator.DEFAULT_CONTRACTS,
+    )
+
+
+def test_aggregate_dedups_by_pair_key_stateful_single_key():
+    """Stateful candidate emitting 100 times with same pair_key.
+
+    Per-emit Σ counts all 100; per-pair-key Σ counts only the first emit.
+    Verifies first-emit-wins dedup math AND backward-compat preservation
+    of per-emit numbers (still available for diagnostic).
+    """
+    # All 100 share pair_key="A|yes" with pnl_cents=+50 each.
+    # Per-emit Σ = 100 × 50 = 5,000 ; Per-pair-key Σ = 50 (first emit only).
+    scored = [
+        _make_scored(pair_key="A|yes", pnl_cents=50.0)
+        for _ in range(100)
+    ]
+    summary = evaluator.aggregate(scored)
+
+    # Per-emit (preserved verbatim from pre-Session-73)
+    assert summary["n_total"] == 100
+    assert summary["n_resolved"] == 100
+    assert summary["total_pnl_cents"] == pytest.approx(5_000.0)
+
+    # Per-unique-pair-key (Session 73 headline)
+    assert summary["n_unique_pair_keys"] == 1
+    assert summary["n_resolved_pair_keys"] == 1
+    assert summary["total_pnl_cents_per_pair_key"] == pytest.approx(50.0)
+
+    # Median amplification ratio
+    assert summary["median_emits_per_pair_key"] == pytest.approx(100.0)
+
+
+def test_aggregate_dedups_by_pair_key_stateful_distinct_keys():
+    """Stateful candidate emitting 5 times with 5 distinct pair_keys.
+
+    No dedup happens (all keys unique); per-pair-key Σ equals per-emit Σ.
+    """
+    scored = [
+        _make_scored(pair_key=f"K{i}|yes", pnl_cents=10.0 + i)
+        for i in range(5)
+    ]
+    summary = evaluator.aggregate(scored)
+
+    assert summary["n_total"] == 5
+    assert summary["n_unique_pair_keys"] == 5
+    # Sum 10 + 11 + 12 + 13 + 14 = 60.
+    assert summary["total_pnl_cents"] == pytest.approx(60.0)
+    assert summary["total_pnl_cents_per_pair_key"] == pytest.approx(60.0)
+    # Each key has 1 emit → median = 1.
+    assert summary["median_emits_per_pair_key"] == pytest.approx(1.0)
+
+
+def test_aggregate_one_shot_pair_key_none_backward_compat():
+    """One-shot candidate (pair_key=None) — per-pair-key Σ exactly equals per-emit Σ.
+
+    Backward-compat regression guard for ``example_total_points_under``
+    and any future one-shot candidate. Each None pair_key counts as its
+    own unique bucket so Σ is identical both ways.
+    """
+    scored = [
+        _make_scored(pair_key=None, pnl_cents=20.0),
+        _make_scored(pair_key=None, pnl_cents=30.0),
+        _make_scored(pair_key=None, pnl_cents=-15.0),
+    ]
+    summary = evaluator.aggregate(scored)
+
+    assert summary["n_total"] == 3
+    # Each None pair_key is treated as its own bucket — no collapse.
+    assert summary["n_unique_pair_keys"] == 3
+    # Sum 20 + 30 - 15 = 35.
+    assert summary["total_pnl_cents"] == pytest.approx(35.0)
+    # CRITICAL: per-pair-key Σ EXACTLY equals per-emit Σ on one-shot.
+    assert summary["total_pnl_cents_per_pair_key"] == pytest.approx(
+        summary["total_pnl_cents"]
+    )
+    assert summary["mean_clv_cents_per_pair_key"] == pytest.approx(
+        summary["mean_clv_cents"]
+    )
+    assert summary["win_rate_pct_per_pair_key"] == pytest.approx(
+        summary["win_rate_pct"]
+    )
+
+
+def test_aggregate_mixed_stateful_and_one_shot():
+    """Mixed: 50 emits across 3 stateful pair_keys (20+20+10) + 2 one-shot None.
+
+    Per-pair-key bucket count = 3 stateful + 2 one-shot (each None its own
+    bucket) = 5. Per-pair-key Σ uses 1 emit per stateful key + both
+    one-shot emits.
+    """
+    scored: list[evaluator.ScoredOpportunity] = []
+    # 20 emits with pair_key="X" at pnl=+5 each → first-wins contributes +5.
+    scored.extend(_make_scored(pair_key="X", pnl_cents=5.0) for _ in range(20))
+    # 20 emits with pair_key="Y" at pnl=-3 each → first-wins contributes -3.
+    scored.extend(_make_scored(pair_key="Y", pnl_cents=-3.0) for _ in range(20))
+    # 10 emits with pair_key="Z" at pnl=+2 each → first-wins contributes +2.
+    scored.extend(_make_scored(pair_key="Z", pnl_cents=2.0) for _ in range(10))
+    # 2 one-shot emits (pair_key=None) at pnl=+10 and -4.
+    scored.append(_make_scored(pair_key=None, pnl_cents=10.0))
+    scored.append(_make_scored(pair_key=None, pnl_cents=-4.0))
+
+    summary = evaluator.aggregate(scored)
+
+    # Per-emit total: 20×5 + 20×(-3) + 10×2 + 10 + (-4) = 100 - 60 + 20 + 10 - 4 = 66
+    assert summary["n_total"] == 52
+    assert summary["total_pnl_cents"] == pytest.approx(66.0)
+
+    # Per-pair-key: 3 stateful buckets + 2 one-shot buckets = 5 unique.
+    assert summary["n_unique_pair_keys"] == 5
+    # Per-pair-key total: +5 + (-3) + +2 + +10 + (-4) = 10
+    assert summary["total_pnl_cents_per_pair_key"] == pytest.approx(10.0)
+
+    # Median emits per key. Counts (sorted): [1, 1, 10, 20, 20] → median = 10.
+    assert summary["median_emits_per_pair_key"] == pytest.approx(10.0)
+
+
+def test_cross_market_correlation_synthetic_amplification_regression(lab_state):
+    """End-to-end synthetic regression mirroring Session 72's sign-flip pattern.
+
+    Three matchups with deliberately uneven emit counts (50/10/1) and
+    settled outcomes designed so that:
+      - Per-emit Σ comes out POSITIVE (winner's amplification dominates)
+      - Per-pair-key Σ comes out NEGATIVE (single emit per unique
+        outcome, both losers drag the net down)
+    Locks the dedup methodology in isolation. The actual Session 72
+    -$4.16 / +$2,567 reproduction lives in the manual verification gate
+    (``python3 -m tools.strategy_lab.driver --candidate
+    cross_market_correlation --days 14``), not here — that depends on
+    real bot/state/ data drift since 2026-05-08.
+    """
+    from tools.strategy_lab.candidates.cross_market_correlation import (
+        CrossMarketCorrelation,
+    )
+
+    rows: list[dict] = []
+    # 50 scans of matchup A (winner). Series row first, then game row.
+    for scan_idx in range(50):
+        scan_id = f"SCAN-{scan_idx:04d}"
+        rows.append(_make_universe_row(
+            "KXNBASERIES-26AAABBBR1-AAA",
+            days_ago=1,
+            scan_id=scan_id,
+            yes_ask=40,         # series_yes
+            volume_24h=5000,
+        ))
+        rows.append(_make_universe_row(
+            "KXNBAGAME-26MAY01AAABBB-AAA",
+            days_ago=1,
+            scan_id=scan_id,
+            yes_ask=70,         # game_yes (Δ=30; side=no, target=30)
+            volume_24h=5000,
+        ))
+        if scan_idx < 10:
+            # Matchup B (loser) on the first 10 scans.
+            rows.append(_make_universe_row(
+                "KXNBASERIES-26CCCDDDR1-CCC",
+                days_ago=1,
+                scan_id=scan_id,
+                yes_ask=20,
+                volume_24h=5000,
+            ))
+            rows.append(_make_universe_row(
+                "KXNBAGAME-26MAY02CCCDDD-CCC",
+                days_ago=1,
+                scan_id=scan_id,
+                yes_ask=30,     # Δ=10; side=no, target=70
+                volume_24h=5000,
+            ))
+        if scan_idx < 1:
+            # Matchup C (loser) on the first scan only.
+            rows.append(_make_universe_row(
+                "KXNBASERIES-26EEEFFFR1-EEE",
+                days_ago=1,
+                scan_id=scan_id,
+                yes_ask=10,
+                volume_24h=5000,
+            ))
+            rows.append(_make_universe_row(
+                "KXNBAGAME-26MAY03EEEFFF-EEE",
+                days_ago=1,
+                scan_id=scan_id,
+                yes_ask=20,     # Δ=10; side=no, target=80
+                volume_24h=5000,
+            ))
+    lab_state["universe_file"].write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n"
+    )
+
+    # Three settled clv records, one per game ticker.
+    clv = [
+        # Matchup A: NO @ 30c, NO_won, closing_yes=0 → clv = +70
+        _make_clv_record(
+            "KXNBAGAME-26MAY01AAABBB-AAA",
+            side="no",
+            status="settled",
+            entry_price_cents=30,
+            market_result="no",
+            closing_yes_price=0.0,
+            days_ago=1,
+            hour=12,
+        ),
+        # Matchup B: NO @ 70c, YES_won, closing_yes=100 → clv = -70
+        _make_clv_record(
+            "KXNBAGAME-26MAY02CCCDDD-CCC",
+            side="no",
+            status="settled",
+            entry_price_cents=70,
+            market_result="yes",
+            closing_yes_price=100.0,
+            days_ago=1,
+            hour=12,
+        ),
+        # Matchup C: NO @ 80c, YES_won, closing_yes=100 → clv = -80
+        _make_clv_record(
+            "KXNBAGAME-26MAY03EEEFFF-EEE",
+            side="no",
+            status="settled",
+            entry_price_cents=80,
+            market_result="yes",
+            closing_yes_price=100.0,
+            days_ago=1,
+            hour=12,
+        ),
+    ]
+    lab_state["clv_file"].write_text(json.dumps(clv))
+
+    # Fresh strategy instance — module-level STRATEGY accumulates state.
+    fresh = CrossMarketCorrelation()
+    report_path, summary = driver.run(fresh, days=14)
+
+    # Per-emit shape.
+    # Total emits: 50 (A) + 10 (B) + 1 (C) = 61.
+    assert summary["n_total"] == 61
+    assert summary["n_resolved"] == 61
+    # Per-emit Σ:
+    #   A: 50 × (+70 × 100 contracts) = +350,000 cents
+    #   B: 10 × (-70 × 100 contracts) =  -70,000 cents
+    #   C:  1 × (-80 × 100 contracts) =   -8,000 cents
+    #   total = +272,000 cents = $+2,720
+    assert summary["total_pnl_cents"] == pytest.approx(272_000.0)
+    assert summary["total_pnl_dollars"] == pytest.approx(2_720.0)
+
+    # Per-pair-key shape.
+    assert summary["n_unique_pair_keys"] == 3
+    assert summary["n_resolved_pair_keys"] == 3
+    # Per-pair-key Σ:
+    #   A first emit: +70 × 100 = +7,000
+    #   B first emit: -70 × 100 = -7,000
+    #   C first emit: -80 × 100 = -8,000
+    #   total = -8,000 cents = $-80
+    assert summary["total_pnl_cents_per_pair_key"] == pytest.approx(-8_000.0)
+    assert summary["total_pnl_dollars_per_pair_key"] == pytest.approx(-80.0)
+
+    # SIGN FLIP — the founding-example methodology check.
+    assert summary["total_pnl_cents"] > 0, "per-emit should be positive"
+    assert summary["total_pnl_cents_per_pair_key"] < 0, (
+        "per-pair-key should flip negative — same shape as Session 72"
+    )
+
+    # Median amplification ratio. Counts: A=50, B=10, C=1 → median = 10.
+    assert summary["median_emits_per_pair_key"] == pytest.approx(10.0)
+
+    # Report headline section renders the per-pair-key story.
+    body = report_path.read_text()
+    assert "Per unique pair-key (HEADLINE)" in body
+    assert "Per emit (DIAGNOSTIC" in body

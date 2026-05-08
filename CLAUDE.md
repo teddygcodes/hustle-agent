@@ -4436,6 +4436,54 @@ Until at least #1 ships, naive cross-market correlation is unactionable. #2 is t
 
 ---
 
+### ☑ Session 73 — Strategy lab per-pair-key dedup fix (May 8, ~1.5h, lab-only, methodology codified)
+
+**Trigger.** Session 72's first run of `cross_market_correlation` produced **+$2,567 per-emit Σ P&L** that flipped to **-$4.16 per-unique-pair-key Σ** when manually re-aggregated by (ticker, side). Stateful candidates re-emit on every scan while a divergence persists; the same hypothetical opportunity got counted 35-122 times (median 35x) inflating per-emit numbers. Same shape will hit any future stateful candidate. Session 73 bakes dedup into the lab so future Sessions don't have to re-find this lesson manually.
+
+**What shipped (1 commit + README sync, lab-only, no `bot/` touch).**
+
+1. **[tools/strategy_lab/candidate.py](tools/strategy_lab/candidate.py)** — `CandidateOpportunity` dataclass gained optional `pair_key: Optional[str] = None` field after `extra`. Docstring distinguishes stateful candidates (MUST set per emit) from one-shot candidates (leave None). Backward-compat preserved by the `None` default — every existing call site continues to construct unchanged.
+2. **[tools/strategy_lab/evaluator.py](tools/strategy_lab/evaluator.py)** — `aggregate()` extended to compute both per-emit (preserved verbatim) AND per-unique-pair-key metrics in one pass. New helpers: `_compute_basic_metrics()` (factored from existing math), `_dedup_by_pair_key()` (first-emit-wins per unique key; matches "you'd enter the trade once" real semantic), `_median_emits_per_pair_key()` (amplification ratio diagnostic). `None` pair_keys count as own bucket — backward-compat for one-shot candidates is byte-identical. Added `import statistics` for median computation.
+3. **[tools/strategy_lab/reports.py](tools/strategy_lab/reports.py)** — `render_markdown()` "Aggregate (resolved subset)" section now leads with **per-unique-pair-key (HEADLINE)**, then includes per-emit as **DIAGNOSTIC** with the median-emits-per-key amplification ratio. Per-sport breakdown, top-5 winners/losers, and reason histogram tables stay per-emit — Session 72's report showed `KXNBAGAME-...-DEN` repeated 5× in top-5 winners, and that visible amplification signal is exactly how a future operator spots a misbehaving stateful candidate. Keep it visible.
+4. **[tools/strategy_lab/candidates/cross_market_correlation.py](tools/strategy_lab/candidates/cross_market_correlation.py)** — added `pair_key=f"{ticker}|{side}"` to the `CandidateOpportunity` constructor at game-grain (matches Session 72's manual "140 unique (ticker, side) keys" re-aggregation). Renamed the existing `extra["pair_key"]` (which was matchup-grain `f"{sport}/{teams}/{winner}"`, used for diagnostic purposes only) to `extra["matchup_key"]` so the new dataclass field has the canonical role. Updated module docstring to spell out the choice and reference Session 73.
+5. **[tools/strategy_lab/README.md](tools/strategy_lab/README.md)** — new **"When to set pair_key"** subsection in the "How to write a candidate" walkthrough. Verbatim text from the Session 73 brief, plus extension of the `CandidateOpportunity` fields code block to include the new row.
+6. **[tests/test_strategy_lab.py](tests/test_strategy_lab.py)** — 5 new cases under "Session 73 — per-pair-key dedup": stateful single key (100 emits → 1 unique), stateful distinct keys (5 emits → 5 unique), one-shot None backward-compat regression (per-pair-key Σ EXACTLY equals per-emit Σ — non-negotiable), mixed stateful + one-shot (50 + 2 → 5 unique), and the synthetic amplification regression (3 unique pair_keys × 50/10/1 emits each producing per-emit Σ +$2,720 vs per-pair-key Σ -$80 — sign flip mirroring Session 72's shape). Plus a small `_make_scored()` helper.
+
+**Verification.**
+1. ☑ Targeted: `python3 -m pytest tests/test_strategy_lab.py -v` → **16/16 pass** in 1.46s (11 baseline + 5 new).
+2. ☑ Session 72 companion: `python3 -m pytest tests/test_strategy_lab_cross_market_correlation.py -v` → 20/20 pass (no regressions from the candidate's `extra` dict rename).
+3. ☑ Schema discipline: `python3 -m pytest tests/test_strategy_lab.py::test_canonical_schema_used_throughout -v` → 1/1 pass (recursively covers new file edits per Session 51 commit-time guard).
+4. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1511 passed, 0 failed in 32.26s** (Session 72 baseline 1506 + 5 new = 1511 expected). Zero regressions, zero skips, zero flakes per Session 70 discipline.
+5. ☑ Manual end-to-end on `cross_market_correlation` against real bot/state/: report at [tools/strategy_lab/reports_out/strategy_lab_cross_market_correlation_2026-05-08.md](tools/strategy_lab/reports_out/strategy_lab_cross_market_correlation_2026-05-08.md). Headline section reads:
+   - **Per unique pair-key (HEADLINE):** Mean CLV **-8.16¢**, Win rate **37.3%**, Total **$-416.00**, n unique pair-keys **140** (resolved 51).
+   - **Per emit (DIAGNOSTIC):** Mean CLV +1.93¢, Total **$+2,567.00**, n emits **5,172**, **median 35.0 emits per unique pair-key**.
+   - The numbers reproduce Session 72's manual re-aggregation EXACTLY: 140 unique keys / 51 resolved / mean -8.16¢ / win rate 37.3% / median 35x amplification — bit-for-bit. The dollar magnitudes differ from Session 72's manual prose because the lab uses 100 contracts default ($-416 lab = -$4.16 per-share × 100 contracts; per-emit $+2,567 matches because Session 72's prose also cited the lab's 100-contract output for that number). Same direction, same shape, units convention spelled out.
+6. ☑ Manual end-to-end backward-compat smoke on `example_total_points_under` (one-shot, pair_key=None throughout): 0 emits as expected (KXNBAGAME-*-TOTAL markets aren't in the captured universe — same as Session 51), n=0 early-return path renders cleanly. Zero crashes, zero behavior change for the one-shot codepath.
+7. ☑ `git diff bot/` empty. No production code touched. No bot restart needed (lab is read-only and not imported by `bot/main.py`).
+
+**Methodology lessons codified.**
+- **Stateful candidates MUST set `pair_key`** per emit. One-shot candidates leave it None. Mechanical enforcement is too heuristic (would need static analysis to detect "can `evaluate()` return non-None twice for the same pair?"); manual discipline + README rule + Test 3's backward-compat regression guard are sufficient.
+- **Lab default is per-unique-pair-key Σ P&L** as the headline metric. Per-emit Σ stays as a diagnostic line — the **gap between the two is itself a signal** (large gap = stateful candidate amplification). Top-5 winners / per-sport / reason histogram tables stay per-emit so the visible amplification (e.g., 5× duplicate winner tickers) remains a "spot the problem" cue.
+- **Pattern transfer:** any future stateful candidate that re-emits on persistent divergence/condition automatically gets correct dedup just by setting `pair_key`. Framework prevents the same false-signal trap that Session 72 had to discover manually.
+- **Units convention is preserved.** Lab uses `DEFAULT_CONTRACTS=100`; cents-vs-dollars formatting unchanged; `total_pnl_cents` and `total_pnl_dollars` keep their pre-Session-73 shape; new `_per_pair_key`-suffixed keys mirror the same shape. Session 72's manual "-$4.16" cited per-share CLV cents converted to dollars (1-contract convention); the lab's "$-416" is the same number times the lab's 100-contract default. Same direction; conversion factor obvious.
+
+**Operating Posture observation.** Session 72 was a Pattern C lab evaluation (no production change). Investigation produced ONE durable methodological improvement: codified here as durable infrastructure rather than a one-time prose lesson. Mirror of Sessions 43b / 47 / 56.5 / 67 — the discovery agent / lab / fixtures keep teaching us their own boundaries; we make those boundaries first-class. The 9-test test ladder (4 unit + 1 end-to-end synthetic) regression-locks the methodology. Future stateful candidates ship correct out of the box.
+
+**Out of scope (held).**
+- Modifying [example_total_points_under.py](tools/strategy_lab/candidates/example_total_points_under.py) — kept as one-shot reference. Test 4 (mixed) implicitly verifies it still works; Test 3 (None backward-compat) regression-locks the math.
+- Modifying the driver ([driver.py](tools/strategy_lab/driver.py)) — pair_key flows through unchanged via `CandidateOpportunity → ScoredOpportunity → aggregate()` already in place. The CLI summary line at `_format_summary` still uses per-emit numbers; that's a UX nit, not a correctness issue. Future tweak if Tyler wants the CLI summary to mirror the markdown headline.
+- Modifying [data_loader.py](tools/strategy_lab/data_loader.py) — pair_key isn't read from on-disk state; it's a candidate-side emit-time field.
+- Adding required fields beyond `pair_key`. The dataclass stays optional-backward-compat by design.
+- Touching any production code under `bot/`. Lab is read-only; this session ships zero `bot/` changes.
+- Bot restart — read-only tool, not imported by `bot/main.py`. Battle Scar #15 Telegram cool-down gate does not apply.
+- Mechanical enforcement of "stateful candidates must set pair_key." Too heuristic; manual discipline + README rule + Test 3 backward-compat guard are sufficient.
+- Frozen real-data fixture for Test 5 — synthetic minimal fixture chosen per Session 56.5 calendar-drift discipline. Manual verification gate (run #5 above) covers actual Session 72 reproduction.
+- Per-pair-key columns on per-sport / top-5 / reason-histogram tables — kept per-emit. Visible amplification (e.g., Session 72's 5× duplicate winners) is preserved as a diagnostic signal.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
