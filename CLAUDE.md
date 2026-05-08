@@ -5083,6 +5083,58 @@ Only 2 tickers (BOSBUF, MINCOL) emit across multiple UTC days — both span midn
 
 ---
 
+### ☑ Session 87 — Bar interpretation during 30-day deduped-CF transition: Outcome C HOLD until 2026-06-08 (May 8, doc-only)
+
+**Trigger.** Session 86 (May 8) shipped emission-time CF dedup at [bot/clv.py:317-340](bot/clv.py:317) using key `(ticker, opp_type, sport, skip_reason, day)`. Going forward, NEW live_momentum CF emissions are deduped per UTC day. But ~30 days of pre-Session-86 second-precision rows persist in `bot/state/clv.json` until they age out of `counterfactual_hotspots`'s 30-day lookback window. This creates a transition window where the Session 84 promotion bar admits raw-N (`N ≥ 30 settled CFs` for `counterfactual_hotspots`) on inflated counts — today's NHL candidate (`no_vol_growth_first_seen/nhl_game`) reads raw N=33 vs. unique-day N=19, a ~1.74× inflation. The bar's effective rigor is roughly half its stated value during the transition. Session 86 left three options for Session 87: (A) re-tune threshold, (B) read-time dedup at the heuristic, or (C) wait for natural convergence. Session 87 picks ONE — no bundling.
+
+**Phase 0 evidence (three independent measurements per Sessions 80-86 discipline).**
+
+**Phase 0.1 — deduped landscape across today's `counterfactual_hotspots` candidates.** Direct query on `bot/state/clv.json` (`status=counterfactual_settled`, `clv_cents IS NOT NULL`, last 30d), using `_sport_classifier.sport_from_ticker_distinguished()` for sport keys (matches the heuristic) and Session 86's dedup key for unique-day count.
+
+| gate / sport | sev | raw N | uniq-day N | inflation | mean CLV | +CLV% | n_no |
+|---|---|---:|---:|---:|---:|---:|---:|
+| edge_below_threshold/nhl_futures | notable | 14 | 7 | 2.00× | +6.36¢ | 100% | 14 |
+| no_leader/atp | info | 40 | 29 | 1.38× | +10.90¢ | 70% | 12 |
+| no_leader/wta | info | 44 | 30 | 1.47× | +11.82¢ | 70% | 13 |
+| no_vol_growth_first_seen/atp_challenger | info | 60 | 52 | 1.15× | +11.70¢ | 88% | 7 |
+| no_vol_growth_idle/atp_challenger | info | 60 | 35 | 1.71× | +9.15¢ | 87% | 8 |
+| no_leader/nhl_game | info | 55 | 31 | 1.77× | +23.95¢ | 82% | 10 |
+| **no_vol_growth_first_seen/nhl_game** | **high** | **33** | **19** | **1.74×** | **+20.91¢** | **91%** | **3** |
+
+Promotability under Session 84 bar (`N ≥ 30 AND mean_clv ≥ +5 AND +CLV% ≥ 0.70 AND severity in {high, notable} AND n_no ≥ 3`): **Raw N ≥ 30 (current bar input):** 1 admission — NHL no_vol_growth_first_seen. **Unique-day N ≥ 30 (wait-and-see, threshold unchanged):** 0 admissions — NHL drops to 19, fails N ≥ 30. **Unique-day N ≥ 15 (re-tune to half):** 1 admission, same NHL.
+
+**Phase 0.2 — read-time dedup surface (3 heuristics iterate `ctx.clv`).** [counterfactual_hotspots.py:163](tools/discovery_agent/heuristics/counterfactual_hotspots.py:163) groups CFs by `(gate, sport)` for **count-based** signal — duplicate-inflated. [concurrent_attack_angles.py:278](tools/discovery_agent/heuristics/concurrent_attack_angles.py:278) groups CFs by event family for count-based concurrent-fire candidates — duplicate-inflated. [threshold_proximity.py:87](tools/discovery_agent/heuristics/threshold_proximity.py:87) builds `clv_positive_by_ticker: dict[str, int]` (per-ticker positive-CLV map; same ticker maps to same key) — NOT duplicate-inflated. **Realistic Outcome B surface is bigger than the Session 86 brief assumed:** 2 of 3 heuristics affected, helper-shared shape required for honest correctness, ~30-50 LOC + new file + tests for the helper + tests for each call site. Not a 3-line drop-in. Per session brief: "If Phase 0 evidence pushes toward B but the surface is bigger than expected, escalate to Outcome B-design-doc rather than ship."
+
+**Phase 0.3 — cost of waiting 30 days.** Candidates with raw N ≥ 30 BUT unique-day N < 30 (i.e., bar admits them under inflated raw N but they'd fail under correct deduped semantics): **1 candidate** — `no_vol_growth_first_seen/nhl_game`. Cross-reference Session 84 disqualifier checks: cycle-delay-disqualified per Session 74 ([bot/live_watcher.py:3129-3133](bot/live_watcher.py:3129) is a binary first-sight check, not a tunable threshold). Session 85 already shipped HOLD on this exact candidate with watch-list triggers covering architectural unblock, cross-sport convergence, and N=50 maturity paths. **Net false-positive operator toil during the 30-day window: 0.** Whatever the bar reports during the transition, the operator outcome on the only admitted candidate is HOLD per Session 85 — same outcome regardless of which interpretation Session 87 picks.
+
+**Side-check — Session 83 bot_state migration.** `bot_state.json` post-Session-86 restart (PID 3072, started 2026-05-08T23:18:16Z) still contains `total_pnl: 770.91` and `today_pnl: 0`. The Session 83 pop logic at [bot/scheduler.py:355-365](bot/scheduler.py:355) is loaded in this process, but the keys won't disappear until the next nightly summary fires (NIGHTLY_SUMMARY_HOUR midnight ET = 04:00 UTC). Currently ~23:38 UTC; nightly fires in ~4.5 hours. Observable cleanup expected on tomorrow's first read. **Informational only** — Session 83 already shipped the fix; Session 87 does not touch this surface.
+
+**Decision: Outcome C — wait for natural convergence.** Phase 0 evidence is decisive against Outcomes A and B. **Outcome A (re-tune to N ≥ 15) rejected** because it picks a noisy threshold mid-transition (per spec: "the kind of thing that gets re-tuned again later"); unique-day N ≥ 15 admits the same NHL candidate as raw N ≥ 30 today, same operator outcome, but bakes in the transition assumption past the point where it's relevant. By 2026-06-08, historical inflation has aged out and N ≥ 15 is a 50% looser bar than Session 84 designed. **Outcome B (read-time dedup at heuristic) rejected** because Phase 0.2 surface is materially bigger than the brief assumed (helper-shared shape, ~30-50 LOC + tests). **Outcome C (wait) accepted** because Phase 0.3 shows zero false-positive operator toil during the transition; the single bar-admitted candidate is HELD per Session 85 regardless. By 2026-06-08, historical rows age out of the 30-day lookback, raw N drifts toward unique-day N organically, and the bar is automatically operating on deduped semantics with no code change. **Pattern C count after this ship: 15.** Mirrors Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 68, 69, 74, 80, 81, 82, 84, 85.
+
+**What shipped (doc-only).** Three CLAUDE.md edits in the "When Tyler Asks 'What's Ready to Promote?'" section: (a) new "Transition window (2026-05-08 → 2026-06-08)" callout between section intro and "The bar" subsection, including Phase 0.1's worked-example table verbatim; (b) new watch-list trigger paragraph in "No-precedent note" subsection naming the natural-convergence date 2026-06-08 and the divergence threshold (raw vs unique-day < 10% means transition complete; > 10% past 2026-06-15 means investigate). (c) this Session 87 ☑ block. Plus README sync per push discipline.
+
+**Watch-list trigger — re-evaluate after 2026-06-08.** Re-measure raw vs unique-day N on `bot/state/clv.json` for active candidates. If raw and unique-day diverge by < 10%, the transition is complete and N ≥ 30 is operating on honest deduped semantics — leave Session 84 protocol unchanged. If divergence > 10% persists past 2026-06-15, investigate (likely a re-introduced over-emission bug or misunderstood lookback window). If a new candidate enters the bar via raw N ≥ 30 during the transition AND has unique-day N < 30 AND is NOT already HELD by a prior session's watch-list, escalate before 2026-06-08 — that's the only path Session 87's Outcome C produces operator toil and it's not in today's data.
+
+**Verification.**
+1. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1524 passed (Session 86 baseline preserved). No tests change in Session 87.
+2. ☑ `git diff bot/ tests/ tools/` empty after edits land — only `CLAUDE.md` and `README.md` changed.
+3. ☑ Phase 0.1 measurement script reproduces against on-disk state.
+4. ☑ §10 `tools/glint_status.py` Strategy Candidates surface continues to render today's NHL candidate as HIGH (no rendering change — bar interpretation is operator-protocol layer, not §10 layer).
+5. ☑ No bot restart. PID 3072 preserved.
+6. ☑ Two-commit sequence pushed to `origin/main`.
+
+**What did NOT change.** [bot/clv.py](bot/clv.py), [bot/live_watcher.py](bot/live_watcher.py), [tools/discovery_agent/heuristics/counterfactual_hotspots.py](tools/discovery_agent/heuristics/counterfactual_hotspots.py), [tools/discovery_agent/heuristics/concurrent_attack_angles.py](tools/discovery_agent/heuristics/concurrent_attack_angles.py), [tools/discovery_agent/heuristics/threshold_proximity.py](tools/discovery_agent/heuristics/threshold_proximity.py), [tools/glint_status.py](tools/glint_status.py), `bot/state/*` — all UNTOUCHED. No tests added or modified. No bot restart. No `MOMENTUM_DISABLED_SPORTS` change. No threshold tune. Session 84 promotion bar at N ≥ 30 unchanged.
+
+**Out of scope (held).** live_momentum kill OR deep-dive (Tyler explicitly deferred). NHL candidate re-investigation (Session 85 owns this; trigger #3 hasn't fired). New heuristics. Telegram throttle (Battle Scar #15 retired post-Session-71). §3 stale-cache (Session 83 shipped). `bot_state.total_pnl` migration (Session 83 pop logic clears next nightly). CF dedup at emission (Session 86 shipped). Bar restructuring (Session 84 shipped). Test changes that match degraded behavior. Read-time dedup at the heuristic (Outcome B — design-doc-first if ever pursued). Threshold re-tune (Outcome A — Phase 0 shows it changes nothing about operator workflow).
+
+**Operating Posture observation.** Per [Operating Posture: Always Search for New Possibilities](#operating-posture-always-search-for-new-possibilities-read-first) — *"negative findings ARE findings"*. Phase 0 ruled out Outcomes A and B in one session: A doesn't change operator workflow during the transition (same NHL admission either way; same HOLD outcome per Session 85), and B's surface is bigger than the brief assumed (helper-shared shape, not a 3-line drop-in). Pattern C is the discipline working — 15 instances since the framework was first articulated. Mirror of Session 86's commit message philosophy: **fix the smallest surface that addresses the bug; document the operational impact; defer adjacent decisions to focused future sessions.** Session 86 shipped the fix at the source (clv.py emission). Session 87 documents that the bar's reading converges naturally over 30 days and the only candidate that the bar inflates today is already-HELD anyway. The transition is observable, time-bounded (2026-06-08), and operator-cost-free.
+
+**Cross-references.** Session 84 ☑ block ([CLAUDE.md:4900](CLAUDE.md:4900)) — promotion bar this Session interprets. Session 85 ☑ block ([CLAUDE.md:4953](CLAUDE.md:4953)) — NHL HOLD precedent that absorbs the transition's only operator burden. Session 86 ☑ block ([CLAUDE.md:5011](CLAUDE.md:5011)) — emission-time fix this Session waits for to age out. Session 47 ☑ block — cross-cohort severity demotion (governs the bar's severity floor). Session 74 ☑ block — cycle-delay-disqualified taxonomy that auto-classifies the only admitted candidate.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
@@ -5498,6 +5550,40 @@ For live_momentum: cross-intersection doesn't apply. Use journal_analysis findin
 
 A candidate is **promotable** when it is mature enough to earn its own focused Session N+1 with Phase 0 + an A/B/C outcome decision. Promotion = elevate from `§10 row` to `next-session subject`. The protocol does NOT commit to ship/not-ship; the next session decides. This section is the maturity bar; it does not act. Sessions 66/74 built the surface-and-track machinery; Session 84 codified this bar. The act-on-it side is the next session.
 
+### Transition window (2026-05-08 → 2026-06-08, Session 87)
+
+Session 86 (May 8) shipped emission-time CF dedup at [bot/clv.py:317-340](bot/clv.py:317) using key `(ticker, opp_type, sport, skip_reason, day)`. Going forward, NEW live_momentum CF emissions are deduped per UTC day; pre-Session-86 second-precision rows persist in `bot/state/clv.json` until they age out of `counterfactual_hotspots`'s 30-day lookback window — natural convergence around **2026-06-08**.
+
+**During this 30-day window, raw N for `counterfactual_hotspots` reads ~1.5-2× inflated relative to deduped semantics.** The bar's effective rigor is roughly half its stated value during the transition. Session 87 evaluated three responses (re-tune threshold / read-time dedup / wait) and shipped Outcome C (wait) on Phase 0 evidence — see Session 87 ☑ block above. Summary:
+
+- **Today's bar admits exactly one candidate** (`no_vol_growth_first_seen/nhl_game`, raw N=33, unique-day N=19, severity HIGH). That candidate is **cycle-delay-disqualified per Session 74** and **HELD per Session 85** — the operator outcome is HOLD regardless of which interpretation Session 87 picked.
+- **By 2026-06-08, raw N drifts toward unique-day N organically** as historical pre-Session-86 rows age out. The bar is automatically operating on deduped semantics with no code change.
+- **Transition-window false-positive operator cost: 0.** Phase 0.3 verified.
+
+**Worked example for transition reading (2026-05-08 measurement):**
+
+```
+| gate / sport                        | sev    | raw_N | uniq_day_N | inflation |
+|-------------------------------------|--------|-------|------------|-----------|
+| edge_below_threshold/nhl_futures    | notable| 14    | 7          | 2.00x     |
+| no_leader/atp                       | info   | 40    | 29         | 1.38x     |
+| no_leader/wta                       | info   | 44    | 30         | 1.47x     |
+| no_vol_growth_first_seen/atp_chall  | info   | 60    | 52         | 1.15x     |
+| no_vol_growth_idle/atp_chall        | info   | 60    | 35         | 1.71x     |
+| no_leader/nhl_game                  | info   | 55    | 31         | 1.77x     |
+| no_vol_growth_first_seen/nhl_game   | HIGH   | 33    | 19         | 1.74x     |
+
+Promotable under bar:
+  Raw N ≥ 30:            1 (NHL no_vol_growth_first_seen)
+  Unique-day N ≥ 30:     0
+  Unique-day N ≥ 15:     1 (same NHL)
+
+The single bar-passing candidate is cycle-delay-disqualified per Session 74,
+HELD per Session 85. Transition-window operator cost: $0 / 0 sessions.
+```
+
+**Operator action during transition:** when applying the bar to a candidate, no special handling is required — the protocol works as written; the Session 84 ladder + Session 47 demotion + disqualifier checks all keep producing correct operator outcomes. The transition only affects bar *rigor* (1.5-2× looser today than at 2026-06-08), not bar *correctness*. If a NEW candidate enters the bar via raw N ≥ 30 during the window AND has unique-day N < 30 AND is NOT already HELD by a prior session's watch-list, escalate before 2026-06-08 — that's the only path Session 87's Outcome C produces operator toil. As of 2026-05-08, no such candidate exists.
+
 ### The bar (per-heuristic — only `counterfactual_hotspots` carries the universal thresholds)
 
 ```
@@ -5546,6 +5632,8 @@ universe_gap:
 ### No-precedent note
 
 `vig_stack_series` and `vig_stack_futures` are the only currently-promoted strategies; both predate the discovery-candidate framework (Session 43a, May 1, 2026) by 6+ weeks. **No historical promotion baseline exists for the candidate-data shape.** The thresholds above are first-principles, calibrated against the May 8, 2026 candidate set so that exactly one cohort (`no_vol_growth_first_seen/nhl_game`) clears the bar AND survives all disqualifier checks at the floor of maturity. Re-tune the bar **only** when (a) a future candidate is promoted via this protocol AND its outcome provides empirical EV evidence at the candidate-data shape, OR (b) the bar produces 0 or > 5 promotable candidates against a stable §10 surface for 7 consecutive days.
+
+**Re-evaluate the N ≥ 30 threshold for `counterfactual_hotspots` after the natural-convergence date 2026-06-08 (Session 87 watch-list trigger).** Pre-Session-86 historical CF rows age out of the 30-day lookback by then. Re-measure raw vs. unique-day N on `bot/state/clv.json` for the active candidates; if raw and unique-day diverge by < 10%, the transition is complete and N ≥ 30 is operating on honest deduped semantics — leave Session 84 protocol unchanged. If divergence > 10% persists past 2026-06-15, investigate (likely a re-introduced over-emission bug or a misunderstood lookback window). See the "Transition window" callout above for the full Phase 0 reasoning behind the wait-and-see decision.
 
 ### How to run
 
