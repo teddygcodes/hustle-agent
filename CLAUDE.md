@@ -4708,7 +4708,7 @@ Mirrors prior Pattern C precedents: Sessions 18.5, 38a-2, 40, 41, 42, 67-investi
 - **Cursor reach degradation:** `cursor_rows` median drops below **1500** sustained for 10+ consecutive scans (Apr 30 baseline: 1949). Below 1500 means the deadline architecture is meaningfully degraded vs the documented Session 28-followup baseline.
 - **Page-count regression:** pages flushed median drops below **600** for 10+ consecutive scans (today's range: 683-926).
 - **Decisions volume collapse:** decisions per day drops below **50** sustained for 3+ days (today's count: 161), AND coincides with cursor_rows degradation. Together that signals real degradation; either alone is uninformative (decisions volume tracks live-game windows independent of universe coverage).
-- **Cadence collapse recurrence with NEW mechanism:** if 4h+ idle gaps recur AND are NOT caused by Kalshi API retry-storms (Gap 1 shape) or morning-routine scheduling overrides (Gap 2 shape) — i.e., if the scanner is genuinely sleeping for 4h on the IDLE schedule with no other explanation. That would indicate a real scanner-timer regression worth a focused session.
+- **Cadence collapse recurrence with NEW mechanism:** if 4h+ idle gaps recur AND are NOT caused by Kalshi API retry-storms (Gap 1 shape — Session 80), morning-routine scheduling overrides (Gap 2 shape — superseded by Session 81; MORNING is a 9-second briefing helper, not a scheduler), OR host-side macOS sleep / DarkWake suspending the python process (Cause C — Session 82; load-bearingly handled by [bot/main.py:1500-1511](bot/main.py:1500)'s wall-clock sleep). I.e., if the scanner is genuinely sleeping for 4h on the IDLE schedule with NONE of those three explanations — the host is verifiably awake throughout, no Kalshi retry-storm in flight, no MORNING window overlap. That would indicate a real `_main_loop` scanner-timer regression worth a focused session.
 - **Cohort_report bias:** if a future weekly report's universe coverage section shows >50% missing on active-strategy series despite the Apr 30 802-page-reach baseline, Session 28-2 (per-series-paginated rewrite) becomes a real candidate.
 
 Until one of these fires, the deadline-clip WARN is documented expected state under current Kalshi load. **Do not bump the constant. Do not silence the WARN.**
@@ -4779,6 +4779,74 @@ Out-of-scope items per the brief held untouched: the actual cause of the 4h gap 
 3. ☑ No bot restart.
 4. ☑ No tests modified. `pytest` baseline unchanged.
 5. ☑ Each Session 81 claim anchored to a specific file:line citation (scanner.py:744-752, scheduler.py:64-67, scheduler.py:282-345, scheduler.py:286, scheduler.py:53, scheduler.py:23, config.py:745, main.py:1225).
+
+**README sync.** Committed separately per push discipline.
+
+### ☑ Session 82 — 4h IDLE-30min cycle gap diagnosed as host-side macOS sleep (May 8, doc-only Pattern C, no production change)
+
+**Trigger.** Sessions 80 and 81 left one operationally-loaded question open: what gates the IDLE-30min cycle, and why didn't it fire 7 times in a row between 04:33:57 ET → 08:45:34 ET on 2026-05-08? Session 80 attributed it to a "MORNING weather-only override"; Session 81's Phase 0 disproved that. Session 82 was Phase-0-mandatory: locate the gate, characterize the silence, quantify cost, only THEN scope an A/B/C verdict.
+
+**Phase 0 evidence (three independent measurements, all read-only).**
+
+1. **Raw timeline of the gap** ([bot/logs/bot.log](bot/logs/bot.log) bracket times are ET):
+
+| Hour bucket | Log lines | Notes |
+|---|---|---|
+| 04 (post-04:33:57) | 85 | live_watcher / market_maker tail of pre-gap activity |
+| **05** | **0** | complete silence |
+| **06** | **0** | complete silence |
+| **07:00–07:35** | **0** | complete silence |
+| 07:36–07:59 | 59 | position_monitor edge-degraded pruning + tracker resumption |
+| 08:00–08:25 | 272 | live_watcher + httpx (Telegram editMessageText) |
+| 08:26 | 9 | MORNING briefing (9-second weather-only) |
+| 08:45:34+ | resumes | full SCAN CYCLE log line |
+
+   **3 hours of complete log silence from ~04:34 to 07:36 ET** across all channels — live_watcher, scheduler, position_monitor, httpx, scanner, main. No "skipping scan", no "off-hours", no gate-rejection lines, no scheduler-tick-but-not-scan markers. [bot/logs/watchdog.log](bot/logs/watchdog.log) confirmed no restart event on May 8 — the python child was alive throughout.
+
+2. **No code-level gate exists.** Direct read of all four candidate files with file:line citations:
+   - SCAN CYCLE log: sole emission at [bot/scanner.py:468](bot/scanner.py:468). Called once per `scan_cycle()` invocation.
+   - Scan-interval determination: [bot/scanner.py:141-163](bot/scanner.py:141) `get_scan_interval(games)` returns LIVE/PREGAME/IDLE based on game state. **No time-of-day branch. No market-hours branch. No quota gate.**
+   - Interval constants: [bot/config.py:50-52](bot/config.py:50) `SCAN_INTERVAL_IDLE = 1800` / `SCAN_INTERVAL_PREGAME = 600` / `SCAN_INTERVAL_LIVE = 120`.
+   - Main loop sleep: [bot/main.py:1499-1511](bot/main.py:1499) is a **wall-clock sleep mechanism**. The 12-line comment at lines 1500-1505 is load-bearing: *"Wall-clock sleep — asyncio.sleep uses time.monotonic() which does not advance during macOS system sleep. On a battery laptop in DarkWake (2-180s wake windows), a single 30-min sleep never accumulates a long enough contiguous awake period to fire. Polling every 30s lets each DarkWake window check the wall clock and resume the loop when due."*
+   - `bot/scheduler.py` only routes scheduled events (morning briefing, nightly summary, log rotations, balance reconcile), not SCAN CYCLE cadence (Session 81 mapped this).
+
+   **The cadence is purely interval-driven. There is no gate to "intentionally throttle" or "accidentally close." The wall-clock sleep mechanism is the design, and it is explicitly designed to handle macOS sleep / DarkWake.**
+
+3. **Cost on 2026-05-08.** Trades entered during 04:33–08:46 ET window: **0**. Nearest trades: 03:17 ET pre-gap (KXHIGHCHI vig_stack) and 10:06 ET post-gap (KXATPMATCH live_momentum). **Direct P&L cost: $0.** Cross-day cross-reference confirmed Session 81's earlier finding that no trades were lost on gap days.
+
+**Diagnosis.** The 3-hour silence is consistent with **macOS host-side system sleep / DarkWake** suspending the python process. When the host slept, all coroutines paused (asyncio.sleep, live_watcher, heartbeat, position_check, scheduler). When the host woke at ~07:36 ET, the position-check loop ran first (cheap CPU work — Edge degraded pruning), then the wall-clock check at [bot/main.py:1508](bot/main.py:1508) saw `remaining` deeply negative, broke out of sleep, and proceeded. A scan iteration completed by 07:55:02 (per `Next scan in 1800s` log at line 1499); MORNING fired at 08:26 (separate scheduler-routed event); the next IDLE-30min cycle resumed normally at 08:45:34. **This is exactly what the wall-clock sleep mechanism is designed to do.** The 6/11-days recurrence pattern correlates with overnight host-sleep behavior, not with any bot-side state.
+
+**Decision: Outcome C — Pattern C ship (doc-only, no code change).** Three converging reasons:
+1. **No gate exists** to fix or tune. Phase 0.2 confirmed.
+2. **The wall-clock sleep mechanism IS the design** that handles this. Replacing it is Outcome B territory (launchd `StartCalendarInterval`, persistent journal-based scheduling — bigger structural changes that require a design doc).
+3. **No measurable cost** ($0 on 5/8; Session 81's per-day audit also showed no losses on prior gap days). The pattern recurs because the host sleeps, not because the bot misses opportunities — there's nothing to bet on at 05:00 ET when no live games run.
+
+Mirrors Pattern C precedents: Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 68, 69, 74, 80, 81. **Pattern C count after this ship: 12.**
+
+**Watch-list trigger — re-investigate IDLE-30min cadence when ANY of:**
+- **Mid-day gap with no host-sleep explanation:** A 4h+ SCAN CYCLE gap appears DURING typical awake hours (e.g., 14:00–18:00 ET) when the host is verifiably awake (heartbeat advancing, live_watcher ticks present in bot.log throughout the gap window, no laptop-lid-closed signal). Points to a real `_main_loop` regression — not host sleep.
+- **Wall-clock-sleep mechanism regression:** A future code change to [bot/main.py:1500-1511](bot/main.py:1500) replaces wall-clock with monotonic-clock sleep, OR removes the 30s polling cap. Either change would re-create the original DarkWake bug.
+- **Cost materializes:** Decisions/trades-during-gap volume on gap days drops materially below non-gap days for matched market windows AND coincides with measurable lost edge (settled CFs >+5¢ on tickers we missed). Today's evidence is $0 cost; if that flips, the question becomes worth re-asking.
+- **launchd / cron alternative ships:** A future session moves SCAN CYCLE scheduling from the in-process wall-clock loop to OS-level scheduling (launchd `StartCalendarInterval` or similar). At that point, the wall-clock sleep is dead code and this Session 82 entry should be marked superseded.
+
+**Session 80 watch-list bullet update.** Already shipped above (the "Cadence collapse recurrence with NEW mechanism" sub-clause). Session 80's original framing named two mechanisms (Kalshi retry-storm + morning-routine override) and held "no other explanation = real regression" as the trigger. Session 81 retired the morning-routine sub-clause as imprecise (MORNING is a 9-second briefing helper, not a 4h scheduler). Session 82 names the canonical third explanation: **host-side macOS sleep / DarkWake (Cause C)**. With Causes A + B + C named, the "no other explanation" trigger now genuinely points to a real `_main_loop` regression.
+
+**What did NOT change.**
+- No `bot/` code edits. No tests added or modified.
+- No bot restart.
+- The wall-clock sleep at [bot/main.py:1500-1511](bot/main.py:1500), the heartbeat loop (Session 77), Battle Scar #13 (Session 39 executor wrap), and the 90s `heartbeat_stale` threshold — all UNTOUCHED per session brief constraints.
+- All other watch-list items from Sessions 80 and 81 (cursor-reach degradation, page-count regression, decisions-volume collapse, MORNING briefing duration sustained-medians >60s, etc.) — unchanged and still active.
+
+**Verify.**
+1. ☑ `git diff bot/ tests/ tools/` empty after edits land — only `CLAUDE.md` and `README.md` changed.
+2. ☑ Phase 0 numbers reproduce against on-disk state. Re-runnable: `grep "^\[2026-05-08 0[5-7]" bot/logs/bot.log | wc -l` → 0; `paper_trades.json` query for 04:33–08:46 ET on 5/8 → 0 entries; `grep -c "SCAN CYCLE" bot/logs/bot.log` → 20 (vs ~48 expected at full uptime).
+3. ☑ No bot restart. PID preserved.
+4. ☑ No tests modified. `python3 -m pytest tests/ --timeout=15 --tb=no -q` baseline unchanged.
+5. ☑ Each Session 82 claim anchored to a specific file:line citation (scanner.py:141-163, scanner.py:468, config.py:50-52, main.py:1218, main.py:1499-1511, main.py:1508, plus scheduler.py inheritances from Session 81).
+
+**Operating Posture observation.** Phase 0 caught it again. Sessions 79 / 80 / 81 / 82 all verified premise before locking scope; each saved hours of wrong-direction work. Per *"negative findings ARE findings"* — Session 82 ruled out the "intentional throttle" framing, ruled out the "code-level bug" framing, and identified the actual mechanism (host-side sleep) as one the bot's existing design *already handles correctly*. Pattern C is the discipline working, not failing. The wall-clock sleep comment at [bot/main.py:1500-1505](bot/main.py:1500) is now formally cross-referenced by an explicit watch-list trigger that protects it from being silently removed.
+
+**Caveat for next-session-self.** The bot's `scans_today=4` at 10:13 ET on 5/8 (vs ~20 expected at 30-min cadence with full uptime) is itself a signal: the bot ran at ~20% of nominal cadence today due to overnight host sleep. Acceptable per the cost analysis ($0 impact) but worth tracking. If a future session ships a mid-day scan-rate alert, that's the threshold to hit.
 
 **README sync.** Committed separately per push discipline.
 
