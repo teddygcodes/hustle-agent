@@ -79,11 +79,13 @@ The driver writes `reports_out/strategy_lab_<name>_<date>.md`. Sections:
 
 1. **LAB LIMITATIONS** — read these every time. The numbers are upper-bound hypotheticals, not P&L forecasts.
 2. **Run metadata** — window, match-window-hours, rows scanned, would-have-bets emitted, resolved vs unresolved counts.
-3. **Aggregate (resolved subset)** — mean CLV, win rate, total hypothetical P&L, settle rate.
-4. **Per-sport breakdown** — one row per sport.
-5. **Per-confidence-decile** — only when the candidate emits varied confidence.
-6. **Top 5 winners / Top 5 losers** — drill-down on extremes.
-7. **Reason histogram** — distribution of `opp.reason` strings.
+3. **Aggregate (resolved subset)** — per-unique-pair-key headline metrics plus per-emit amplification diagnostics.
+4. **Decision diagnostics** — cross-sport concentration and median amplification warnings.
+5. **Per-sport pair-key breakdown** — cohort EV at the same unique-opportunity grain as the headline.
+6. **Per-sport emit breakdown** — raw emit table, useful for spotting stateful amplification.
+7. **Per-confidence-decile** — only when the candidate emits varied confidence.
+8. **Top 5 winners / Top 5 losers** — drill-down on extremes.
+9. **Reason histogram** — distribution of `opp.reason` strings.
 
 A candidate showing **net-negative resolved P&L** is dead — even before slippage, it loses. A candidate showing positive P&L is *interesting*, not *proven* — see Limitations.
 

@@ -298,6 +298,24 @@ def aggregate(scored: list[ScoredOpportunity]) -> dict:
             "total_pnl_cents": sum((x.pnl_cents or 0) for x in rs),
         }
 
+    # Per-sport breakdown after pair_key dedup (Session 75 evidence rail).
+    # The per-emit table remains useful for amplification diagnostics, but
+    # cohort EV decisions should use the same unique-opportunity grain as the
+    # headline.
+    per_sport_pair_key: dict[str, dict] = {}
+    by_sport_pair_key: dict[str, list[ScoredOpportunity]] = {}
+    for s in deduped:
+        key = s.sport or "unknown"
+        by_sport_pair_key.setdefault(key, []).append(s)
+    for sport, items in by_sport_pair_key.items():
+        rs = [x for x in items if x.status != UNRESOLVED and x.clv_cents is not None]
+        per_sport_pair_key[sport] = {
+            "n": len(items),
+            "n_resolved": len(rs),
+            "mean_clv_cents": (sum(x.clv_cents for x in rs) / len(rs)) if rs else None,
+            "total_pnl_cents": sum((x.pnl_cents or 0) for x in rs),
+        }
+
     # Per-confidence-decile (only meaningful if candidates emit varied confidence)
     confidences = [s.opp.confidence for s in scored]
     has_variation = len(set(round(c, 2) for c in confidences)) > 1
@@ -332,6 +350,7 @@ def aggregate(scored: list[ScoredOpportunity]) -> dict:
         "total_pnl_cents": per_emit["total_pnl_cents"],
         "total_pnl_dollars": per_emit["total_pnl_dollars"],
         "per_sport": per_sport,
+        "per_sport_pair_key": per_sport_pair_key,
         "per_confidence_decile": per_decile,
         # Per-unique-pair-key (Session 73)
         "n_unique_pair_keys": per_pair_key["n_total"],

@@ -4518,6 +4518,51 @@ Until one of those fires, all `no_vol_growth_first_seen/*` §10 findings are aut
 
 ---
 
+### ☑ Session 75 — Volume-spike live_momentum overlay Phase 0 + strategy_lab prototype: Outcome C (May 8, lab-only)
+
+**Trigger.** live_momentum has now had four independent retuning frames fail to find a durable fix (Sessions 38a-2 / 40 / 41 / 42), with Session 40's structural Win:Loss magnitude finding still the central fact: avg win +$3.41 vs avg loss -$13.10 (ratio 0.261). Volume-spike entry confirmation was the last unexplored lever before seriously considering a future live_momentum kill switch.
+
+**Phase 0 mapping.**
+1. **Per-tick log:** `bot/state/live_ticks.jsonl` + archives have **434,471 ticks over 30d**, **9 sports**, **773 distinct tickers** - sample sufficiency PASS for tick replay in general. But fields are price/game-state only: `price`, `bid`, `opp_price`, `opp_bid`, `dip`, `dqs`, `volatility`, etc. There is **no tick `volume`, `recent_volume`, `last_minute_volume`, or `tick_volume` field**. `volatility` is a game-context label, not traded volume.
+2. **Universe snapshot:** `bot/state/universe.jsonl` + archives have **413,516 rows over 30d**. `volume_24h` and `open_interest` are present on 100% of rows; `volume` is present on 408,745 rows. Nonzero counts: `volume_24h=185,856`, `volume=188,928`, `open_interest=191,717`.
+3. **live_watcher capture site:** `_journal_record_scan(..., volume=...)` records scan-level match total volume in `live_journal.json` ([bot/live_watcher.py:100](bot/live_watcher.py:100)); `_tick_momentum`'s `_log_tick` call records price, dip, DQS, and game context but **not market volume** ([bot/live_watcher.py:1593](bot/live_watcher.py:1593)); `scan_live_matches()` computes `total_vol = side_a.volume + side_b.volume`, uses it for `MIN_VOLUME_LIVE`, journals it, sorts candidates by `volume_24h`, and tracks `_prev_scan_volumes` off lifetime `volume` ([bot/live_watcher.py:2937](bot/live_watcher.py:2937)).
+4. **Branch decision:** Branch B. Usable volume exists only at scan/snapshot granularity, not per tick. The prototype therefore uses scan-level `volume_24h` history as a coarse proxy. Real per-tick volume momentum still requires Session 76 instrumentation if this ever re-opens.
+5. **Back-test framework:** `tools/strategy_lab/driver.py` is the right framework for Branch B because it streams universe snapshots. `tools/tick_backtest.py` remains the right framework for a future Branch A, but cannot evaluate volume momentum until live_ticks rows actually carry volume.
+
+**What changed (lab-only).**
+- [tools/strategy_lab/candidates/volume_spike_live_momentum.py](tools/strategy_lab/candidates/volume_spike_live_momentum.py) - new Branch-B candidate. Tunables at top: `VOLUME_LOOKBACK_TICKS=12`, `VOLUME_BASELINE_TICKS=60`, `MIN_VOL_RATIO=1.5`, `VOLUME_FIELD="volume_24h"`. It clones live_momentum price-action gates from config constants (leader floor, sport profile min/max dip, max entry, disabled-sport gate, DQS threshold when row data supplies DQS) without importing `LiveMomentumStrategy`. Emits `pair_key=f"{ticker}|long"` for Session 73 dedup. Also includes `DipOnlyLiveMomentumBaseline` for same-period overlay-vs-baseline comparison.
+- [tools/strategy_lab/evaluator.py](tools/strategy_lab/evaluator.py) - `aggregate()` now also returns `per_sport_pair_key`, so cohort EV can be read at the same unique-opportunity grain as the headline.
+- [tools/strategy_lab/reports.py](tools/strategy_lab/reports.py) - report now includes Decision diagnostics (cross-sport concentration + amplification) and a Per-sport pair-key breakdown before the raw per-emit sport table.
+- [tools/strategy_lab/README.md](tools/strategy_lab/README.md) - "How to read a report" updated for the new diagnostics.
+- [tests/test_strategy_lab_volume_spike_live_momentum.py](tests/test_strategy_lab_volume_spike_live_momentum.py) - 7 tests: candidate emits on synthetic volume spike + dip + DQS pass; volume-ratio fail; DQS fail; dip-only baseline; pair-key dedup regression; single-sport concentration report flag; schema substring guard.
+
+**Phase 1 evidence.**
+- Main run: `python3 -m tools.strategy_lab.driver --candidate volume_spike_live_momentum --days 30 --report-out tools/strategy_lab/reports_out/` -> **14 emits / 4 unique pair-keys / 1 resolved pair-key / mean -81.00¢ / Σ P&L -$81.00**. Report: [strategy_lab_volume_spike_live_momentum_2026-05-08.md](tools/strategy_lab/reports_out/strategy_lab_volume_spike_live_momentum_2026-05-08.md).
+- Per-cohort EV: only `nba` resolved, **n=1, mean -81.00¢** - fails +$1/trade bar and sample bar.
+- Cross-sport: **FAIL single-sport concentration** - resolved pair-key coverage is NBA only.
+- Train/test 70/30 by date order: overlay train has the lone resolved loser (-$81); overlay test has 0 resolved pair-keys - sign agreement cannot be established.
+- Volume-ratio sensitivity: ratios `{1.2, 1.5, 2.0, 3.0}` all produce the same **4 unique / 1 resolved / -81.00¢** result (3.0 drops one emit only). Flat/non-monotonic sensitivity - no real signal.
+- Comparison vs dip-only baseline: dip-only scan proxy produces **47 unique pair-keys / 4 resolved / mean +27.5¢ / Σ P&L +$110.00**, with train +$83 and test +$27. The volume overlay is materially worse than the no-overlay baseline.
+
+**Decision: Outcome C (no edge).** Every evidence rail fails: thin sample, single-sport concentration, train/test unresolved on test, flat sensitivity, and the overlay loses to the no-overlay baseline. This reinforces the future Outcome E queue item: if/when we open a dedicated kill-session, Session 75 becomes the fifth independent disqualification framing for live_momentum. Not killing it here per scope.
+
+**What did NOT change.**
+- No `bot/` production code changed.
+- No `bot/live_watcher.py` per-tick volume instrumentation shipped.
+- No bot restart and no live trading.
+- No `LIVE_MOMENTUM_DISABLED` or equivalent kill switch added.
+
+**Verification.**
+1. ☑ Phase 0 mapping commands + 30d tick/universe sample scripts completed.
+2. ☑ Strategy lab real-data run completed: 14 emits / 4 unique / 1 resolved / -$81.
+3. ☑ Sensitivity sweep `{1.2, 1.5, 2.0, 3.0}` completed; all fail.
+4. ☑ Targeted lab tests: `python3 -m pytest tests/test_strategy_lab.py tests/test_strategy_lab_cross_market_correlation.py tests/test_strategy_lab_volume_spike_live_momentum.py -v` -> **43 passed in 1.62s**.
+5. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` -> **1518 passed in 33.88s** (Session 73 baseline 1511 + 7 new). 0 failures, 0 skips.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.

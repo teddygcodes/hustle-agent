@@ -128,9 +128,70 @@ def render_markdown(
     )
     lines.append("")
 
+    # Decision diagnostics - deliberately conservative. These are not a
+    # replacement for a session-specific evidence table; they make the most
+    # common lab false positives loud in the generated artifact.
+    if summary.get("per_sport_pair_key"):
+        resolved_sports = [
+            sport for sport, s in summary["per_sport_pair_key"].items()
+            if s["n_resolved"] > 0
+        ]
+        combined_mean = summary["mean_clv_cents_per_pair_key"]
+        lines.append("## Decision diagnostics\n")
+        if len(resolved_sports) == 1:
+            lines.append(
+                f"- Cross-sport check: **FAIL: single-sport concentration** "
+                f"({resolved_sports[0]} only on resolved pair-keys)."
+            )
+        elif len(resolved_sports) == 0:
+            lines.append(
+                "- Cross-sport check: **INCONCLUSIVE: no resolved pair-keys**."
+            )
+        elif combined_mean is not None and combined_mean >= 0.5:
+            lines.append(
+                f"- Cross-sport check: **PASS** "
+                f"({len(resolved_sports)} resolved sports, mean "
+                f"{combined_mean:+.2f}¢ per pair-key)."
+            )
+        else:
+            mean_txt = "-" if combined_mean is None else f"{combined_mean:+.2f}¢"
+            lines.append(
+                f"- Cross-sport check: **FAIL** "
+                f"({len(resolved_sports)} resolved sports, mean {mean_txt} "
+                "per pair-key; bar is +0.50¢)."
+            )
+        if summary["median_emits_per_pair_key"] > 5.0:
+            lines.append(
+                f"- Amplification check: **WARN** "
+                f"(median {summary['median_emits_per_pair_key']:.1f} emits "
+                "per pair-key; dedup is materially affecting the result)."
+            )
+        else:
+            lines.append(
+                f"- Amplification check: median "
+                f"{summary['median_emits_per_pair_key']:.1f} emits per pair-key."
+            )
+        lines.append("")
+
+    if summary.get("per_sport_pair_key"):
+        lines.append("## Per-sport pair-key breakdown\n")
+        lines.append("| Sport | n pair-keys | resolved | Mean CLV ¢ | Σ P&L |")
+        lines.append("|---|---|---|---|---|")
+        sports_pair_key = sorted(
+            summary["per_sport_pair_key"].items(),
+            key=lambda kv: (-(kv[1]["total_pnl_cents"] or 0), kv[0]),
+        )
+        for sport, s in sports_pair_key:
+            lines.append(
+                f"| {sport} | {s['n']} | {s['n_resolved']} | "
+                f"{_fmt_cents(s['mean_clv_cents']).strip()} | "
+                f"{_fmt_dollars(s['total_pnl_cents'])} |"
+            )
+        lines.append("")
+
     # Per-sport breakdown
     if summary["per_sport"]:
-        lines.append("## Per-sport breakdown\n")
+        lines.append("## Per-sport emit breakdown\n")
         lines.append("| Sport | n | resolved | Mean CLV ¢ | Σ P&L |")
         lines.append("|---|---|---|---|---|")
         sports = sorted(
