@@ -4369,6 +4369,73 @@ Mirrors the Pattern C discipline of Sessions 18.5, 38a-2, 40, 41, 42, 45, 46, 67
 
 ---
 
+### ☑ Session 72 — Cross-market correlation Phase 0 + strategy_lab prototype: Outcome C (May 8, ~2h, no production code, lab-only)
+
+**Trigger.** ONE durable edge (`vig_stack_series` on stable families). Sessions 38a-2 / 40 / 41 / 42 / 67 / 68 / 69 collectively exhausted existing-strategy retuning surfaces. Session 71 closed the last operational gap. New edge has to come from new strategy categories. Cross-market correlation was the most concrete candidate from Session 71's strategic discussion: NBA/NHL playoff series vs next-game prices that should be Bayesian-related; weather bracket-vs-threshold ladder; championship futures vs game-level prices for contender teams. Session 72 was Phase 0 forensic mapping + Phase 1 strategy_lab prototype (Session 51 pattern), explicitly NOT production scanner.
+
+**Phase 0 findings.**
+- **Type 1 (series-vs-next-game):** KXNBASERIES (216) + KXNBAGAME (582) and KXNHLSERIES (216) + KXNHLGAME (380) all concurrent in current universe.jsonl (NBA + NHL Round 2 playoffs active). Phase 0c manual check on KXNBASERIES-26CLEDETR2-CLE (35¢ yes_ask) vs KXNBAGAME-26MAY*-CLE (41-58¢ yes_ask) showed median divergence **21¢** across 81 paired observations — but mathematically self-consistent for "CLE down 1-2 in series" (P(series) = 0.5 × 0.56 + 0.10 × 0.44 ≈ 32%, vs market 35%). **Naive divergence ≠ mispricing.**
+- **Type 2 (championship futures vs per-game):** Per Sessions 41/49 evidence, regular-season delta is tiny + noisy. Deferred to v2.
+- **Type 3 (bracket-vs-threshold within single weather event):** **Already covered by vig_stack.** [bot/strategies/vig_stack_series.py:339-354](hustle-agent/bot/strategies/vig_stack_series.py:339) confirms KXHIGH* events include BOTH B-bracket AND T-threshold markets in the same ladder; yes_sum vig math sums across both. If they materially disagreed, yes_sum > 105¢ would already trigger the existing arb. Per spec early-out: **type #3 dropped from Phase 1**.
+- **Type 4 (player-prop vs game-outcome):** KXNBAPTS / KXNBAREB / KXNBAAST exist; liquidity unknown. Out of scope for v1.
+- **Phase 0d back-test infra:** Universe shipped 2026-04-25 (Session 12). Today is 2026-05-07 = 12 days actual coverage (vs spec target ≥14 — borderline, documented in report). 10 archive days have concurrent series+game pairs. **0 KX*SERIES records in clv.json** (series tickers have NEVER been scanned by an active strategy → no settlement data). 248 settled NBA/NHL game records out of 373 total (66% settlement coverage on game side). **Implication: prototype must emit on game side only**; series-side rows update state but cannot be scored.
+
+**Phase 1 prototype.**
+- New file [tools/strategy_lab/candidates/cross_market_correlation.py](hustle-agent/tools/strategy_lab/candidates/cross_market_correlation.py) (~190 LOC). Stateful candidate: `_latest_by_ticker` + `_series_ticker_by_pair` index for O(1) partner lookup. `_parse_pair_key(ticker)` extracts `(kind, sport, frozenset({TEAMA,TEAMB}), winner)` for both series and game tickers. Series-side rows update partner index only; game-side rows attempt match → liquidity floor → divergence threshold → persistence threshold → emit `CandidateOpportunity` on the game ticker (NO if game_yes > series_yes; YES otherwise). Tunables: `MIN_DIVERGENCE_CENTS=5.0`, `MIN_PERSISTENCE_SCANS=1`, `MIN_LIQUIDITY_VOLUME_24H=100`. `clv_match_window_hours=168.0` (7 days) so all scan-time emits on the same ticker match the same settlement record.
+- New tests [tests/test_strategy_lab_cross_market_correlation.py](hustle-agent/tests/test_strategy_lab_cross_market_correlation.py): **20 cases** covering pair-key extraction (6 parametrized + 2 negative), state-update-only-on-series-side, no-partner returns None, below-divergence-threshold, liquidity floors (both legs), NO and YES emit branches with correct math, persistence threshold (monkeypatch to 2 = first scan blocked, second scan emits), wrong-winner doesn't match, cross-matchup state isolation, missing-identifier defensive None.
+- Schema discipline ([tests/test_strategy_lab.py:test_canonical_schema_used_throughout](hustle-agent/tests/test_strategy_lab.py)) recursively covers new file via `lab_dir.rglob("*.py")` — no extension needed (caught my own initial docstring violation in plan execution; corrected to "suffix-_won anti-pattern" without literal substrings).
+
+**Prototype results (raw lab output, before deduplication).**
+```
+Universe rows scanned: 409,590 over 14d window (12d actual)
+Would-have-bets emitted: 5,143
+Resolved (settled clv match): 1,331  (settle rate 25.9%)
+Mean CLV: +1.93¢   Win rate: 57.0%   Total hypothetical P&L: +$2,567
+Per sport:  nhl 1795 emits / 634 resolved / mean +8.07¢ / Σ $+5,118
+            nba 3348 emits / 697 resolved / mean -3.66¢ / Σ $-2,551
+```
+
+**Per-unique-ticker re-aggregation (Session 47-style cross-cohort discipline).** The lab counts emissions, NOT outcomes — a stateful candidate that re-emits per scan amplifies a small number of unique-ticker outcomes by the median emit-count per key (35 for this prototype, max 122). 5,143 emits collapse to **140 unique (ticker, side) keys, 51 resolved**:
+
+| Sport | Unique resolved n | Mean CLV | Σ ¢ | Σ $ | Win rate |
+|---|---|---|---|---|---|
+| nba | 21 | **−13.67¢** | −287¢ | **−$2.87** | 38.1% |
+| nhl | 30 | **−4.30¢** | −129¢ | **−$1.29** | 36.7% |
+| **Combined** | **51** | **−8.16¢** | **−416¢** | **−$4.16** | **37.3%** |
+
+**Both sports negative on the per-unique-ticker basis.** The +$2,567 raw lab number was scan-cadence amplification artifact: each unique outcome scored ~35 times (median) inflated to look like signal. Once deduplicated, the picture flips: the divergence detector captures legitimate series-state asymmetry (the Phase 0c hypothesis), not mispricing.
+
+**Decision: Outcome C (no real edge).** Mirrors Sessions 18.5 / 38a-2 / 40 / 41 / 42 / 45 / 46 / 67-investigate / 68 / 69 Pattern C discipline. Trigger criteria for Outcome A required `hypothetical P&L positive across ≥ 2 sports` — fails on per-unique-ticker basis (both negative). Default Outcome C trigger fires on `single-sport concentration` (raw NHL +$5118 came entirely from one sport, NBA negative) AND `<10 divergences over 12d` (51 unique resolved across the window — not flatly below the threshold but the per-sport unique counts of 21 and 30 are thin AND already negative). Outcome D rejected because back-test infra IS sufficient (12 days coverage, 25.9% settle rate); the data shape disqualifies the lever, not the data quantity.
+
+**Methodology lesson — scan-cadence amplification on stateful candidates.** Strategy_lab's [evaluator.score()](hustle-agent/tools/strategy_lab/evaluator.py) treats every emitted `CandidateOpportunity` independently. For event-stream candidates that re-emit on each scan (cross_market_correlation, future tick-based candidates), this counts the same unique outcome multiple times. The lab's per-sport breakdown is per-emit, not per-unique-outcome. Future stateful candidates need EITHER: (a) per-pair-key emission deduplication (only emit once per unique pair-key in the window), (b) a report-side aggregator that deduplicates by (ticker, side) before computing means, OR (c) loud documentation in the candidate's emit `extra` dict so the operator can manually deduplicate at decision time. **Session 72 is the founding example of this lesson** — flag in any future `tools/strategy_lab/candidates/*.py` that emits stateful per-scan rather than once-per-decision.
+
+**What did NOT change.**
+- `bot/` — entirely untouched. No production code, no config, no tests modified. No bot restart.
+- `tools/strategy_lab/{candidate,driver,evaluator,data_loader,reports}.py` — untouched per spec ("use framework as-is").
+- `bot/state/` — read-only. Lab writes only to `tools/strategy_lab/reports_out/strategy_lab_cross_market_correlation_2026-05-08.md`.
+- `MOMENTUM_DISABLED_SPORTS`, `VIG_STACK_FAMILY_FLOOR_OVERRIDES`, `MOMENTUM_LEADER_MIN_PER_SPORT` — all empty/unchanged.
+- All 1486 baseline tests + 20 new = 1506 pass; zero regressions.
+
+**Watch-list trigger — re-evaluate cross-market correlation when ALL of:**
+1. **State-aware math implemented.** EITHER (a) per-game state (current series standing) is integrated from ESPN scoreboard or Kalshi title parsing, allowing computation of `P(series_win | series_state, P(game_win))`, OR (b) Game 7 / decisive-game filter — only emit when series state forces P(series) = P(next game). Without this, naive divergence will continue to capture structural asymmetry.
+2. **Cross-cohort context infrastructure shipped in the lab.** Lab evaluator OR a new helper deduplicates by unique (ticker, side) before computing per-sport means, OR candidates are required to emit at most once per pair-key per window. Current scan-amplification methodology is misleading.
+3. **Series-side clv coverage.** A future bot restart with a series-aware scanner OR a one-shot CF emitter populates KX*SERIES tickers in clv.json. Without series-side settlement data, only one-sided strategies can be back-tested.
+
+Until at least #1 ships, naive cross-market correlation is unactionable. #2 is the methodology fix that makes ANY future cross-market lab work trustworthy. #3 is needed for symmetric strategies (vs game-side-only).
+
+**Operating Posture observation.** Per [Operating Posture: Always Search for New Possibilities](#operating-posture-always-search-for-new-possibilities-read-first), "negative findings ARE findings" — Session 72 ruled out naive cross-market divergence as a v1 lever. The Phase 0c manual check correctly anticipated the structural-asymmetry concern; the prototype confirmed it; the per-unique-ticker re-aggregation closed the methodology gap. Foundation is now in place for state-aware v2 work IF watch-list #1 ever fires. Mirror of Session 51's lab pattern: prototype fast, validate against historical data, kill the hypothesis cleanly when evidence supports — preserve the search frontier.
+
+**Verify.**
+1. ☑ `python3 -m pytest tests/test_strategy_lab_cross_market_correlation.py -v` → 20/20 pass.
+2. ☑ `python3 -m pytest tests/test_strategy_lab.py::test_canonical_schema_used_throughout -v` → 1/1 pass (covers new file recursively).
+3. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1506 passed, 0 failures** (1486 baseline + 20 new = 1506 expected).
+4. ☑ `python3 -m tools.strategy_lab.driver --candidate cross_market_correlation --days 14` → produces `tools/strategy_lab/reports_out/strategy_lab_cross_market_correlation_2026-05-08.md`. 5,143 emits / 1,331 resolved / +$2,567 raw P&L (scan-amplification noise) / 140 unique keys → 51 unique resolved at −$4.16 net, 37.3% WR.
+5. ☑ `git diff bot/` empty. No bot restart.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.

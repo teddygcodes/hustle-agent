@@ -16,6 +16,7 @@ tools/*
 tools/strategy_lab/candidates/*
 !tools/strategy_lab/candidates/__init__.py
 !tools/strategy_lab/candidates/example_total_points_under.py
+!tools/strategy_lab/candidates/cross_market_correlation.py
 tools/strategy_lab/reports_out/*
 !tools/strategy_lab/reports_out/.gitkeep
 # Load-bearing tools/ files — explicit exceptions (audit aftermath of Session 52
