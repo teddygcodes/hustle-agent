@@ -4725,6 +4725,65 @@ Until one of these fires, the deadline-clip WARN is documented expected state un
 
 ---
 
+### ☑ Session 81 — alleged MORNING weather-only override hypothesis contradicted (May 8, doc-only Pattern C, no production change)
+
+**Trigger.** Session 80 deferred follow-up: the 4h overnight gap (04:22 → 08:26 ET on 2026-05-08, line 4677 above) was attributed to a *"MORNING weather-only routine overriding the IDLE-30min schedule in `bot/scheduler.py` per Session 4"* and explicitly held out of scope (line 4702). The Session 81 brief was Phase-0-mandatory: verify the override exists, locate the routine in code, quantify cost, decide A/B/C only after evidence — same shape as Session 80.
+
+**Phase 0 evidence (three independent measurements).**
+
+1. **Routine location ([bot/scheduler.py](bot/scheduler.py) end-to-end + grep across `bot/`).**
+   - The `MORNING: weather-only scan` log line is emitted at [bot/scanner.py:749](bot/scanner.py:749) inside `morning_weather_scan()` ([bot/scanner.py:744-752](bot/scanner.py:744)) — a **9-line function** that calls `scan_weather_markets()` and returns the list. Docstring at scanner.py:746: *"Lightweight scan that only checks weather markets. Called by the morning briefing — no sports scan, no API usage."*
+   - Caller is `_send_morning_briefing()` at [bot/scheduler.py:282-345](bot/scheduler.py:282), invoked from `check_scheduled_events(bot)` at [bot/main.py:1225](bot/main.py:1225) once per main-loop iteration. Briefing gate at [bot/scheduler.py:64-67](bot/scheduler.py:64): `if MORNING_BRIEFING_HOUR <= current_hour < MORNING_BRIEFING_CUTOFF_HOUR and state.get("last_morning_briefing") != today_str`. Constants: `MORNING_BRIEFING_HOUR = 8` ([bot/config.py:745](bot/config.py:745)), `MORNING_BRIEFING_CUTOFF_HOUR = 20` (scheduler.py:23). Once-per-day fire-once gate, ET-aware via `now_et = datetime.now(ET)` at scheduler.py:53.
+   - **Override vs additive: NEITHER.** MORNING is a regular function call inside `_send_morning_briefing()`, returning control to the main loop after ~9 seconds. Does not touch `scan_interval`, does not reset the IDLE timer, does not preempt SCAN CYCLE. The Session 4 reference at scheduler.py:61-62 fixed the briefing-gate `==` → `>=` bug; it did not introduce the MORNING routine itself.
+
+2. **Historical pattern (grep of `bot/logs/bot.log` + rotated `bot.log.1..5`, ~10.6 days).** After correcting a timezone misread (log timestamp brackets are **ET**, not UTC — verified by `[2026-05-07 20:09:01]` bracketing payload `SCAN CYCLE — 2026-05-08 00:09:01 UTC`):
+   - MORNING fires **once per day** at first scheduler check after 8am ET. Actual times across the rotation set: 08:02, 08:13, 08:26, 08:34, 08:35, 08:39, 09:00, 09:23, 09:41, 11:35 ET. Variability is when the bot's main loop hits the briefing gate after restarts. **Never fires before 8am ET** — gate works as designed.
+   - Daily MORNING duration: **8-17 seconds** end-to-end. 2026-05-08 sample: `08:26:18 [glint.scheduler] Sending morning briefing...` → `08:26:18 [glint.scanner] MORNING: weather-only scan` → `08:26:26 [glint.scanner] MORNING: found 0 weather opportunities` = **9 seconds**. This cannot cause a 4-hour gap.
+   - The recurring 3-4h SCAN CYCLE gap overlapping 04-08 ET appears on **6 of 11 observed days** — present since the earliest log data (2026-04-29). But it is **not coincident with MORNING firing time**: the gap ends BEFORE MORNING fires (5/8: gap 04:33-08:26 → MORNING 9-second window → next SCAN CYCLE 08:45). MORNING is inside the gap, not the cause of it.
+
+3. **Cost of the 04:22-08:26 ET gap on 2026-05-08.**
+   - MORNING output: `MORNING: found 0 weather opportunities` (literal log line at 08:26:26 ET).
+   - Decisions in gap window (08:22-12:26 UTC = 04:22-08:26 ET): **78 entries** (2 accept, 76 reject) — entirely from `live_watcher` paths (independent of SCAN CYCLE, ticking every 10-30s). Comparable non-gap 4h window today: **181 decisions** (5 accept, 176 reject). Acceptance rate near-identical (2.6% vs 2.8%); raw count is 43% of baseline because SCAN CYCLE-driven decisions are absent.
+   - Paper trades entered during/after the gap on 2026-05-08: **0**. All 5/8 trades entered before 01:17 UTC (yesterday evening ET). No KXHIGH (weather) trades entered after MORNING fired.
+   - **Net direct P&L cost: $0.** No trades = no realized loss. Indirect counterfactual unquantifiable from current evidence.
+
+**Decision: Outcome C — Pattern C ship, hypothesis contradicted.** Three converging reasons:
+
+1. **The "MORNING override" framing is wrong.** MORNING is a 9-second briefing helper, not a 4h scheduler that competes with SCAN CYCLE. There is no override surface to fix; deleting `morning_weather_scan()` would just remove the daily Telegram weather report (and tear apart `_send_morning_briefing()`, since it's one composable inside the briefing).
+2. **No demonstrable cost.** $0 direct loss; indirect counterfactual unquantifiable. Per session brief: *"Don't fix without measuring cost. Even if the override is 'obviously' wrong-feeling, the question is whether it costs money. If it doesn't, Outcome C."*
+3. **The actual 4h gap cause is something else and explicitly out of scope for Session 81.** The brief was specifically about MORNING. Investigating why IDLE-30min didn't fire 7 times between 04:33 and 08:26 ET on 5/8 is a different question for a different session — captured in the watch-list update below.
+
+Mirrors Pattern C precedents: Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 68, 69, 74, 80. **Pattern C count now 11.**
+
+**What did NOT change.**
+- No code change. `bot/scheduler.py`, `bot/scanner.py`, `bot/main.py`, `bot/scanner_weather.py`, `bot/config.py` — all UNTOUCHED.
+- No test change. `tests/` UNTOUCHED. No assertion adjustment.
+- No bot restart.
+- `MORNING_BRIEFING_HOUR = 8` ([bot/config.py:745](bot/config.py:745)) — UNTOUCHED. Original product design.
+- `bot/main.py:_heartbeat_loop` (Session 77 fix) — UNTOUCHED per session brief constraint.
+- 90s `heartbeat_stale` threshold — UNTOUCHED per session brief constraint.
+- `bot/universe.py:93` `_SNAPSHOT_DEADLINE_SEC = 300` — UNTOUCHED per Session 80.
+
+**Watch-list update — supersedes Session 80 line 4711 sub-clause.** The original bullet listed *"if 4h+ idle gaps recur AND are NOT caused by Kalshi API retry-storms (Gap 1 shape) or morning-routine scheduling overrides (Gap 2 shape)."* The "morning-routine scheduling overrides" sub-clause is **superseded** because MORNING is at most a 9-second briefing helper, not a 4h override. The corrected trigger:
+- A 4h+ overnight SCAN CYCLE gap recurs AND is not explained by either: (a) a long Kalshi-retry-storm scan in progress (Gap 1 shape, scan_id encoded UTC visible at start), or (b) a same-window briefing/MORNING block ≤20s end-to-end. A gap meeting these conditions points to a real `_main_loop` scan-interval regression worth a focused session.
+- The MORNING briefing duration sustained-medians >60s for 3+ consecutive days, AND coincides with a SCAN CYCLE gap that starts at briefing time. Would suggest the briefing is genuinely blocking the scan loop (today's 9-second baseline is well below this threshold).
+- Daily decision-volume drops below **50** sustained for 3+ days AND correlates with morning-gap days specifically (vs the gap being baseline behavior across both gap-and-non-gap days).
+
+Out-of-scope items per the brief held untouched: the actual cause of the 4h gap on 5/8 (04:33 → 08:45 ET, 7 missed IDLE-30min cycles); Kalshi API retry-storm sensitivity; live_momentum kill; §3 stale-cache; heartbeat threshold; Session 39 Battle Scar #13; Session 77 heartbeat fix.
+
+**Operating Posture observation.** Per *"negative findings ARE findings"* — Session 80 had two disciplined Phase 0 wins (deadline-clip Pattern C + cadence-collapse decomposition). Session 81 added a third: Session 80's own *"MORNING override"* label, written in good faith with limited investigation budget, was imprecise. Session 81's measurement-first discipline caught it before any code change locked in the wrong fix surface. **Lesson — always cross-check log timezones before drawing time-of-day conclusions.** Session 81's first-pass historical-pattern agent applied a UTC→ET conversion to logs that were already in ET, shifting MORNING's apparent firing window 4h earlier ("04:00-07:35 ET" pre-dawn vs. reality "08:00-09:41 ET, 8am as designed"). Cross-checking against the explicit `SCAN CYCLE — YYYY-MM-DD HH:MM:SS UTC` payload (where bracket date and payload date can differ by 4h) corrected it. Future sessions touching log evidence: verify the bracket-vs-payload TZ relationship before any time-of-day claim.
+
+**Verify.**
+1. ☑ `git diff bot/ tests/ tools/` empty after edits land — only `CLAUDE.md` and `README.md` changed.
+2. ☑ Phase 0 numbers reproduce against on-disk state (re-runnable: `grep "MORNING:" bot/logs/bot.log*`, `grep "SCAN CYCLE" bot/logs/bot.log` for cadence intervals).
+3. ☑ No bot restart.
+4. ☑ No tests modified. `pytest` baseline unchanged.
+5. ☑ Each Session 81 claim anchored to a specific file:line citation (scanner.py:744-752, scheduler.py:64-67, scheduler.py:282-345, scheduler.py:286, scheduler.py:53, scheduler.py:23, config.py:745, main.py:1225).
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
