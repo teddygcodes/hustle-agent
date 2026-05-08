@@ -4897,6 +4897,59 @@ Both came from the same root: bot_state.json and §3 surface point-in-time data 
 
 ---
 
+### ☑ Session 84 — Strategy Candidate Promotion Bar protocol shipped (May 8, doc-only Outcome C, codified maturity bar for §10)
+
+**Trigger.** Discovery agent has surfaced 16 active strategy candidates over 8 days. None has been promoted to a focused investigation session. The strongest by §10 severity (`no_vol_growth_first_seen/nhl_game` — HIGH, 33 settled CFs at 90% +CLV mean +20.9¢, stable 8d) sat unused. Sessions 66 + 74 built the surface-and-track machinery; the act-on-it side did not exist. Without a codified maturity bar, candidates accumulate in §10 with no defined exit. Session 84 = the **C** in the C → A sequence (codify the bar this session, promote the NHL candidate next session). Tyler clarified mid-plan-mode: **promotion = "open a focused session"** — the candidate earns its own Session N+1 with Phase 0 + A/B/C outcome decision; not a commitment to ship a code change. Session 74's disqualifications stand as input, not veto.
+
+**Phase 0 (read-only, all three measurements).**
+
+1. **Candidate data structure (0.1).** `Finding` dataclass at [tools/discovery_agent/findings.py:13](tools/discovery_agent/findings.py:13) carries `evidence: dict` with **structured numeric fields per heuristic**. Storage at `bot/state/discovery/discovery_findings_*.jsonl`. Reader at [tools/_report_helpers.py:842](tools/_report_helpers.py:842) `collect_strategy_candidates`. §10 renderer at [tools/glint_status.py:1122](tools/glint_status.py:1122). For `counterfactual_hotspots`: evidence has `count`, `mean_clv_cents`, `positive_clv_rate`, `n_no_won`, `n_yes_won`, plus Session-47 cross-cohort context. **N / mean_clv / +CLV% are STRUCTURED FIELDS, not parsed from title.** `days_stable` is computed at render-time from cross-day fingerprint stability ([_report_helpers.py:899](tools/_report_helpers.py:899)). Other six allowlisted heuristics (`outlier_pnl`, `cohort_emergence`, `concurrent_attack_angles`, `settlement_vs_rationale`, `threshold_proximity`, `universe_gap`) have **different evidence shapes** — each needs its own bar.
+
+2. **Severity logic (0.2).** Per-heuristic, not global. `counterfactual_hotspots._severity` at [heuristics/counterfactual_hotspots.py:129](tools/discovery_agent/heuristics/counterfactual_hotspots.py:129): base HIGH if mean_clv_cents ≥ 15.0 else NOTABLE; demoted +1 each: cross-cohort raw mean < 0; cross-cohort trimmed < 3.0 AND raw ≤ 0; this cohort's sport in `MOMENTUM_DISABLED_SPORTS`. Clamps at INFO. Empirical reconciliation: `no_vol_growth_first_seen/nhl_game` mean +20.9 → HIGH (no demotion); `no_leader/nhl_game` mean +23.9 → demoted to INFO (cross-cohort negative because `no_leader` fires across atp/wta/wta_challenger — three disabled sports). Severity already encodes Session 47 cross-cohort sanity check + heuristic-entry survivorship floor (n_no ≥ 3) + quality (mean ≥ 5¢, +CLV ≥ 60%). The promotion bar layers on top of severity, doesn't duplicate it.
+
+3. **vig_stack precedent (0.3).** **No precedent.** vig_stack predates the discovery-candidate framework (Session 43a, May 1 2026) by 6+ weeks. vig_stack was already live at Session 1 (Apr 20). No structured CF / mean-CLV / +CLV% / stable-days data was ever recorded for vig_stack as a pre-promotion candidate. First-principles thresholds are required; Session 84 documents the absence of precedent explicitly.
+
+**Sanity-check against today's 16 active candidates** (8d window, latest 2026-05-08). Proposed bar: N ≥ 30 AND mean_clv_cents ≥ +5 AND positive_clv_rate ≥ 0.70 AND days_stable ≥ 7 AND heuristic == counterfactual_hotspots. **4 of 16 clear the raw bar**: `no_vol_growth_first_seen/nhl_game` (HIGH, n=33, +20.9¢, 90%, 8d, n_no=3), `no_vol_growth_first_seen/atp_challenger` (INFO, n=55), `no_vol_growth_idle/atp_challenger` (INFO, n=55), `no_leader/nhl_game` (INFO, n=55). After layering on disqualifier checks — cycle-delay-disqualified per Sessions 45/74; disabled-sport per Sessions 38a-2/46; cross-cohort demoted-to-INFO per Session 47; recent prior-session evaluation — **exactly 1 remains: `no_vol_growth_first_seen/nhl_game`**. Matches Tyler's expected calibration ("1–3 promotable, including no_vol_growth_first_seen/nhl_game"). The other 3 are NOT spuriously filtered out — each was investigated in a prior session and explicitly held; they remain in §10 as historical evidence and re-eligible when their existing watch-list triggers fire.
+
+**Decision: Outcome C (operator-run protocol).** Outcome A rejected because the bar is heuristic-class-specific (only counterfactual_hotspots has the right evidence shape; six other allowlisted heuristics need their own decision logic). Outcome B rejected because data IS structured — no design doc needed. Outcome C ships the bar as a CLAUDE.md operator-protocol section parallel to the existing "How is it looking?", "Check the Data", "7-Day Retuning Report" checklists. Mirrors Pattern C precedents (Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 68, 69, 74, 80, 81, 82) — discipline working, not failing. **Pattern C count after this ship: 13.**
+
+**What shipped.**
+- New section in CLAUDE.md: `## When Tyler Asks "What's Ready to Promote?"` between the "7-Day Retuning Report" section and "Style Rules for This Codebase". Six sub-sections: (1) what "promote" means; (2) per-heuristic bar (counterfactual_hotspots gets the headline N/mean/+CLV/stable thresholds; six other heuristics each get their own rule); (3) disqualifier checks (cycle-delay-disqualified, disabled-sport, cross-cohort demoted, recent prior-session); (4) no-precedent note; (5) how to run; (6) today's 16-candidate worked example as reference snapshot.
+- This Session 84 ☑ block.
+- README sync per push discipline.
+
+**No code changes. No test changes. No bot restart.** Doc-only.
+
+**Verify.**
+1. ☑ CLAUDE.md edit lands between "7-Day Retuning Report" and "Style Rules for This Codebase" — operator protocols stay grouped.
+2. ☑ Worked-example numbers reproduce against on-disk state (today: latest=2026-05-08, 16 active fingerprints, 4 clear raw bar, 1 survives disqualifier checks).
+3. ☑ `git diff bot/ tests/ tools/` empty.
+4. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → 1521 passed (Session 83 baseline preserved).
+5. ☑ `python3 tools/glint_status.py | sed -n '/## 10/,$p' | head -40` still renders cleanly (smoke test — protocol doesn't touch the renderer).
+6. ☑ No bot restart. CLAUDE.md is not loaded by `bot/main.py`. Bot uptime preserved.
+7. ☑ Two-commit sequence (`docs(claude.md): session 84 ...` + `docs(readme): sync session 84`) pushed to `origin/main`.
+
+**Watch-list trigger — re-tune the bar when ANY of:**
+- The bar produces **0 or > 5** promotable candidates against a stable §10 surface for 7 consecutive days. Either floor signals miscalibration.
+- A future candidate is promoted via this protocol AND its outcome (positive or negative) provides empirical EV evidence at the candidate-data shape — that becomes the first precedent and may shift the thresholds.
+- The Session 47 demotion ladder is materially refined OR replaced — bar's `severity in {high, notable}` floor input becomes stale and requires re-derivation.
+- A new heuristic ships beyond the current 7 allowlisted — bar must add a per-heuristic rule for it, OR the new heuristic is explicitly classified "operational" (excluded like `cadence_outcome` / `live_tick_anomalies` / `log_error_spike`).
+
+**Operating Posture observation.** Phase 0 caught it again — three measurements ran in parallel ruled out Outcome A on heuristic-class-specificity grounds without any speculative engineering. Sessions 79 / 80 / 81 / 82 / 83 / 84 all verified premise before locking scope. Per *"negative findings ARE findings"* — Session 84 ruled out the in-code `promotable: bool` framing because the data shape doesn't support a unified flag, AND identified that severity already does most of the lift. The protocol is the right shape for the judgment-heavy "is this candidate's lever known? is the sport disabled? has a prior session evaluated this?" decisions. Session 84 explicitly closes the Sessions 66/74 surface-and-track loop: track machinery + maturity bar + (next-session) act-on-it = end-to-end discovery-candidate workflow.
+
+**Out of scope (held).**
+- Promoting any candidate. Session 85 territory.
+- live_momentum kill OR deep-dive — Tyler's explicit deferral.
+- Adding new heuristics — bar applies to existing seven; new heuristics get their own bar entries when added (per watch-list trigger above).
+- §3 stale-cache further work (Session 83 shipped it).
+- `bot_state.total_pnl` migration — next nightly handles it (Session 83).
+- Telegram throttle investigation — Battle Scar #15 firing as designed.
+- Test changes that adjust assertions to match degraded behavior.
+- Code-side `promotable: bool` field on `Finding` dataclass — explicitly Outcome A, rejected this session. Revisit only if Outcome C protocol fails to produce 1–3 candidates per surface for 7 consecutive days.
+- Modifying the §10 renderer or `collect_strategy_candidates` aggregator — they work as-designed; the protocol layers on top.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
@@ -5305,6 +5358,89 @@ For live_momentum: cross-intersection doesn't apply. Use journal_analysis findin
 - `event_horizon_hr` will be near-zero on rows written before Session 15.5 (the historical decisions.jsonl rows have null); slice on rows from Apr 25, 2026+ only for that axis.
 - `partial_snapshots_today` from `bot_state.json` (Session 15.5): if any day in the window had a partial-rate WARN, that day's `universe_report` and `cohort_report` are biased toward markets that survived the truncated cursor; flag in writeup.
 - **The Day-7 framing is convenient, not magic.** If Sessions 16/17/18 ship before May 2, run reports earlier and re-run after each session lands. If they don't ship by May 2, the Day-7 report is mostly a vig_stack-retuning report — which is still valuable, just don't oversell it as a "we now know what to do about live_momentum" moment.
+
+---
+
+## When Tyler Asks "What's Ready to Promote?"
+
+A candidate is **promotable** when it is mature enough to earn its own focused Session N+1 with Phase 0 + an A/B/C outcome decision. Promotion = elevate from `§10 row` to `next-session subject`. The protocol does NOT commit to ship/not-ship; the next session decides. This section is the maturity bar; it does not act. Sessions 66/74 built the surface-and-track machinery; Session 84 codified this bar. The act-on-it side is the next session.
+
+### The bar (per-heuristic — only `counterfactual_hotspots` carries the universal thresholds)
+
+```
+counterfactual_hotspots:
+  N (settled CFs)        >= 30
+  mean_clv_cents         >= +5
+  positive_clv_rate      >= 0.70
+  days_stable            >= 7
+  n_no_won               >= 3                  (heuristic-entry floor — restated for clarity)
+  severity               in {high, notable}    (INFO findings deferred — Session 47 demotion already fired)
+
+outlier_pnl:
+  Bug-pair candidate (per Sessions 43-investigate / 76)?  → defer until cross-pattern evidence
+  Singleton outlier?                                       → not promotable (Session 76 shape)
+
+cohort_emergence:
+  unique_tickers_recent  >= 10
+  accepts_recent          >= 5    (Session 43-investigate refinement; cohorts with decisions but zero accepts auto-demote to INFO)
+  paper_trades_recent     >= 3
+  days_stable            >= 7
+
+concurrent_attack_angles:
+  ALWAYS promote to Session 51 strategy_lab prototype FIRST.
+  Production scanner only after lab validates positive per-pair-key Σ P&L (Session 73 dedup discipline).
+
+settlement_vs_rationale:
+  Pattern 2 (disabled_sport_settlement)        → CRITICAL severity, always promotable
+  Pattern 3 (outsized_notional_post_size_mult) → HIGH severity, always promotable
+  Pattern 1 (tail_loss_in_high_cap_family)     → only when family aggregate is net-negative AND n_tail >= 2 in 14d window (Session 67 refinement)
+
+threshold_proximity:
+  near_miss_count >= 5 AND near_miss_clv > 0  →  promotable
+  Otherwise: defer.
+
+universe_gap:
+  Always defer (architectural; no current per-finding session shape).
+```
+
+### Disqualifier checks (apply AFTER the bar; each is a constraint on next session's scope, NOT a veto)
+
+1. **Cycle-delay-disqualified gate** (Sessions 45, 74). Specifically `no_vol_growth_first_seen` and `no_vol_growth_idle` — the gate is a binary scan-cycle check at [bot/live_watcher.py:3129-3140](bot/live_watcher.py:3129), not a tunable threshold. Next session must address one of: persisted `_prev_scan_volumes` across restarts, OR first-sight entry path, OR materially lower `LIVE_SCAN_INTERVAL`. Cross-reference Session 74 watch-list trigger.
+2. **Disabled sport** (sport in `MOMENTUM_DISABLED_SPORTS = {atp_challenger, wta, wta_challenger}`). Re-enable decision (Sessions 38a, 38a-2) is a separate prerequisite. Next session may pursue per-sport `MOMENTUM_LEADER_MIN` override (Session 64 architectural pattern) or per-family floor override (Session 67 architectural pattern) instead of re-enable.
+3. **Cross-cohort demoted to INFO via Session 47 ladder.** Per-cohort signal is real but cross-cohort context contradicts. De-prioritize but not disqualify; next session must explicitly address why this sub-cohort warrants action when cross-cohort lens is flat or negative.
+4. **Recent prior-session evaluation (within last 14 days, no new evidence).** Defer until either (a) the cohort grows materially since the prior eval, OR (b) a watch-list trigger explicitly fires. Cross-reference the prior session's watch-list trigger before re-opening.
+
+### No-precedent note
+
+`vig_stack_series` and `vig_stack_futures` are the only currently-promoted strategies; both predate the discovery-candidate framework (Session 43a, May 1, 2026) by 6+ weeks. **No historical promotion baseline exists for the candidate-data shape.** The thresholds above are first-principles, calibrated against the May 8, 2026 candidate set so that exactly one cohort (`no_vol_growth_first_seen/nhl_game`) clears the bar AND survives all disqualifier checks at the floor of maturity. Re-tune the bar **only** when (a) a future candidate is promoted via this protocol AND its outcome provides empirical EV evidence at the candidate-data shape, OR (b) the bar produces 0 or > 5 promotable candidates against a stable §10 surface for 7 consecutive days.
+
+### How to run
+
+```bash
+python3 tools/glint_status.py | sed -n '/## 10/,$p' | head -60
+```
+
+Walk each row in §10's "Strategy Candidates" section. For each:
+
+1. Read severity + heuristic + title.
+2. Apply the per-heuristic bar above.
+3. If pass: apply each disqualifier check; note any that fire as a constraint on the next session's scope.
+4. Cross-reference any matching watch-list triggers in CLAUDE.md (the §10 renderer already shows these in the `watch_refs` column).
+5. **Promote ≤ 2 candidates per session.** If more clear, pick the one(s) with (a) highest severity, (b) longest `days_stable`, (c) fewest disqualifier checks firing. The rest stay in §10.
+6. Open the next session with a brief that names the candidate, the disqualifier checks that fire, and the prior-session cross-references.
+
+### Today's surface (2026-05-08 reference snapshot — decays daily)
+
+Of 16 active candidates today, **4 clear the raw bar; 1 survives all disqualifier checks**:
+
+| Severity | Heuristic / cohort | N | mean_clv | +CLV% | stable | n_no | Disqualifier(s) firing |
+|---|---|---|---|---|---|---|---|
+| **HIGH** | `no_vol_growth_first_seen/nhl_game` | 33 | +20.9¢ | 90% | 8d | 3 | Cycle-delay (Session 74) — next session addresses architectural unblock per S74 watch-list |
+| INFO | `no_vol_growth_first_seen/atp_challenger` | 55 | +11.0¢ | 87% | 8d | 7 | Cycle-delay (S45) + disabled sport (S38a-2) + INFO via S47 — defer until S74 unblock ships |
+| INFO | `no_vol_growth_idle/atp_challenger` | 55 | +8.3¢ | 85% | 8d | 8 | Tunable but cross-cohort flat (S46) + disabled sport — defer per S46 watch-list |
+| INFO | `no_leader/nhl_game` | 55 | +23.9¢ | 81% | 8d | 10 | Cross-cohort demoted (S47) + cross-sport context flat — defer pending S64-style per-sport override evidence |
+
+**Promotable today: `no_vol_growth_first_seen/nhl_game`** (HIGH, only candidate without a recent prior-session evaluation). Session 85 brief opens with the Session 74 cycle-delay constraint named upfront — Phase 0 will determine whether the architectural unblock is justified at this cohort's maturity, OR whether to Pattern-C HOLD again pending more data.
 
 ---
 
