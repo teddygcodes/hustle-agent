@@ -4950,6 +4950,64 @@ Both came from the same root: bot_state.json and §3 surface point-in-time data 
 
 ---
 
+### ☑ Session 85 — `no_vol_growth_first_seen/nhl_game` cycle-delay unblock investigation: Outcome C HOLD with extended watch-list trigger (May 8, doc-only)
+
+**Trigger.** Session 84 codified the strategy-candidate promotion bar and admitted exactly one candidate today: `no_vol_growth_first_seen/nhl_game` (33 settled CFs, mean CLV +20.9¢, 90.9% +CLV, 8d stable, HIGH severity). Session 84 named Session 74's cycle-delay disqualification as **input** to this session, not a veto. Session 85's job: re-verify the disqualification today, quantify what an architectural unblock would actually capture, and pick A (ship), B (design doc), or C (HOLD).
+
+**Phase 0.1 — Gate verification: STILL ACCURATE.**
+1. `_prev_scan_volumes` is a module-scope dict at [bot/live_watcher.py:2814](bot/live_watcher.py:2814), cleared on `refresh_candidate_cache()` at [bot/live_watcher.py:2868-2871](bot/live_watcher.py:2868), checked at [bot/live_watcher.py:3129-3130](bot/live_watcher.py:3129). No disk persistence (no load on startup, no save on shutdown).
+2. No alternate first-sight entry path in `bot/strategies/` — only `live_momentum.py`, `nba_game_momentum_strawman.py`, `vig_stack_series.py`, all gated by `live_watcher`'s scan flow.
+3. `LIVE_SCAN_INTERVAL = 120` (seconds) at [bot/live_watcher.py:2809](bot/live_watcher.py:2809), consumed at [bot/main.py:1191](bot/main.py:1191).
+4. Sessions 75-84 made zero changes touching this gate (75 was lab-only; 77 was a heartbeat fix; 76, 78-84 were doc-only Outcome B/C).
+
+Session 74's binary-first-sight finding holds without modification.
+
+**Phase 0.2 — Capturable P&L: CANNOT QUANTIFY.** Direct query on [bot/state/clv.json](bot/state/clv.json) filtering `status=counterfactual_settled`, `skipped_by_gate=no_vol_growth_first_seen`, `sport=nhl`:
+
+- **N=33 confirmed**, mean CLV **+20.9¢**, +CLV **90.9%** (30/33). Matches the candidate headline exactly.
+- **But 33 raw CFs collapse to 17 unique tickers and 29 unique 10-min windows.** Same-ticker CF emissions occur within 4 seconds (`KXNHLGAME-26APR27PHIPIT-PIT` emits twice 4s apart at first-sight; `KXNHLGAME-26MAY03MINCOL-COL` emits 5×; six other tickers emit 2-3×). The candidate's headline overcounts trade opportunities by ~2×.
+- **Per-contract CLV sum = $6.90** over 10 days × 17 unique games. Real signal, small magnitude.
+- **`contracts: 0` on every CF row** — the bot never decided sizing because it never entered. There is no "would-have-sized-N-contracts" field on CF rows.
+- No bid-ask, no orderbook depth at first-sight, no fill-probability signal anywhere in the CF row schema. Slippage cannot be empirically estimated.
+
+Realistic capturable P&L = `(per-contract CLV) × (assumed sizing) × (1 - slippage discount)`. With sizing assumption unknown and slippage unestimable, the realistic dollar capturable ranges from **≪$20** (live_momentum's small-typical scale) to **>>$50** (vig_stack_series scale). The current data shape **cannot resolve which**.
+
+**Phase 0.3 — Architecture options mapped (recorded for future-session reference, not actioned).**
+- **O1 — Persist `_prev_scan_volumes`.** Cite [bot/live_watcher.py:2814,2868,2871,3129-3130](bot/live_watcher.py:2814) + [bot/state_io.py:18,26](bot/state_io.py:18) (`load_json` / `save_json`). Blast: small. Reversibility: easy (`PREV_SCAN_VOLUMES_PERSISTED` flag). Risk: stale data after long bot-down windows defeats the unblock.
+- **O2 — First-sight entry path.** New strategy or new branch in `live_watcher.py` between lines 3129-3132 using a different signal (orderbook spread, vig, etc.). Blast: largest (new logic + new signal design). Reversibility: flag-gate (`FIRST_SIGHT_ENTRY_ENABLED`).
+- **O3 — Lower `LIVE_SCAN_INTERVAL`.** One-line change at [bot/live_watcher.py:2809](bot/live_watcher.py:2809). Blast: smallest. Hidden cost: Kalshi API load increase (`live_watcher` loop is independent of `snapshot_universe`'s 300s deadline per Session 80 + Battle Scar #13's executor wrap at [bot/main.py:1188](bot/main.py:1188), so direct deadline interaction is none — but the two loops share Kalshi rate budget). Reversibility: trivial.
+
+No natural 4th option. **Smallest blast: O3. Largest: O2.**
+
+**Decision: Outcome C HOLD, doc-only.** Phase 0.2's "cannot quantify" verdict dominates. The candidate's per-contract signal is real (+20¢ over 17 unique games) but neither the dollar magnitude nor the architectural option can be picked without data the system doesn't currently emit. Pattern C count rises to **14** (Session 84 was 13). Mirrors Sessions 18.5/38a-2/40/41/42/67-investigate/68/69/74/80/81/82/84.
+
+**Watch-list trigger — extends Session 74's** (canonical for `no_vol_growth_first_seen/nhl_game`). Session 74's three triggers (architectural change ships / cross-sport convergence / realized-trade evidence) **stand unchanged**. Session 85 adds three more, ANY of which re-opens the investigation:
+
+1. **Sizing or orderbook instrumentation lands in CF emission.** Bid/ask at first-sight, orderbook depth at first-sight, OR a "would-have-sized-N-contracts" field on each CF row. Without one, a future Phase 0.2 will return "cannot quantify" again. The right place is the `_maybe_emit_live_momentum_cf` call site at [bot/live_watcher.py:3151](bot/live_watcher.py:3151).
+2. **CF de-duplication is fixed AND unique-ticker count still ≥ 30 in 7d.** Current 33 raw CFs = 17 unique tickers (overcount factor ~2×). The heuristic at [tools/discovery_agent/heuristics/counterfactual_hotspots.py](tools/discovery_agent/heuristics/counterfactual_hotspots.py) reports raw-CF count, but the load-bearing question is unique-game count.
+3. **N reaches 50 raw CFs (≈25 unique tickers) for `no_vol_growth_first_seen/nhl_game` specifically.** Current N=33 is on the edge of the Session 47 ladder; +50% growth would meaningfully reduce sample-size uncertainty even without de-duplication.
+
+Until one of those (or one of Session 74's three) fires, all `no_vol_growth_first_seen/nhl_game` §10 findings remain auto-classified as cycle-delay-disqualified per Session 74's canonical rule. The Session 74 watch-list cross-reference parser at [tools/_report_helpers.py](tools/_report_helpers.py) keys off the text `no_vol_growth_first_seen` / `nhl_game`, so this Session 85 extension is automatically picked up without a code change.
+
+**Observation (in-scope; not actioned this session).** **CF over-emission within the same scan window.** `KXNHLGAME-26APR27PHIPIT-PIT` emits two CFs 4 seconds apart at first-sight; `KXNHLGAME-26MAY03MINCOL-COL` emits 5×; six other tickers emit 2-3×. `LIVE_SCAN_INTERVAL=120s` should make repeat first-sight emissions impossible (next encounter has `prev_vol > 0`), so observed seconds-apart gaps suggest `_maybe_emit_live_momentum_cf` is called multiple times per `scan_live_matches()` invocation — perhaps once per side, plus once per re-entry to the candidate-evaluation loop. Out of scope to fix this session; flagged so a future investigation can pick it up. (This is what makes the headline "33 settled CFs" overstate trade opportunities by ~2×.)
+
+**Pre-flight observation (separate from Session 85 scope, surfaced per session brief).** As of 2026-05-08T22:19Z, `bot_state.total_pnl` and `today_pnl` keys are STILL PRESENT in [bot/state/bot_state.json](bot/state/bot_state.json). Per Session 83, the next nightly should remove them via `pop(key, None)`. Bot uptime ~22h (start_time 2026-05-08T03:58Z), heartbeat fresh (8s old). Session 85 does not fix this — Session 83's fix is forward-only and the next nightly handles cleanup.
+
+**What did NOT change.**
+- `bot/`, `tests/`, `tools/` — untouched (doc-only ship, mirrors Session 74's pattern).
+- No bot restart; PID 11215 preserved.
+
+**Verification.**
+1. ☑ Phase 0.1 gate-flow grep: `_prev_scan_volumes` definition + usage sites confirmed unchanged from Session 74's citations.
+2. ☑ Phase 0.2 NHL-cohort query: n=33, mean=+20.9¢, +CLV=90.9% — matches Session 74 AND adds the dedup finding (17 unique tickers, 29 unique 10-min windows, $6.90 per-contract sum).
+3. ☑ Phase 0.3 architecture mapping: file:line citations recorded above; cross-checked against Session 80's `snapshot_universe`-vs-`live_watcher` independence finding.
+4. ☑ Doc-only diff: `git diff bot/ tests/ tools/` empty.
+5. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1521 passed** (Session 83 baseline / Session 84 preserved).
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
