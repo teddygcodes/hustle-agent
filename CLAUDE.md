@@ -435,6 +435,8 @@ launchctl kickstart -k gui/$(id -u)/com.bob.bot            # Bob (when configure
 
 Battle Scar #3 (single-PID enforcement) was updated May 3 to use the path-rooted pattern; this entry is the structural reminder for future bots added to the fleet.
 
+**Operator note (Session 83):** seeing two `python -m bot.main` processes in `ps aux` is NOT automatically Battle Scar #3 — verify the working directory of each PID via `lsof -p <PID> | grep cwd` before flagging an orphan. The Bob bot at `~/Desktop/bob/` runs the same `python -m bot.main` invocation and is launchd-managed independently; only flag an orphan when two PIDs share the same working directory tree. The Session 81 spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
+
 ### 15. Telegram 429s are state, not noise (Session 52, May 3)
 
 May 3 incident: Telegram cooled Glint down after sustained `editMessageText` volume. The old notifier caught the 429, logged a warning, set an in-memory `_flood_until`, and then silently dropped the message after one failed attempt. Worse: edits were not counted by the 20-messages/60s send limiter, so live-card updates could hammer Telegram while sends looked "rate limited" on paper. Symptom: thousands of edit attempts over 24h, no durable `bot_state.json` signal, and every bot restart extended the Telegram cool-down Tyler was waiting out.
@@ -4849,6 +4851,49 @@ Mirrors Pattern C precedents: Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 
 **Caveat for next-session-self.** The bot's `scans_today=4` at 10:13 ET on 5/8 (vs ~20 expected at 30-min cadence with full uptime) is itself a signal: the bot ran at ~20% of nominal cadence today due to overnight host sleep. Acceptable per the cost analysis ($0 impact) but worth tracking. If a future session ships a mid-day scan-rate alert, that's the threshold to hit.
 
 **README sync.** Committed separately per push discipline.
+
+---
+
+### ☑ Session 83 — stale-data hygiene ship: vestigial `bot_state.total_pnl` removed + §3 always-shows-timestamp + Bob ride-along (May 8, Outcome A, three-fix bundle)
+
+**Trigger.** Two false-alarm cycles in one morning, both same shape: stale data presented as current.
+
+1. §3 health pulse showed "🚨 lock mtime 2003s stale" / "🚨 no universe rows" / "🚨 0 decisions" at 08:52 ET — but the source was the 03:15 ET nightly snapshot, ~5.6h old, with no visible age marker. Operator misread it as live bot health and concluded the bot was wedged. False alarm; live `§1` verdict at the same moment was "Degraded — 0 CRITICAL."
+2. `bot_state.total_pnl=$770.91` read while glint_status showed +$945.18. The bot_state field was a stale daily-reconcile artifact; operator misread it as current and thought the bot had lost $171.87 overnight. False alarm; the field was last written at the 2026-05-07 nightly and no production code path had touched it since.
+
+Both came from the same root: bot_state.json and §3 surface point-in-time data without making the staleness operator-visible.
+
+**Phase 0.** Three independent measurements per the Sessions 80/81/82 discipline.
+
+1. **`bot_state.total_pnl` consumer search.** Grep across `bot/` and `tools/` for reads of the field from `bot_state.json`. Result: **zero** consumers. The Session 4 comment at [bot/scheduler.py:355-356](bot/scheduler.py:355) claims STATUS/briefings/dashboard read it, but actual code shows: `handle_status` ([bot/main.py:539](bot/main.py:539)), `_send_morning_briefing` ([bot/scheduler.py:282](bot/scheduler.py:282)), and `_send_nightly_summary` ([bot/scheduler.py:357](bot/scheduler.py:357)) all call `compute_daily_summary()` LIVE; `notifier.format_daily_summary` ([bot/notifier.py:561](bot/notifier.py:561)) reads from a `stats` arg dict but is reachable only via `notifier.send_daily_summary` which has zero call sites in `bot/` or `tools/` (dead code path). The Session 4 comment is stale — code paths it referenced were refactored away as the bot evolved. The single remaining usage in `tools/journal_analysis.py:407` reads `r.get("total_pnl")` from a rollup record, not from bot_state.json — unaffected by this fix.
+
+2. **§3 stale-cache mechanism.** Located at [tools/glint_status.py:953](tools/glint_status.py:953) (`render_health_section`). The function reads from `latest_daily_report()` which sets `stale_note = f"[stale: {age_h:.1f}h ago]"` only when `age_h > 12` ([line 230](tools/glint_status.py:230)). At 5.6h old (this morning's case), `stale_note` is empty and the §3 header showed only `Source: state/reports/daily/daily_report_2026-05-07.md` with no age cue. The 12h threshold is appropriate for the structural `daily_report_stale` flag at line 1098 ("is the report machinery broken?") but too loose for the operational question "is this snapshot suitable to read as current?".
+
+3. **Bob ride-along.** PIDs 56325 / 44781 in `ps aux` were `~/Desktop/bob/` (cwd verified via `lsof -p <PID> | grep cwd`), not `~/Desktop/hustle-agent/` orphans. Battle Scar #3 docs at [CLAUDE.md:436](CLAUDE.md:436) already mention the bob bot's launchctl label, but no operator reminder existed to verify cwd before flagging. Session 81's spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
+
+**Decision: Outcome A — three small, scoped fixes, all in one ship.**
+
+1. **[bot/scheduler.py:355-365](bot/scheduler.py:355)** — replace `total_pnl`/`today_pnl` writes with explicit `pop(key, None)` calls. The fields disappear from `bot_state.json` after the next nightly fires (NIGHTLY_SUMMARY_HOUR). 7-line evidence comment explains the contract change and forbids new bot_state readers. Sister update at [bot/scheduler.py:88-90](bot/scheduler.py:88) (the reload-after-nightly that exists ONLY because `_send_nightly_summary` mutates state) — kept the reload, updated the rationale to reference Session 83 pop instead of Session 4 persist.
+
+2. **[tools/glint_status.py:953](tools/glint_status.py:953)** — `render_health_section(daily, now_utc)` (signature change; caller at [line 1178](tools/glint_status.py:1178) updated). Always emit `Generated: <ET timestamp> (<age>h ago) — values below reflect bot state at generation time, not now.` regardless of `stale_note` threshold. The 12h threshold remains for the structural `daily_report_stale` WARN flag at line 1098 (different concern, untouched).
+
+3. **[CLAUDE.md:437](CLAUDE.md:437)** Battle Scar #3 area — operator note that two `python -m bot.main` processes is NOT automatically Battle Scar #3; verify cwd via `lsof -p <PID> | grep cwd` before flagging an orphan. Bob bot at `~/Desktop/bob/` is launchd-managed independently with the same `python -m bot.main` invocation.
+
+**Tests.**
+- `tests/test_glint_status.py::test_render_health_section_always_shows_generated_timestamp_and_age` — new, locks the always-show contract for snapshots under the 12h threshold (fails without the §3 fix).
+- `tests/test_glint_status.py::test_render_health_section_handles_no_generated_at_gracefully` — new, guards the missing-timestamp path.
+- `tests/test_scheduler.py::TestTotalPnlPersist::test_total_pnl_popped_from_state_after_nightly` — replaces the prior `test_total_pnl_written_to_state` (which asserted the OLD persist behavior and would have shipped a regression). Pre-seeds state with stale values, asserts both keys are absent after nightly fires.
+
+**Verification.**
+- pytest baseline: 1519/0 → **1521/0** (+2 net new tests, 1 replacement). No new failures.
+- Live `tools/glint_status.py §3` now shows: `Generated: 2026-05-08 03:15 ET (7.6h ago) — values below reflect bot state at generation time, not now.` (verified post-edit.)
+- No bot restart. PID 11215 preserved (~10h+ uptime). The `total_pnl`/`today_pnl` fields stay in `bot_state.json` until the next nightly summary fires, at which point they pop. Future readings of bot_state.json after that fire will not include the keys.
+
+**Watch-list trigger (Session 83).** If any new code path adds a read of `bot_state.total_pnl` or `bot_state.today_pnl` (grep returns >0 results in bot/ or tools/), re-investigate — by Session 83 Phase 0 those fields had zero consumers, and any new consumer should compute live via `compute_daily_summary()` instead. Also: if §3 ever ships a render path that lacks the `Generated:` line for any non-empty `daily.path`, that is a regression of this fix.
+
+**Operator lesson.** Two stale-data confusion cycles in one morning is a signal worth acting on, not just noting. Both panics — the morning "CRITICAL heartbeat 121s" (actually §3 cached 03:15 ET data displayed without age marker) and the late-morning "$171 drop" (actually `bot_state.total_pnl` cached from yesterday's reconcile) — would have been caught by surfacing timestamps prominently. Add `Generated: <when>` (or equivalent) to any stale-prone display surface; never trust an unlabeled value to be current. The disciplined inverse of Session 78's silencing anti-pattern: instead of hiding the data when it might be stale, surface the staleness so operators self-correct.
+
+**Out of scope.** `live_momentum` kill decision (separate session). Heartbeat threshold (locked). Battle Scar #13 / Session 39 (settled). Sessions 80/81/82 watch-list triggers (active, untouched). The `notifier.send_daily_summary` dead code path was NOT removed in this ship — pure cleanup, flagged for a future session if pursued. The `bot_state.json` migration (popping stale `total_pnl`/`today_pnl` from EXISTING disk state on next read, vs waiting for the nightly to clear them) was deliberately NOT shipped here — adds one-shot read-side mutation for marginal value, the nightly cleans it within ~24h anyway.
 
 ---
 
