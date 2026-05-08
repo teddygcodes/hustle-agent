@@ -4563,6 +4563,44 @@ Until one of those fires, all `no_vol_growth_first_seen/*` §10 findings are aut
 
 ---
 
+### ☑ Session 76 — `outlier_pnl` PAPER-DDF25C1E investigation: Outcome B ship shape, already-fixed bug-pair (May 8, doc-only)
+
+**Trigger.** §10 Strategy Candidates surfaced `outlier_pnl: PAPER-DDF25C1E dominates vig_stack/mlb cohort (43% of $686)` as NOTABLE / 2d stable / zero cross-references. The finding looked SFPHI-shaped: a single `KXMLBGAME-*` paper trade carried roughly +$297 and might be either a fortunate singleton or the same two-cancelling-bugs path Session 43-investigate exposed.
+
+**Phase 0a trade record.** `PAPER-DDF25C1E` = `KXMLBGAME-26MAY061905TEXNYY-NYY`, `type=vig_stack`, `side=no`, `contracts=571`, `entry_price=0.35`, `exit_price=0.87`, `pnl=+296.92`, `status=exited_early`, `exit_reason=auto_take_profit`, `timestamp=2026-05-04T01:22:03.543600+00:00`, `resolved_at=2026-05-07T00:12:29.906878+00:00` = **May 6, 2026 20:12 ET**. `confidence=0.8`; no `dqs` or `sport` fields, expected for pre-Session-50 / vig_stack records.
+
+**Phase 0b decision path.** Current `bot/state/decisions.jsonl` had no row because the entry was archived. `bot/state/archive/decisions-2026-05-04.jsonl.gz` shows the accept at `2026-05-04T01:22:03.400005+00:00`: `opp_type=vig_stack_futures`, `decision=accept`, `edge=0.0389`, all gates true, `extra={contracts:571, cost_dollars:199.85, price_cents:35, side:no}`. Four later rows for the ticker were duplicate rejects. This exactly matches the SFPHI vocabulary mismatch: decision/position layer said `vig_stack_futures`, paper ledger normalized to `type=vig_stack`.
+
+**Phase 0c cohort math.** The §10 `43% of $686` reproduces when using the heuristic's actual denominator: **absolute** P&L across the 30d `vig_stack/mlb` cohort (`$686.50`), so `296.92 / 686.50 = 43.25%`. The prompt's signed-sum sample currently prints `n=6`, signed total `+$261.92`, and DDF at `113.4%`; that is a denominator mismatch, not a discovery-agent bug. `outlier_pnl.py` is intentionally absolute-P&L based.
+
+**Phase 0d timestamp check.** The trade resolved at `2026-05-07T00:12Z`, well before the Session 71 restart / Sessions 60-71 disk deploy boundary (`2026-05-07 20:29 ET` = `2026-05-08T00:29Z`). Therefore DDF ran on pre-Session-62/63 code - the same code family as SFPHI. It did NOT test the fixed scanner/classification path.
+
+**Phase 0e pattern check.**
+- All per-game KX*GAME vig_stack decisions in the logs are MLB `KXMLBGAME-*`; NBA/NHL per-game vig_stack counts are zero.
+- Pre-restart KXMLBGAME decisions: `vig_stack_futures` = 7 accepts / 13 rejects. Accepted tickers: SFPHI, two small May 1 positions, TEXNYY May 5, DDF May 6, ATLLAD May 8 open, ATLLAD May 9 resting.
+- Post-restart KXMLBGAME decisions: `vig_stack_series` = 1 accept / 1 reject. The post-restart accept (`KXMLBGAME-26MAY101610STLSD-STL`, `2026-05-08T00:38:47Z`) sized at `$49.98`, proving Session 62 cap-awareness + Session 63 per-game classification are active on the live path.
+- Settled KXMLBGAME paper rows show the bug-pair was profitable but not clean: `+296.92` DDF and `+172.52` SFPHI via `auto_take_profit`, offset by `-199.88`, `-6.46`, and `-5.95` auto-cut exits, plus an older pre-archive `+4.77` settlement. This is not a stable recurring edge; it is historical bug-pair variance.
+
+**Decision.** Outcome A rejected because the bug-pair DID get fixed by Sessions 62/63. Outcome C rejected because the pattern is explicitly bug-shaped, not a recurring clean +EV strategy. Outcome D rejected because the mechanism is fully identifiable. **Outcome B ship shape**: no production code, no new tests, no restart. The correct close-out is documentation + watch-list guardrails. In plain English: DDF was not a clean singleton, but it also is not a new unfixed production bug. It is an already-fixed pre-Session-63 recurrence of the SFPHI mechanism.
+
+**Watch-list trigger - re-open this surface when ANY of:**
+- A post-`2026-05-08T00:29Z` `KXMLBGAME-*` decision emits as `vig_stack_futures` instead of `vig_stack_series`.
+- A post-`2026-05-08T00:29Z` KXMLBGAME `vig_stack_series` position exits via `auto_take_profit`, `auto_cut_loss`, `auto_cut_loss_no_bid`, or `edge_flipped` before settlement.
+- `outlier_pnl` surfaces **>=3 post-restart outliers** in the same `vig_stack/mlb` cohort, after excluding historical pre-Session-63 KXMLBGAME rows.
+
+Until one of those fires, future `outlier_pnl` references to PAPER-DDF25C1E should cross-link Session 76 and classify the trade as "already-fixed historical KXMLBGAME bug-pair recurrence." Do not backfill historical paper trades; Sessions 62/63 were forward-only and Session 76 preserves that.
+
+**Verification.**
+1. ☑ Trade record pulled from `bot/state/paper_trades.json`.
+2. ☑ Decision record found in `bot/state/archive/decisions-2026-05-04.jsonl.gz`; current `decisions.jsonl` absence explained by archive rotation.
+3. ☑ Heuristic absolute-P&L denominator reproduces `$686.50` / `43.25%`; signed sample denominator mismatch documented.
+4. ☑ Pattern query confirms pre-restart `vig_stack_futures` KXMLBGAME accepts and post-restart `vig_stack_series` KXMLBGAME accept.
+5. ☑ No `bot/`, `tests/`, or `tools/` behavior changes. No bot restart needed.
+
+**README sync.** Committed separately per push discipline.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
