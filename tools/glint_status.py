@@ -950,12 +950,21 @@ def render_verdict(
     ])
 
 
-def render_health_section(daily: DailyReport) -> str:
+def render_health_section(daily: DailyReport, now_utc: datetime) -> str:
     out = ["## 3. Health Pulse", ""]
     if daily.path is None:
         out.append("_No daily report found._")
         return "\n".join(out)
-    out.append(f"Source: `{daily.path.relative_to(daily.path.parents[3]) if len(daily.path.parents) > 3 else daily.path}` {daily.stale_note}".rstrip())
+    src_path = daily.path.relative_to(daily.path.parents[3]) if len(daily.path.parents) > 3 else daily.path
+    out.append(f"Source: `{src_path}` {daily.stale_note}".rstrip())
+    # Session 83: always show generated_at + age regardless of stale_note
+    # threshold (12h) so operators see the snapshot's age immediately. The
+    # data inside §3 reflects the bot's state at generated_at, not now —
+    # the 03:15 ET nightly is ~6h stale by 09:00 ET reads but renders without
+    # warning under the loose threshold. Make the timestamp unmissable.
+    if daily.generated_at is not None:
+        age_h = max(0.0, (now_utc - daily.generated_at).total_seconds() / 3600.0)
+        out.append(f"Generated: {_format_et(daily.generated_at)} ({age_h:.1f}h ago) — values below reflect bot state at generation time, not now.")
     out.append("")
     section = extract_markdown_section(daily.text, "1. Health pulse")
     if not section:
@@ -1175,7 +1184,7 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     sections = [
         render_verdict(metrics, flags_for_baseline, discovery, watch, now_utc, strategy_candidates),
         render_diff(last, current_baseline, now_utc),
-        render_health_section(daily),
+        render_health_section(daily, now_utc),
         render_pnl_section(metrics, daily, now_utc),
         render_positions_section(metrics),
         render_discovery_section(discovery),

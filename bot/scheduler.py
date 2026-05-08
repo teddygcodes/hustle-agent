@@ -85,8 +85,9 @@ async def check_scheduled_events(bot) -> None:
         logger.info("Sending nightly summary...")
         try:
             await _send_nightly_summary(bot)
-            # Re-read: _send_nightly_summary persists total_pnl/today_pnl.
-            # Reload so we don't clobber it with the pre-briefing `state` copy.
+            # Re-read: _send_nightly_summary mutates bot_state (Session 83
+            # pops vestigial total_pnl/today_pnl). Reload so we don't clobber
+            # that cleanup with the pre-briefing `state` copy.
             state = _load_bot_state()
             state["last_nightly_summary"] = today_str
             _save_bot_state(state)
@@ -353,15 +354,21 @@ async def _send_nightly_summary(bot):
     streak = get_streak()
     roi_by_type = get_roi_by_strategy()
 
-    # Persist headline P&L numbers to bot_state so STATUS/briefings and the
-    # dashboard read a live value instead of the default 0. (Session 4)
+    # Session 83: total_pnl/today_pnl are vestigial write-only fields from
+    # Session 4. handle_status, _send_morning_briefing, and this function all
+    # call compute_daily_summary() live; nothing in bot/ or tools/glint_status.py
+    # reads these from bot_state.json (verified Session 83 Phase 0). The fields
+    # only confused operators reading bot_state.json directly and finding stale
+    # values (e.g. Session 83's $770.91 stale-vs-$945.18 live false alarm).
+    # Pop them on every nightly so stale values clear from disk; if a future
+    # consumer is added it must compute live, not read this field.
     try:
         persisted = _load_bot_state()
-        persisted["total_pnl"] = summary.get("total_pnl", 0)
-        persisted["today_pnl"] = summary.get("today_pnl", 0)
+        persisted.pop("total_pnl", None)
+        persisted.pop("today_pnl", None)
         _save_bot_state(persisted)
     except Exception as e:
-        logger.warning(f"Nightly summary: failed to persist P&L to bot_state: {e}")
+        logger.warning(f"Nightly summary: failed to clean vestigial P&L from bot_state: {e}")
 
     lines = [
         "🌙 NIGHTLY SUMMARY",

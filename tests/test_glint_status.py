@@ -341,3 +341,60 @@ def test_glint_strategy_candidates_section_uses_shared_renderer(monkeypatch: pyt
     md = glint.render_strategy_candidates_section(datetime(2026, 5, 7, 16, tzinfo=timezone.utc))
 
     assert md == "## 10. Strategy Candidates\n\nSHARED BODY"
+
+
+def test_render_health_section_always_shows_generated_timestamp_and_age(tmp_path: Path):
+    """Session 83: §3 must surface generated_at + age-in-hours in its header
+    regardless of the 12h stale_note threshold. The data inside §3 is a snapshot
+    of the bot's state at generated_at, NOT current — operators must see the
+    age unambiguously even when the report is fresh-ish (e.g. 5.6h old at 09:00
+    ET reading the 03:15 ET nightly)."""
+    report_path = tmp_path / "daily_report_2026-05-08.md"
+    report_path.write_text(
+        "Generated: 2026-05-08T07:15:00+00:00\n"
+        "\n"
+        "# 1. Health pulse\n"
+        "\n"
+        "| Axis | Value | Status |\n"
+        "|---|---|:---:|\n"
+        "| Bot alive | lock mtime fresh | ✅ |\n"
+    )
+    daily = glint.DailyReport(
+        path=report_path,
+        text=report_path.read_text(),
+        generated_at=datetime(2026, 5, 8, 7, 15, tzinfo=timezone.utc),
+        report_date="2026-05-08",
+        stale_note="",  # under 12h threshold — would have been silent before fix
+    )
+    now_utc = datetime(2026, 5, 8, 12, 51, tzinfo=timezone.utc)  # ~5.6h after generation
+
+    md = glint.render_health_section(daily, now_utc)
+
+    # Header must show generated_at in ET + age in hours
+    assert "Generated:" in md
+    assert "5.6h ago" in md
+    # And the explicit warning that values are point-in-time, not now
+    assert "reflect bot state at generation time, not now" in md
+    # Existing health-pulse section must still render
+    assert "Bot alive" in md
+
+
+def test_render_health_section_handles_no_generated_at_gracefully(tmp_path: Path):
+    """Session 83: when generated_at is missing (e.g. malformed daily report),
+    the section must still render without raising."""
+    report_path = tmp_path / "daily_report_2026-05-08.md"
+    report_path.write_text("# 1. Health pulse\n\n_no axes_\n")
+    daily = glint.DailyReport(
+        path=report_path,
+        text=report_path.read_text(),
+        generated_at=None,
+        report_date="2026-05-08",
+        stale_note="[generated timestamp missing]",
+    )
+    now_utc = datetime(2026, 5, 8, 12, 51, tzinfo=timezone.utc)
+
+    md = glint.render_health_section(daily, now_utc)
+
+    # Stale_note still surfaces; new Generated: line is suppressed when unknown
+    assert "[generated timestamp missing]" in md
+    assert "Generated:" not in md

@@ -716,9 +716,14 @@ class TestOrderMicrostructureRotation:
 
 
 class TestTotalPnlPersist:
-    """After nightly fires, bot_state['total_pnl'] reflects compute_daily_summary."""
+    """Session 83: total_pnl/today_pnl are vestigial write-only fields with no
+    consumers in bot/ or tools/glint_status.py (verified Session 83 Phase 0).
+    The contract changed from 'persist live values for STATUS/briefings' (the
+    Session 4 intent — which is moot because all those callers actually invoke
+    compute_daily_summary() live) to 'pop the keys so stale values stop
+    accumulating on disk and confusing operators reading bot_state.json.'"""
 
-    def test_total_pnl_written_to_state(self, tmp_state, mock_bot, monkeypatch):
+    def test_total_pnl_popped_from_state_after_nightly(self, tmp_state, mock_bot, monkeypatch):
         # Stub morning + reconcile bodies
         _install_body_mocks(monkeypatch, nightly=False)
 
@@ -739,11 +744,20 @@ class TestTotalPnlPersist:
         monkeypatch.setattr(tracker, "get_roi_by_strategy", lambda: {})
 
         _freeze_datetime(monkeypatch, datetime(2026, 4, 24, 0, 5, tzinfo=ET))
-        _set_state(tmp_state)
+        # Pre-seed state with stale values from a prior bot version. The nightly
+        # must clear them — that's the load-bearing assertion.
+        _set_state(tmp_state, total_pnl=999.99, today_pnl=42.42)
 
         asyncio.run(scheduler.check_scheduled_events(mock_bot))
 
         state = _read_state(tmp_state)
-        assert state["total_pnl"] == -98.32
-        assert state["today_pnl"] == -1.25
+        # Pop assertions: keys must be ABSENT from disk after nightly fires.
+        assert "total_pnl" not in state, (
+            "Session 83: total_pnl must be popped from bot_state, not persisted. "
+            "If a new consumer is added it must compute live via compute_daily_summary()."
+        )
+        assert "today_pnl" not in state, (
+            "Session 83: today_pnl must be popped from bot_state, not persisted."
+        )
+        # Other write paths in scheduler must still work.
         assert state["last_nightly_summary"] == "2026-04-24"
