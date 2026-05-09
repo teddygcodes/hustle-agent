@@ -4682,3 +4682,88 @@ Promotability under Session 84 bar (`N ≥ 30 AND mean_clv ≥ +5 AND +CLV% ≥ 
 **Cross-references.** Session 56.5 ☑ block — README sync discipline (single commit + push pattern). Session 70 ☑ block — "all tests must always pass" rule, baseline preserved at 1,524/0. Session 83 ☑ block — staleness-marker discipline mirrored here in Current Status date stamps. Session 87 ☑ block — most recent ☑ block before this; immediate predecessor in the May 8 cluster.
 
 **README sync.** This Session 88 ☑ block IS the canonical record; the README's own Session Recap entry for Session 88 is added in the same commit as this CLAUDE.md update (mirroring Session 56.5 single-commit discipline). Both updates pushed together.
+
+---
+
+### ☑ Session 89 — Move CLAUDE.md session changelog to dedicated file (May 8, doc-only, structural ship)
+
+**Trigger.** CLAUDE.md grew to **5,856 lines** with 86 ☑ session entries spanning lines 524–5191 (80% changelog, 20% operator manual). The single file was no longer navigable as a working manual — operators reading it for project scope, strategies, safety architecture, or playbooks had to scroll past 4,674 lines of historical changelog. Future session entries made this strictly worse (Session 88 alone added ~200 lines). Session 88 (May 8) trimmed README from 1,268 → 1,072 lines on the same readability concern; Session 89 applies the same shape to CLAUDE.md.
+
+**Phase 0 verification (read-only investigation; verified premise before locking scope).**
+
+1. **Consumer mapping.** Greped `bot/`, `tools/`, `tests/` for actual file reads of `CLAUDE.md` (not just path mentions in comments). Three real-file consumers surfaced:
+   - [tools/glint_status.py:93,703](hustle-agent/tools/glint_status.py:93) — `Paths.claude_md` field + default detail format string in `evaluate_watchlist_triggers()`. Reads at line 1159 to feed `extract_watchlist_triggers()`.
+   - [tools/_report_helpers.py:48,712](hustle-agent/tools/_report_helpers.py:48) — `CLAUDE_MD` constant + read in `_extract_strategy_watchlist_refs` (powers §10 Strategy Candidates `watch_refs` cross-references).
+   - [tests/test_glint_status.py:126,161](hustle-agent/tests/test_glint_status.py:126) — exercises real CLAUDE.md (asserts ≥10 watch-list triggers extracted) + asserts default detail string contains `CLAUDE.md L7`.
+2. **External anchor links surfaced (NOT in user's original brief; required Phase 0 to find).** [README.md](hustle-agent/README.md) carried **86 anchored links** in format `[→ details](CLAUDE.md#anchor)` — Session 88's session-recap entries. After move, all 86 anchors break (targets no longer in CLAUDE.md). Required as a 3rd commit.
+3. **Comment-only references (~24 files in `bot/`, `tools/`, `tests/` mentioning CLAUDE.md in docstrings/inline-comments) UNTOUCHED per user's "production code change beyond parser update is out of scope" rule.** They become "stale-but-still-readable prose"; cleanup is a future trivial-pass session if ever wanted.
+4. **Synthetic test fixtures using `tmp_path / "CLAUDE.md"`** (test_daily_report.py + test_report_helpers.py 6 sites) — UNTOUCHED. They build their own files in temp dirs.
+5. **Filename pick: `CLAUDE-sessions.md` at repo root.** docs/ exists but is sparse (`plan-to-8.md`, `superpowers/`); not the established home for paired-with-CLAUDE.md content. Repo-root naming convention (`CLAUDE.md`, `README.md`, `PLANNER_BRIEF.md`, `REPORT_CALENDAR.md`) makes parallel naming the cleanest choice.
+6. **Boundaries verified by direct read:** line 518 = `## Apr 20 Audit — Remediation Plan` (start of session block), line 524 = `### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)`, line 5138 = `### ☑ Session 88 — README cleanup`, line 5191 = end of Session 88's "Both updates pushed together.". Move payload = 4,674 lines.
+
+**Decision: Outcome A — execute the move.** Phase 0.1 surfaced 3 manageable consumer files + 86 README anchors. Within user's "1-2 manageable consumers" threshold; README anchor work is a single sed pass.
+
+**What shipped (4 commits in sequence; pushed as one operation per Style Rules).**
+
+1. **Commit 235e954** — Move sessions and add pointer.
+   - Created [CLAUDE-sessions.md](hustle-agent/CLAUDE-sessions.md) (new file, 4,684 lines) with a 10-line preamble + the verbatim 4,674-line move payload. Preamble cites CLAUDE.md as the operator manual home and codifies the append-only-but-curated convention.
+   - Edited [CLAUDE.md](hustle-agent/CLAUDE.md): excised lines 518–5191; replaced with a 5-line pointer paragraph naming CLAUDE-sessions.md as the new home AND explicitly directing future sessions to write their ☑ blocks there. CLAUDE.md dropped 5,856 → 1,188 lines (79.7% reduction).
+   - Verbatim move — zero compression. Compression is a future ship.
+
+2. **Commit e1fd923** — Repoint parser consumers.
+   - [tools/glint_status.py:93](hustle-agent/tools/glint_status.py:93): `claude_md=repo_root / "CLAUDE.md"` → `repo_root / "CLAUDE-sessions.md"`. Field name `claude_md` preserved (renaming would cascade through call sites; out of scope).
+   - [tools/glint_status.py:703](hustle-agent/tools/glint_status.py:703): `f"see CLAUDE.md L{trig['line']}"` → `f"see CLAUDE-sessions.md L{trig['line']}"`.
+   - [tools/_report_helpers.py:48](hustle-agent/tools/_report_helpers.py:48): `CLAUDE_MD` constant repointed. Constant name preserved.
+   - [tests/test_glint_status.py:126](hustle-agent/tests/test_glint_status.py:126): test reads new file. Assertion `len(triggers) >= 10` preserved as contract.
+   - [tests/test_glint_status.py:161](hustle-agent/tests/test_glint_status.py:161): expected substring `"CLAUDE.md L7"` → `"CLAUDE-sessions.md L7"`.
+
+3. **Commit 1ae2149** — Migrate 86 README session-recap anchors.
+   - Single `sed` pass on README.md scoped to the `[→ details](CLAUDE.md#...)` link pattern, flipping all 86 to `[→ details](CLAUDE-sessions.md#...)`. Anchor slugs unchanged because session headings move verbatim — GitHub auto-anchor generation produces the same slug from the same text.
+   - Spot-checked 3 anchors resolve to real headings: Session 1 first / Session 43a mid / Session 88 last. All resolved cleanly.
+   - Out of scope held: prose mentions of "see CLAUDE.md" without anchored links (Recent Improvements arc paragraphs reference CLAUDE.md by name as canonical source; correct and untouched).
+
+4. **This commit (Session 89 ☑ block + README Session Recap sync).** Per Session 88 / Session 56.5 single-commit discipline, the canonical record (this block) lands in the same commit as the README one-liner.
+
+**Verification gate (load-bearing per user spec).**
+- ☑ pytest baseline preserved: **1524 passed in 32-33s** across all 3 verifications (baseline pre-move, post-Commit-2, post-Commit-3). 0 failures, 0 skips.
+- ☑ `git diff bot/` empty across all 4 commits — zero production code change.
+- ☑ Pre/post `python3 tools/glint_status.py` diff: same 12 evaluator-matched TRIGGERED/NOT_YET_TRIGGERED status verdicts (same gates: Session 30-followup challenger CFs, Session 38a-2 wta CFs ×2, Session 38a-2 no_leader/wta, Session 40 EE cohort, Session 41 post-Apr-23 LM, Session 42 NBA/NHL/UFC ×4, Session 44 no_leader/wta, Session 58.5 HTTPX, Session 65 no_leader/wta — every TRIGGERED entry preserved with same numeric verdict).
+- ☑ Detail strings updated cleanly: `CLAUDE.md L<N>` → `CLAUDE-sessions.md L<M>` where M is the line in CLAUDE-sessions.md (different coordinate system; expected).
+- ☑ 4 MANUAL_CHECK_REQUIRED entries dropped from output: 3 from CLAUDE.md operator-protocol prose (the post-Session-88 "When Tyler Asks 'What's Ready to Promote?'" section mentioning watch-list triggers as a CONCEPT — parser was mis-attributing them to Session 88), plus 1 duplicate ("Session: unknown L504" was the same EE-cohort trigger that also fires from Session 40's L2289). **Net actionable trigger set is identical pre/post.** Cleanup of false positives, not a regression.
+- ☑ CLAUDE.md final size: **1,188 lines** (target 1,200–1,300; under target — better than expected). All operator-manual sections preserved: Project Scope, What Glint Is, Directory Map, Strategies, Safety Architecture, Live Game Watcher, Telegram Interface, Running & Operating, State Files, Critical Gotchas (Battle Scars), Data-Driven Tuning, Money, Operating Posture, Canonical Data Schema Reference, Future Direction, "When Tyler Asks…" playbooks, Style Rules, Quick Reference, Final Note.
+- ☑ CLAUDE-sessions.md: **4,684 lines** (4,674 move payload + 10-line preamble); contains all 86 ☑ session entries verbatim (`grep -c "^### ☑ Session "` = 86; CLAUDE.md = 0).
+- ☑ README anchor migration: 86 / 86 anchors flipped; 0 broken `CLAUDE.md#...` anchors remaining; 86 `CLAUDE-sessions.md#...` anchors. Spot-checks pass.
+- ☑ NO bot restart needed. Bot uptime preserved at PID 3072 (~14h+ as of Commit 4). CLAUDE.md isn't loaded by `bot/main.py`; only `tools/glint_status.py`, `tools/_report_helpers.py`, and `tests/test_glint_status.py` consume it as content, all run on-demand.
+
+**Convention reminder for future sessions (LOAD-BEARING — read this before shipping a new ☑ block).** Future session ☑ blocks append to `CLAUDE-sessions.md`, **NOT** `CLAUDE.md`. CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. The 5-line pointer paragraph in CLAUDE.md exists ONLY to direct readers to the new file — do not reintroduce session content there. The Style Rules section in CLAUDE.md continues to govern how to write a session entry; only the destination file changed. Insertion point in CLAUDE-sessions.md: append after the last ☑ block (currently this Session 89 entry). Maintain the `---\n\n### ☑ Session N — title (date, outcome, scope shape)` shape and the README sync discipline (one commit covers both CLAUDE-sessions.md ☑ block + README Session Recap one-liner).
+
+**What did NOT change.**
+- `bot/` — entirely untouched. No production code edits, no config edits. No bot restart.
+- All 9 `bot/state/*` files — untouched (no migration, no backfill).
+- `MOMENTUM_DISABLED_SPORTS`, `VIG_STACK_FAMILY_FLOOR_OVERRIDES`, `MOMENTUM_LEADER_MIN_PER_SPORT` — all unchanged.
+- Discovery agent code — untouched (continues reading from CLAUDE-sessions.md as before via the repointed `_report_helpers.py` constant).
+- Strategy lab code — untouched.
+- Tests — only the 2 sites reading CLAUDE.md updated; 0 assertion contracts relaxed.
+- `bot/main.py`, `bot/live_watcher.py`, `bot/scanner.py`, `bot/executor.py`, `bot/tracker.py`, `bot/clv.py`, `bot/strategies/` — all untouched.
+
+**Out of scope (held — separate sessions if pursued).**
+- Compressing individual session entries (move was verbatim; compression is a different ship).
+- Session index in CLAUDE-sessions.md (would help navigation; not this ship).
+- Extracting Pattern C catalog as a reference table (currently 15 instances scattered across sessions; future shipping ground).
+- Watch-list registry as structured data (currently parsed from prose; migrating to `bot/state/watchlist.json` is a future ship).
+- Reorganizing CLAUDE.md's reference sections (Operating Posture, Schema Reference, etc. — all stay where they are).
+- Comment-pointer cleanup (~24 files mention CLAUDE.md in comments). Out of scope per user.
+- Production code change beyond parser update.
+- live_momentum kill OR deep-dive (Tyler's standing deferral).
+- Test changes that adjust assertions to match degraded behavior.
+
+**Cross-references.**
+- Session 70 ☑ block — "all tests must always pass" rule, baseline 1524/0 preserved through this 4-commit sequence.
+- Session 86 ☑ block — single-commit precedent (CLAUDE.md ☑ block + README sync land together).
+- Session 88 ☑ block — most recent doc-only restructure shape (README cleanup); Session 89 applies the same discipline to CLAUDE.md.
+- Style Rules section in CLAUDE.md — push discipline ("Every session ends with `git push origin main`"); 4 commits pushed as one operation here.
+- Operating Posture section in CLAUDE.md — "negative findings ARE findings"; Phase 0 caught 3 surprises (the README anchor migration requirement, the 4 false-positive prose mentions, the Session 40 duplicate trigger) before any code landed. Mirrors Sessions 18.5/19a/41/56.5/58/67/68/69/80-82/84/85/87 Phase-0-discipline pattern.
+
+**Watch-list trigger.** None — clean structural ship. The only future "re-investigate" trigger this session creates is implicit: if a future session ever wants to write its ☑ block in CLAUDE.md instead of CLAUDE-sessions.md, the convention reminder above is the load-bearing prose to override.
+
+**README sync.** This Session 89 ☑ block IS the canonical record; the README's own Session Recap entry for Session 89 is added in the same commit as this CLAUDE-sessions.md update (mirroring Session 88 single-commit discipline). Both updates pushed together with the prior 3 commits as one `git push origin main` operation.
