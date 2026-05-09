@@ -45,7 +45,7 @@ ARCHIVE_DIR = STATE_DIR / "archive"
 REPORTS_DIR = STATE_DIR / "reports"
 DISCOVERY_DIR = STATE_DIR / "discovery"
 LOG_FILE = _REPO_ROOT / "bot" / "logs" / "bot.log"
-CLAUDE_MD = _REPO_ROOT / "CLAUDE.md"
+CLAUDE_MD = _REPO_ROOT / "CLAUDE-sessions.md"
 
 PAPER_TRADES_FILE = STATE_DIR / "paper_trades.json"
 CLV_FILE = STATE_DIR / "clv.json"

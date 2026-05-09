@@ -123,7 +123,7 @@ def test_anomaly_detector_no_false_positive_on_normal_state(tmp_path: Path):
 
 
 def test_watchlist_parser_extracts_triggers_from_claude_md():
-    triggers = glint.extract_watchlist_triggers((REPO_ROOT / "CLAUDE.md").read_text())
+    triggers = glint.extract_watchlist_triggers((REPO_ROOT / "CLAUDE-sessions.md").read_text())
     assert len(triggers) >= 10
     assert all("line" in t and "session" in t and "text" in t for t in triggers)
 
@@ -158,7 +158,7 @@ def test_watchlist_evaluator_unparseable_trigger_emits_manual_check():
         {},
     )
     assert out[0]["status"] == "MANUAL_CHECK_REQUIRED"
-    assert "CLAUDE.md L7" in out[0]["detail"]
+    assert "CLAUDE-sessions.md L7" in out[0]["detail"]
 
 
 def test_daily_report_section_extraction():

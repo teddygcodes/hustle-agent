@@ -90,7 +90,7 @@ def paths_for(repo_root: Path) -> Paths:
         clv_file=state / "clv.json",
         decisions_file=state / "decisions.jsonl",
         log_file=repo_root / "bot" / "logs" / "bot.log",
-        claude_md=repo_root / "CLAUDE.md",
+        claude_md=repo_root / "CLAUDE-sessions.md",
         report_calendar=repo_root / "REPORT_CALENDAR.md",
         config_py=repo_root / "bot" / "config.py",
         research_dataset=state / "research" / "live_momentum_dataset.csv",
@@ -700,7 +700,7 @@ def evaluate_watchlist_triggers(triggers: list[dict], data: dict) -> list[dict]:
         text = trig["text"]
         low = text.lower()
         status = "MANUAL_CHECK_REQUIRED"
-        detail = f"see CLAUDE.md L{trig['line']}"
+        detail = f"see CLAUDE-sessions.md L{trig['line']}"
 
         if "challenger cfs" in low and "600" in low and "100" in low:
             # Session 65: bar raised after Session 61 Outcome B.
