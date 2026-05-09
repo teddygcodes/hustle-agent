@@ -871,6 +871,7 @@ def test_journal_append_writes_session_end_event(tmp_path, monkeypatch):
 
 def _build_momentum_watcher(*, sport, ticker, price_history, yes_ask,
                              entry_count=0, cooldown=0, bets_placed=None,
+                             entry_losses=None,
                              status_msg_id=None,
                              opp_yes_ask=30, opp_history=None):
     """Bypass-init a LiveGameWatcher with the minimum state for _tick_momentum.
@@ -901,6 +902,7 @@ def _build_momentum_watcher(*, sport, ticker, price_history, yes_ask,
     w._gone_ticks = 0
     w._cooldown_remaining = cooldown
     w._entry_count = entry_count
+    w._entry_losses = list(entry_losses) if entry_losses else []
     w.bets_placed = bets_placed if bets_placed is not None else []
     w.exits = []
     w._tick_telem = Counter()
@@ -1182,6 +1184,164 @@ def test_log_decision_extras_carry_elapsed_seconds(monkeypatch):
         "no _log_decision_dampened call carried elapsed_seconds in extra — "
         "Session 34 plumbing regressed."
     )
+
+
+# ---------------------------------------------------------------------------
+# Session 90: re-entry-after-loss circuit breaker
+# Mining of 6 multi-entry trades on 5 ticker-days through 2026-05-08 showed
+# 0/4 WR after a loss-exit (PRIDJO 3xSL chain) vs 1/2 after a winning exit.
+# Breaker blocks re-entry when any prior exit on this match was a loss; winning
+# exits do not poison the loss memory. State lives in self._entry_losses.
+# ---------------------------------------------------------------------------
+
+def test_reentry_blocked_after_loss_recorded_session90(monkeypatch):
+    """Pre-load _entry_losses with one losing exit and drive a dip-eligible
+    tick. Entry must NOT fire; the dampener must log a reject with
+    reason='reentry_blocked'."""
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY09TEST-LAL",
+        price_history=[70, 70, 70, 70, 70],
+        yes_ask=65,
+        entry_count=1,  # one prior entry already happened
+        cooldown=0,
+        entry_losses=[{"reason": "STOP-LOSS: dropped 10c", "pnl": -2.0, "ts": 0.0}],
+    )
+
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+    # DQS would pass if reached — confirms the breaker fires BEFORE DQS gate.
+    monkeypatch.setattr(
+        game_context, "compute_dip_quality",
+        lambda **kwargs: (0.55, {"score": 0.55}),
+    )
+
+    asyncio.run(w._tick_momentum())
+
+    # Entry must not have fired
+    w._auto_bet_momentum.assert_not_called()
+
+    # Reject decision with reason='reentry_blocked' must have been logged
+    found_reentry = False
+    for call in w._log_decision_dampened.call_args_list:
+        if call.kwargs.get("reason") == "reentry_blocked":
+            found_reentry = True
+            extra = call.kwargs.get("extra") or {}
+            assert extra.get("losses_seen") == 1, (
+                f"expected losses_seen=1 in extra, got {extra.get('losses_seen')!r}"
+            )
+            break
+    assert found_reentry, (
+        "no _log_decision_dampened call carried reason='reentry_blocked' — "
+        f"got reasons={[c.kwargs.get('reason') for c in w._log_decision_dampened.call_args_list]}"
+    )
+
+
+def test_reentry_allowed_when_no_losses_recorded_session90(monkeypatch):
+    """With _entry_losses empty (no prior loss-exits), a dip-eligible tick
+    after a prior winning entry must still admit entry. Breaker must not
+    over-block when the only prior exits were wins."""
+    import asyncio
+    from bot import live_watcher
+    from bot import game_context
+
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY09TEST-LAL",
+        price_history=[70, 70, 70, 70, 70],
+        yes_ask=65,
+        entry_count=1,  # one prior winning entry
+        cooldown=0,
+        entry_losses=[],  # explicit: no losses recorded
+    )
+
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+    monkeypatch.setattr(
+        game_context, "compute_dip_quality",
+        lambda **kwargs: (0.55, {"score": 0.55}),
+    )
+
+    asyncio.run(w._tick_momentum())
+
+    # Entry must fire
+    w._auto_bet_momentum.assert_called_once()
+
+
+def test_loss_exit_appends_to_entry_losses_session90(monkeypatch):
+    """When _check_exit removes a position with negative pnl, the just-appended
+    exit_record must be observed and logged into self._entry_losses."""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from bot import live_watcher
+
+    bet = {
+        "ticker": "KXNBAGAME-26MAY09TEST-LAL", "side": "yes",
+        "price_cents": 75, "contracts": 10,
+    }
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker=bet["ticker"],
+        price_history=[75, 73, 70, 68, 65],
+        yes_ask=65,
+        bets_placed=[bet],
+    )
+
+    async def _mock_check_exit(*args, **kwargs):
+        # Simulate a stop-loss exit: pop bet, append loss exit_record.
+        w.bets_placed.remove(bet)
+        w.exits.append({**bet, "reason": "STOP-LOSS: dropped 10c (75c -> 65c)", "pnl": -2.0})
+
+    w._check_exit = AsyncMock(side_effect=_mock_check_exit)
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    assert len(w._entry_losses) == 1, (
+        f"expected 1 loss recorded, got {len(w._entry_losses)}: {w._entry_losses}"
+    )
+    rec = w._entry_losses[0]
+    assert rec["pnl"] == -2.0
+    assert "STOP-LOSS" in rec["reason"]
+    # Cooldown must also be set on exit (preserve existing behavior)
+    assert w._cooldown_remaining == 5  # MOMENTUM_REENTRY_COOLDOWN
+
+
+def test_winning_exit_does_not_pollute_entry_losses_session90(monkeypatch):
+    """A winning exit (positive pnl) must NOT append to _entry_losses.
+    Cooldown still gets set (preserving existing post-exit behavior)."""
+    import asyncio
+    from unittest.mock import AsyncMock
+    from bot import live_watcher
+
+    bet = {
+        "ticker": "KXNBAGAME-26MAY09TEST-LAL", "side": "yes",
+        "price_cents": 70, "contracts": 10,
+    }
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker=bet["ticker"],
+        price_history=[70, 75, 80, 85, 90],
+        yes_ask=90,
+        bets_placed=[bet],
+    )
+
+    async def _mock_check_exit(*args, **kwargs):
+        w.bets_placed.remove(bet)
+        w.exits.append({**bet, "reason": "TAKE-PROFIT", "pnl": 2.0})
+
+    w._check_exit = AsyncMock(side_effect=_mock_check_exit)
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    assert len(w._entry_losses) == 0, (
+        f"winning exit must not pollute loss memory; got {w._entry_losses}"
+    )
+    # Cooldown still set
+    assert w._cooldown_remaining == 5
 
 
 # ---------------------------------------------------------------------------

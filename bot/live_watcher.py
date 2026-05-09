@@ -37,7 +37,7 @@ from bot.config import (
     MOMENTUM_LEADER_MIN, MOMENTUM_DIP_BUY, MOMENTUM_DIP_MAX,
     get_leader_min_for_sport,
     MOMENTUM_PRICE_WINDOW,
-    MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN,
+    MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN, MOMENTUM_REENTRY_LOSS_LIMIT,
     MOMENTUM_SCALE_SMALL_DIP, MOMENTUM_SCALE_MED_DIP, MOMENTUM_SCALE_LARGE_DIP,
     MOMENTUM_DQS_THRESHOLD, MOMENTUM_DQS_TRAIL_STOP,
     MOMENTUM_DISABLED_SPORTS,
@@ -457,6 +457,9 @@ class LiveGameWatcher:
         self._match_title: str = ""
         self._entry_count: int = 0            # total entries this match (caps at MAX_ENTRIES)
         self._cooldown_remaining: int = 0     # ticks until re-entry allowed after exit
+        # Session 90: per-match record of LOSING exits, for the re-entry circuit breaker.
+        # Each entry: {"reason": str, "pnl": float, "ts": float}. Winning exits don't append.
+        self._entry_losses: list[dict] = []
         self._last_exit_side: str | None = None  # which side we last exited (avoid same-side chasing)
 
         # Game intelligence
@@ -1144,6 +1147,18 @@ class LiveGameWatcher:
                 # If we just exited, start cooldown before re-entry
                 if len(self.bets_placed) < prev_bet_count:
                     self._cooldown_remaining = MOMENTUM_REENTRY_COOLDOWN
+                    # Session 90: record losing exits for the re-entry circuit breaker.
+                    # _check_exit just appended the exit_record to self.exits; read the
+                    # tail and record only if pnl was negative.
+                    if self.exits:
+                        last_exit = self.exits[-1]
+                        last_pnl = last_exit.get("pnl")
+                        if last_pnl is not None and last_pnl < 0:
+                            self._entry_losses.append({
+                                "reason": last_exit.get("reason"),
+                                "pnl": last_pnl,
+                                "ts": time.time(),
+                            })
 
         # --- Entry logic: buy dips on EITHER leader (now with DQS) ---
         max_entry = sport_profile.get("max_entry", 75)
@@ -1160,6 +1175,7 @@ class LiveGameWatcher:
             and self._cooldown_remaining <= 0
             and not self.bets_placed  # one position at a time
             and (self.sport or "").lower() not in MOMENTUM_DISABLED_SPORTS
+            and len(self._entry_losses) < MOMENTUM_REENTRY_LOSS_LIMIT  # Session 90 breaker
         )
 
         # Session 7 — edge proxy + context for decision log.
@@ -1196,6 +1212,10 @@ class LiveGameWatcher:
             elif self.bets_placed:
                 _reason = "position_open"
                 _gates = {"can_enter": False, "sport_enabled": True, "position_open": False}
+            elif len(self._entry_losses) >= MOMENTUM_REENTRY_LOSS_LIMIT:
+                # Session 90: re-entry circuit breaker fires after a losing exit on this match.
+                _reason = "reentry_blocked"
+                _gates = {"can_enter": False, "sport_enabled": True, "reentry_blocked": False}
             else:
                 _reason = "cannot_enter"
                 _gates = {"can_enter": False}
@@ -1205,7 +1225,8 @@ class LiveGameWatcher:
                 extra={**mom_ctx, "sport": sport_lc,
                        "entry_count": self._entry_count,
                        "cooldown_remaining": self._cooldown_remaining,
-                       "open_bets": len(self.bets_placed)},
+                       "open_bets": len(self.bets_placed),
+                       "losses_seen": len(self._entry_losses)},  # Session 90
                 close_ts=_close_ts,
             )
 

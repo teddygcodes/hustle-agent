@@ -148,6 +148,14 @@ MOMENTUM_PRICE_WINDOW    = 12    # track last N ticks for recent high (~2 min at
 # new constants with the evidence that justified it.
 MOMENTUM_MAX_ENTRIES     = 3     # max entries per match (re-entry after exit allowed)
 MOMENTUM_REENTRY_COOLDOWN = 5    # ticks (~50s) cooldown after exit before re-entry
+# Session 90 (2026-05-09): re-entry-after-loss circuit breaker. After this many
+# losing exits within a single match, no more entries are admitted on that match.
+# Mining of 6 multi-entry trades through 2026-05-08 (paper_trades.json, n=97):
+# 4/4 losses (-$7.30) on after-loss re-entries; 1W/1L (-$2.20) on after-win re-entries.
+# PRIDJO 2026-05-08 was the smoking gun (3 SL exits in 50min on the same match).
+# Tighten-then-loosen is recoverable; only loosen with positive evidence on
+# after-loss re-entries (n>=5 with positive direction).
+MOMENTUM_REENTRY_LOSS_LIMIT = 1
 MOMENTUM_SCALE_SMALL_DIP = 1.0   # 1x on min-threshold dips — they qualify but aren't special
 MOMENTUM_SCALE_MED_DIP   = 1.2   # 1.2x on medium dips — bigger dip = better bounce
 MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% win, +3.67c avg
