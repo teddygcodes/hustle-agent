@@ -5327,6 +5327,77 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
 
 ---
 
+## Future Direction — Closed-Loop Strategy Lifecycle (NOT BUILDING YET)
+
+**Status:** Documented north star. **We are not building this yet.** Refine the substrate first; revisit the readiness gate periodically.
+
+### What "smart" means here
+
+The bot today is a tool the operator pilots — operator decides which candidates to promote, which strategies to kill, when to investigate. "Smart" means the bot becomes an agent the operator supervises. Strategies enter and exit autonomously based on calibrated triggers; operator gets notified of transitions, not asked to approve them. Operator can override anything but doesn't have to approve everything.
+
+### The lifecycle in stages
+
+Each stage has explicit transitions. Transitions are data-driven, with thresholds documented and overridable.
+
+- `candidate` (discovered by heuristic, surfaced in §10) → `promotable` (clears Session 84's per-heuristic bar with no disqualifications)
+- `promotable` → `shadow` (paper-trades in parallel without affecting bankroll; runs for ~14d for validation)
+- `shadow` → `live` (auto-graduate after shadow window if metrics hold; or auto-retire if they don't)
+- `live` → `suspended` (auto-paused on calibrated kill threshold — e.g. 7-day WR drops below floor)
+- `suspended` → `live` (operator override, OR auto-resume after evidence improves past resume threshold)
+- `suspended` → `killed` (after suspension persists past resolution window without recovery)
+
+### Pieces that exist today
+
+- Discovery surfaces candidates (Session 66).
+- Promotion bar evaluates candidates per-heuristic with disqualifier checks (Session 84).
+- CF emission is honestly deduped at source (Session 86).
+- Bar interpretation is correct over the 30-day post-fix transition (Session 87).
+- Watch-list machinery captures some transition signals (informally).
+- Operator-run protocol for "what's promotable today" (CLAUDE.md "When Tyler Asks 'What's Ready to Promote?'", Session 84).
+
+### Pieces that DON'T exist yet
+
+- **Shadow mode** (paper-trade-within-paper-mode runner). 0% built.
+- **Auto-promotion** (clears bar → enters shadow without operator approval). 0% built.
+- **Auto-suspension** (live strategy crosses kill threshold → pauses without operator approval). 0% built. *`live_momentum` is the standing proof this gap matters — it's been bleeding while operator manually deliberates.*
+- **Notification stream** for transitions (operator gets told, not asked). 0% built.
+- **Cross-strategy learning** (vig_stack's KXHIGH edge informs other strategies). 0% built.
+- **Regime detection** (high-vol/low-vol, in-season/off-season, weekday/weekend). 0% built.
+- **Auto-resolver for stale watch-list entries** (manual-check load shrinks instead of grows). 0% built — small enough to be a refinement-phase ship.
+
+### Why we're not building this yet
+
+**Lifecycle on a shaky substrate amplifies failures.** Auto-suspending a live strategy on bad data is worse than not auto-suspending. Auto-promoting a candidate based on inflated counts is worse than waiting (Session 87 just proved this directly). The substrate must be confidence-tested before we build closed-loop logic on top of it.
+
+The current ~70/20/10 split in session work (operational hygiene / discovery infrastructure / explicit lifecycle work) is correct *for now*. Each Pattern C ship that surfaces a wrong premise about our own bot is substrate-hardening, not wasted work.
+
+### Readiness gate (start the build when MOST are satisfied)
+
+1. **pytest baseline stable for ≥30 days** with no surprise regressions. Today: 1524/0, on a 5-day streak of additions.
+2. **Pattern C count growth slows** to ~1/week. Today: count is 15, growth was +6 in one day. When daily Pattern C ships drop to <1/day sustained, the substrate stops surfacing new wrong premises about our own code.
+3. **Operator manual-check load shrinks**, not grows. Today: 23 → 28 in one day. Smart substrate would have auto-resolvers retiring stale entries. (This is itself a small refinement-phase feature worth shipping during the wait.)
+4. **Zero CRITICAL false alarms for ≥14 consecutive days.** Session 83's stale-data hygiene was the first step; there may be other staleness vectors not yet found.
+5. **`live_momentum` reaches a resolved state** — killed (Path B), deep-dive-justified (Path A with evidence), or proven valuable (positive 30-day rolling P&L). Indefinite is itself a substrate weakness; a bot can't be supervisor-mode if its operator can't decide whether one of its strategies works.
+6. **`vig_stack` run-rate stable across 30+ consecutive days.** The workhorse is the reference; if it's wobbling, nothing built on it is reliable.
+
+**Most ≠ all.** Perfect is the enemy of good. Aim for ~5 of 6 satisfied before proposing the lifecycle MVP planning session.
+
+### Revisit cadence
+
+Every ~10 sessions OR every 2 weeks, whichever comes first. Audit the readiness gate; if MOST criteria are satisfied, propose a focused planning session to define lifecycle MVP scope. Until then, stay in refinement mode and let the substrate stabilize.
+
+### Until then, refinement looks like
+
+- Operations hygiene (cadence, heartbeats, deployment, restart safety)
+- Investigation of unexpected outcomes (Pattern C is legitimate; each one narrows the search)
+- Discipline reinforcement (Phase 0 before scope, "verify premise, don't pre-decide fix")
+- Incremental discovery infrastructure (new heuristics where evidence justifies them)
+- Small substrate-hardening features (auto-resolvers for stale watch-list, clearer staleness markers, better diff displays)
+
+The day we stop learning new wrong premises about our own bot is the day we know the substrate is ready for closed-loop logic on top of it.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run this checklist:
