@@ -267,9 +267,11 @@ def test_daily_and_glint_strategy_candidate_bodies_match(tmp_path, monkeypatch):
         now_utc=datetime(2026, 5, 7, 16, tzinfo=timezone.utc),
     )
     daily_body = _section_body(daily_path.read_text(), "# 11. Strategy Candidates")
+    # Session 91 sub-feature 6: glint_status §10 → §9 after Flags deletion. The
+    # daily report's own §11 numbering is independent and unchanged.
     glint_body = _section_body(
         glint_status.render_strategy_candidates_section(datetime(2026, 5, 7, 16, tzinfo=timezone.utc)),
-        "## 10. Strategy Candidates",
+        "## 9. Strategy Candidates",
     )
 
     assert daily_body == glint_body

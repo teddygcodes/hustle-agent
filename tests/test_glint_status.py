@@ -209,7 +209,9 @@ def test_consolidator_completes_in_under_2s():
     md = glint.build_snapshot(REPO_ROOT, now_utc=datetime.now(timezone.utc), persist=False)
     elapsed = time.perf_counter() - start
     assert "# Glint Status" in md
-    assert "## 9. Flags" in md
+    # Session 91: §9 Flags deleted; §10 Strategy Candidates renumbered to §9.
+    assert "## 9. Strategy Candidates" in md
+    assert "## 9. Flags" not in md
     assert elapsed < 2.0
 
 
@@ -340,7 +342,8 @@ def test_glint_strategy_candidates_section_uses_shared_renderer(monkeypatch: pyt
 
     md = glint.render_strategy_candidates_section(datetime(2026, 5, 7, 16, tzinfo=timezone.utc))
 
-    assert md == "## 10. Strategy Candidates\n\nSHARED BODY"
+    # Session 91 sub-feature 6: §10 → §9 after Flags deletion.
+    assert md == "## 9. Strategy Candidates\n\nSHARED BODY"
 
 
 def test_render_health_section_always_shows_generated_timestamp_and_age(tmp_path: Path):
@@ -398,3 +401,157 @@ def test_render_health_section_handles_no_generated_at_gracefully(tmp_path: Path
     # Stale_note still surfaces; new Generated: line is suppressed when unknown
     assert "[generated timestamp missing]" in md
     assert "Generated:" not in md
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 2: Live bot vitals header (§1)
+# ---------------------------------------------------------------------------
+
+def test_render_bot_vitals_alive():
+    now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "running": True,
+        "started_at": (now - timedelta(hours=2, minutes=14)).isoformat(),
+        "last_heartbeat": (now - timedelta(seconds=12)).isoformat(),
+        "last_scan": (now - timedelta(minutes=4)).isoformat(),
+        "scans_today": 17,
+    }
+    # Use our own PID — it's guaranteed to be alive when the test runs.
+    import os as _os
+    out = glint.render_bot_vitals(state, lock_pid=_os.getpid(), now=now)
+    assert "PID" in out and str(_os.getpid()) in out
+    assert "uptime 2h 14m" in out
+    assert "heartbeat 12s" in out
+    assert "scans_today 17" in out
+    assert "last scan 4m" in out
+    assert "DEAD" not in out
+
+
+def test_render_bot_vitals_dead_stale_heartbeat():
+    now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "running": True,
+        "last_heartbeat": (now - timedelta(minutes=12)).isoformat(),
+        "started_at": (now - timedelta(hours=1)).isoformat(),
+        "last_scan": (now - timedelta(minutes=12)).isoformat(),
+        "scans_today": 5,
+    }
+    import os as _os
+    out = glint.render_bot_vitals(state, lock_pid=_os.getpid(), now=now)
+    assert "DEAD" in out
+    assert "12m" in out
+
+
+def test_render_bot_vitals_dead_no_pid():
+    now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+    state = {"running": False, "last_heartbeat": (now - timedelta(seconds=20)).isoformat()}
+    out = glint.render_bot_vitals(state, lock_pid=None, now=now)
+    assert "DEAD" in out and "lock missing" in out
+
+
+def test_render_bot_vitals_dead_pid_not_running():
+    now = datetime(2026, 5, 9, 12, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "running": True,
+        "started_at": (now - timedelta(hours=1)).isoformat(),
+        "last_heartbeat": (now - timedelta(seconds=10)).isoformat(),
+        "last_scan": (now - timedelta(seconds=30)).isoformat(),
+        "scans_today": 12,
+    }
+    # PID 1 is init/launchd on macOS — exists but not ours. We treat
+    # PermissionError as "alive" so this would render alive. Use a sentinel
+    # PID guaranteed not to exist (max PID + 1 territory).
+    out = glint.render_bot_vitals(state, lock_pid=2_147_483_646, now=now)
+    assert "DEAD" in out
+    assert "not running" in out
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 5: §3 staleness collapse (12h threshold)
+# ---------------------------------------------------------------------------
+
+def test_render_health_section_fresh_renders_full(tmp_path: Path):
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    report_path = tmp_path / "daily_report_2026-05-09.md"
+    report_path.write_text(
+        "Generated: 2026-05-09T11:00:00+00:00\n"
+        "\n"
+        "# 1. Health pulse\n"
+        "\n"
+        "All healthy.\n"
+    )
+    daily = glint.DailyReport(
+        path=report_path,
+        text=report_path.read_text(),
+        generated_at=datetime(2026, 5, 9, 11, tzinfo=timezone.utc),
+        report_date="2026-05-09",
+        stale_note="",
+    )
+    md = glint.render_health_section(daily, now)
+    assert "All healthy." in md
+    assert "too stale to show as live" not in md
+
+
+def test_render_health_section_stale_collapses(tmp_path: Path):
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    generated = now - timedelta(hours=21, minutes=24)
+    report_path = tmp_path / "daily_report_2026-05-08.md"
+    report_path.write_text(
+        f"Generated: {generated.isoformat()}\n"
+        "\n"
+        "# 1. Health pulse\n"
+        "\n"
+        "DETAIL_BODY_SHOULD_NOT_RENDER\n"
+    )
+    daily = glint.DailyReport(
+        path=report_path,
+        text=report_path.read_text(),
+        generated_at=generated,
+        report_date="2026-05-08",
+        stale_note="[stale: 21.4h ago]",
+    )
+    md = glint.render_health_section(daily, now)
+    assert "## 3. Health Pulse" in md
+    assert "too stale to show as live" in md
+    assert "21." in md  # age shown
+    assert "DETAIL_BODY_SHOULD_NOT_RENDER" not in md  # excerpt body suppressed
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 6: §9 merge into §7 + delete §9
+# ---------------------------------------------------------------------------
+
+def test_section_7_includes_daily_report_stale_after_merge(tmp_path: Path):
+    daily = glint.DailyReport(
+        path=tmp_path / "x.md",
+        text="",
+        generated_at=None,
+        report_date="2026-05-08",
+        stale_note="[stale: 21.4h ago]",
+    )
+    md = glint.render_anomalies_watchlist([], [], daily)
+    # §7 uses the existing severity/message format; the daily_report_stale flag
+    # is conveyed by message content + Session 35 ref, not the flag-id token.
+    assert "Latest daily report is" in md
+    assert "21.4h" in md
+    assert "Session 35" in md
+
+
+def test_section_7_includes_watchlist_summary_flags(tmp_path: Path):
+    watch = [
+        {"status": "MANUAL_CHECK_REQUIRED", "session": "S19", "line": 909, "detail": "x"},
+        {"status": "TRIGGERED", "session": "S40", "line": 100, "detail": "y"},
+    ]
+    daily = glint.DailyReport(path=None, text="", generated_at=None, report_date="", stale_note="")
+    md = glint.render_anomalies_watchlist([], watch, daily)
+    assert "watch-list triggers require manual evaluation" in md
+    assert "watch-list triggers are currently triggered" in md
+    # Each underlying entry still surfaces in the per-entry list below.
+    assert "MANUAL_CHECK_REQUIRED: S19 L909" in md
+    assert "TRIGGERED: S40 L100" in md
+
+
+def test_render_flags_section_no_longer_exists():
+    # Session 91 sub-feature 6: render_flags_section was deleted; confirm the
+    # symbol is gone so future regressions can't accidentally reintroduce it.
+    assert not hasattr(glint, "render_flags_section")

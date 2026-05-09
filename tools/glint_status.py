@@ -12,13 +12,14 @@ from __future__ import annotations
 import ast
 import csv
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -152,6 +153,76 @@ def _age_text(now_utc: datetime, then: datetime | None) -> str:
     if hours < 48:
         return f"{hours:.1f}h ago"
     return f"{hours / 24.0:.1f}d ago"
+
+
+def _format_duration(td: timedelta) -> str:
+    """Compact duration without 'ago' suffix: '12s', '4m', '2h 14m'."""
+    seconds = max(0, int(td.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    rem_min = minutes % 60
+    return f"{hours}h {rem_min}m" if rem_min else f"{hours}h"
+
+
+def _load_bot_lock_pid(paths: Paths) -> Optional[int]:
+    lock = paths.state_dir / "bot.lock"
+    try:
+        text = lock.read_text().strip()
+        return int(text) if text else None
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_is_alive(pid: Optional[int]) -> bool:
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but isn't ours — treat as alive for vitals purposes.
+        return True
+    except OSError:
+        return False
+
+
+def render_bot_vitals(state: dict, lock_pid: Optional[int], now: datetime) -> str:
+    """One-line vitals header: 'Bot: PID NNN / uptime ... / heartbeat Ns / ...'.
+
+    DEAD when (a) heartbeat > 90s old, (b) lockfile missing/PID invalid, or
+    (c) the lock PID is not running. Renders 🚨 prefix in DEAD state.
+    """
+    last_hb = _parse_iso(state.get("last_heartbeat"))
+    started = _parse_iso(state.get("started_at"))
+    last_scan = _parse_iso(state.get("last_scan"))
+    scans = state.get("scans_today", 0)
+
+    hb_age_s = (now - last_hb).total_seconds() if last_hb else float("inf")
+    pid_alive = _pid_is_alive(lock_pid)
+    is_dead = (hb_age_s > 90) or (lock_pid is None) or (not pid_alive)
+
+    if is_dead:
+        if lock_pid is None:
+            tail = "lock missing — restart needed"
+        elif not pid_alive:
+            tail = f"lock PID {lock_pid} not running — restart needed"
+        else:
+            tail = f"last heartbeat {_format_duration(now - last_hb)} ago — restart needed"
+        return f"🚨 Bot: DEAD — {tail}"
+
+    uptime = _format_duration(now - started) if started else "?"
+    hb = _format_duration(now - last_hb)
+    scan_age = _format_duration(now - last_scan) if last_scan else "?"
+    return (
+        f"Bot: PID {lock_pid} / uptime {uptime} / heartbeat {hb} / "
+        f"scans_today {scans} / last scan {scan_age} ago"
+    )
 
 
 def _trade_key(trade: dict) -> str:
@@ -911,6 +982,8 @@ def render_verdict(
     watch: list[dict],
     now_utc: datetime,
     strategy_candidates: dict | None = None,
+    bot_state: dict | None = None,
+    lock_pid: Optional[int] = None,
 ) -> str:
     critical = [f for f in flags if f.severity == "CRITICAL"]
     warn = [f for f in flags if f.severity == "WARN"]
@@ -931,23 +1004,27 @@ def render_verdict(
             f"I {int(strategy_candidates.get('info', 0))}), "
             f"{int(strategy_candidates.get('resolved', 0))} resolved 14d, "
         )
-    return "\n".join([
+    out = [
         "# Glint Status",
         "",
         f"Generated: {_format_et(now_utc)}",
         "",
         "## 1. Verdict",
         "",
-        (
-            f"Verdict: **{label}.** {metrics['open_positions_count']} positions / "
-            f"{_fmt_money(metrics['exposure'], signed=False)} exposure / "
-            f"{_fmt_money(metrics['total_pnl'])} net. "
-            f"{len(warn)} WARN, {len(critical)} CRITICAL, "
-            f"{discovery['new']} NEW discovery findings, "
-            f"{candidate_phrase}"
-            f"{len(triggered)} triggered watch-list checks, {len(manual)} manual checks."
-        ),
-    ])
+    ]
+    if bot_state is not None:
+        out.append(render_bot_vitals(bot_state, lock_pid, now_utc))
+        out.append("")
+    out.append(
+        f"Verdict: **{label}.** {metrics['open_positions_count']} positions / "
+        f"{_fmt_money(metrics['exposure'], signed=False)} exposure / "
+        f"{_fmt_money(metrics['total_pnl'])} net. "
+        f"{len(warn)} WARN, {len(critical)} CRITICAL, "
+        f"{discovery['new']} NEW discovery findings, "
+        f"{candidate_phrase}"
+        f"{len(triggered)} triggered watch-list checks, {len(manual)} manual checks."
+    )
+    return "\n".join(out)
 
 
 def render_health_section(daily: DailyReport, now_utc: datetime) -> str:
@@ -965,6 +1042,14 @@ def render_health_section(daily: DailyReport, now_utc: datetime) -> str:
     if daily.generated_at is not None:
         age_h = max(0.0, (now_utc - daily.generated_at).total_seconds() / 3600.0)
         out.append(f"Generated: {_format_et(daily.generated_at)} ({age_h:.1f}h ago) — values below reflect bot state at generation time, not now.")
+        # Session 91 sub-feature 5: collapse the excerpt body once we cross the
+        # same 12h threshold that fires the daily_report_stale WARN flag (line
+        # 231). Showing 21h-old health-pulse details as if live is the
+        # operator-misleading shape this collapse retires.
+        if age_h > 12:
+            out.append("")
+            out.append("_Snapshot is too stale to show as live. Run a fresh daily report to refresh this section._")
+            return "\n".join(out)
     out.append("")
     section = extract_markdown_section(daily.text, "1. Health pulse")
     if not section:
@@ -1072,13 +1157,31 @@ def render_discovery_section(discovery: dict) -> str:
     return "\n".join(out)
 
 
-def render_anomalies_watchlist(anomalies: list[Flag], watch: list[dict]) -> str:
+def render_anomalies_watchlist(
+    anomalies: list[Flag],
+    watch: list[dict],
+    daily: DailyReport | None = None,
+) -> str:
+    """Section 7. Session 91 sub-feature 6: absorbs the auto-injected flags
+    that used to live in the now-deleted §9 (daily_report_stale,
+    watchlist_manual_checks, watchlist_triggered) so we render them once."""
     out = ["## 7. Anomalies + Watch-List Status", ""]
+    extra_flags: list[Flag] = []
+    if daily is not None and daily.stale_note:
+        extra_flags.append(Flag("daily_report_stale", "WARN", f"Latest daily report is {daily.stale_note}.", "Session 35"))
+    manual = [w for w in watch if w["status"] == "MANUAL_CHECK_REQUIRED"]
+    triggered = [w for w in watch if w["status"] == "TRIGGERED"]
+    if manual:
+        extra_flags.append(Flag("watchlist_manual_checks", "WARN", f"{len(manual)} watch-list triggers require manual evaluation.", None))
+    if triggered:
+        extra_flags.append(Flag("watchlist_triggered", "WARN", f"{len(triggered)} watch-list triggers are currently triggered.", None))
+
     out.append("Anomalies:")
-    if not anomalies:
+    all_anom = list(anomalies) + extra_flags
+    if not all_anom:
         out.append("- OK: no anomaly flags.")
     else:
-        for f in anomalies:
+        for f in all_anom:
             ref = f" ({f.ref})" if f.ref else ""
             out.append(f"- {f.severity}: {f.message}{ref}")
     out.append("")
@@ -1101,33 +1204,6 @@ def render_calendar_section(entries: list[dict]) -> str:
     return "\n".join(out)
 
 
-def render_flags_section(flags: list[Flag], daily: DailyReport, watch: list[dict]) -> str:
-    all_flags = list(flags)
-    if daily.stale_note:
-        all_flags.append(Flag("daily_report_stale", "WARN", f"Latest daily report is {daily.stale_note}.", "Session 35"))
-    manual = [w for w in watch if w["status"] == "MANUAL_CHECK_REQUIRED"]
-    triggered = [w for w in watch if w["status"] == "TRIGGERED"]
-    if manual:
-        all_flags.append(Flag("watchlist_manual_checks", "WARN", f"{len(manual)} watch-list triggers require manual evaluation.", None))
-    if triggered:
-        all_flags.append(Flag("watchlist_triggered", "WARN", f"{len(triggered)} watch-list triggers are currently triggered.", None))
-
-    out = ["## 9. Flags", ""]
-    if not all_flags:
-        out.append("OK: no flags.")
-        return "\n".join(out)
-    for sev in ("CRITICAL", "WARN", "INFO"):
-        rows = [f for f in all_flags if f.severity == sev]
-        if not rows:
-            continue
-        out.append(f"{sev}:")
-        for f in rows:
-            ref = f" ({f.ref})" if f.ref else ""
-            out.append(f"- `{f.id}`: {f.message}{ref}")
-        out.append("")
-    return "\n".join(out).rstrip()
-
-
 def render_strategy_candidates_section(now_utc: datetime) -> str:
     today = now_utc.astimezone(helpers.ET).date()
     body, _reason = helpers._safe_section(
@@ -1135,7 +1211,7 @@ def render_strategy_candidates_section(now_utc: datetime) -> str:
         window_days=14,
         today=today,
     )
-    return "\n".join(["## 10. Strategy Candidates", "", body]).rstrip()
+    return "\n".join(["## 9. Strategy Candidates", "", body]).rstrip()
 
 
 def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None, persist: bool = True) -> str:
@@ -1181,16 +1257,25 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     last = load_last_status(paths.last_status)
     calendar_entries = next_calendar_entries(paths, now_utc)
 
+    lock_pid = _load_bot_lock_pid(paths)
     sections = [
-        render_verdict(metrics, flags_for_baseline, discovery, watch, now_utc, strategy_candidates),
+        render_verdict(
+            metrics,
+            flags_for_baseline,
+            discovery,
+            watch,
+            now_utc,
+            strategy_candidates,
+            bot_state=metrics.get("bot_state"),
+            lock_pid=lock_pid,
+        ),
         render_diff(last, current_baseline, now_utc),
         render_health_section(daily, now_utc),
         render_pnl_section(metrics, daily, now_utc),
         render_positions_section(metrics),
         render_discovery_section(discovery),
-        render_anomalies_watchlist(anomalies, watch),
+        render_anomalies_watchlist(anomalies, watch, daily),
         render_calendar_section(calendar_entries),
-        render_flags_section(anomalies, daily, watch),
         render_strategy_candidates_section(now_utc),
     ]
     output = "\n\n---\n\n".join(s.rstrip() for s in sections).rstrip() + "\n"
