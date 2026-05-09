@@ -1,0 +1,28 @@
+[
+  {
+    "session": 90,
+    "shipped_at": "2026-05-09T00:00:00+00:00",
+    "description": "live_momentum re-entry-after-loss circuit breaker (N=1 on losses)",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "reentry_blocked rejects in decisions.jsonl",
+        "expectation": ">=1 per loss-after-loss attempt; track >=10 in 14d for re-eval (Session 90 watch-list)",
+        "current_value": 0,
+        "last_updated": "2026-05-09T00:00:00+00:00"
+      },
+      {
+        "name": "after-win re-entry direction",
+        "expectation": "n=5 mixed; tighten if >=3/5 are losses",
+        "current_value": "n=2 mixed",
+        "last_updated": "2026-05-09T00:00:00+00:00"
+      },
+      {
+        "name": "per-sport distribution of reentry_blocked rejects",
+        "expectation": "if all cluster in one sport, evaluate per-sport MOMENTUM_REENTRY_LOSS_LIMIT override",
+        "current_value": "n/a (no rejects yet)",
+        "last_updated": "2026-05-09T00:00:00+00:00"
+      }
+    ]
+  }
+]

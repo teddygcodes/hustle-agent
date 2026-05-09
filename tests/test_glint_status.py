@@ -555,3 +555,251 @@ def test_render_flags_section_no_longer_exists():
     # Session 91 sub-feature 6: render_flags_section was deleted; confirm the
     # symbol is gone so future regressions can't accidentally reintroduce it.
     assert not hasattr(glint, "render_flags_section")
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 4: Settlements next 24h (§5)
+# ---------------------------------------------------------------------------
+
+def test_parse_kalshi_settlement_weather():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    result = glint._parse_kalshi_settlement("KXHIGHCHI-26MAY09-T63", now=now)
+    assert result is not None
+    # End-of-day ET on 2026-05-09 = 03:59:59 UTC on 2026-05-10 (EDT, UTC-4).
+    assert result.year == 2026 and result.month == 5
+    assert result.day in (9, 10)
+
+
+def test_parse_kalshi_settlement_index():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    result = glint._parse_kalshi_settlement("KXINXU-26MAY09-T5000", now=now)
+    assert result is not None
+
+
+def test_parse_kalshi_settlement_unknown_returns_none():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    # Live game ticker — settlement-time heuristic too noisy for game tickers.
+    assert glint._parse_kalshi_settlement("KXMLBGAME-26MAY082210ATLLAD-LAD", now=now) is None
+    # Truly unknown format.
+    assert glint._parse_kalshi_settlement("UNKNOWN-FORMAT", now=now) is None
+    # Empty string.
+    assert glint._parse_kalshi_settlement("", now=now) is None
+
+
+def test_parse_kalshi_settlement_invalid_month():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    assert glint._parse_kalshi_settlement("KXHIGH-26ZZZ09-T1", now=now) is None
+
+
+def test_render_settlements_24h_summary():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    positions = [
+        {"ticker": "KXHIGHCHI-26MAY09-T63", "filled": 47, "status": "filled", "cost": 199.79},
+        {"ticker": "KXHIGHAUS-26MAY09-T80", "filled": 100, "status": "filled", "cost": 90.00},
+        {"ticker": "KXHIGHMIA-26MAY15-T85", "filled": 50, "status": "filled", "cost": 45.00},  # outside 24h
+        {"ticker": "KXHIGHCHI-26MAY09-T63", "filled": 0, "status": "exited", "cost": 0},  # filtered
+        {"ticker": "KXMLBGAME-26MAY092210ATLLAD-LAD", "filled": 5, "status": "filled", "cost": 25.00},  # game ticker → ignored
+    ]
+    out = glint.render_settlements_24h(positions, now)
+    assert "2 positions" in out
+    assert "$289.79" in out
+    assert "Next:" in out
+    # Both KXHIGHCHI and KXHIGHAUS settle at 23:59:59 ET on the same day; sort
+    # is stable so the first one appended wins as "Next".
+    assert "KXHIGHCHI-26MAY09-T63" in out
+
+
+def test_render_settlements_24h_empty_returns_empty_string():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    assert glint.render_settlements_24h([], now) == ""
+    # Only out-of-window positions:
+    assert glint.render_settlements_24h(
+        [{"ticker": "KXHIGHMIA-26MAY30-T85", "filled": 1, "status": "filled", "cost": 10.0}],
+        now,
+    ) == ""
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 1: Watch-list auto-resolver
+# ---------------------------------------------------------------------------
+
+def test_extract_session_dates_parses_header_format():
+    text = (
+        "### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)\n"
+        "body...\n"
+        "### ☑ Session 38a — re-enable atp main tour (Apr 29, shipped)\n"
+        "more body...\n"
+    )
+    out = glint._extract_session_dates(text, current_year=2026)
+    assert "Session 1" in out
+    assert out["Session 1"].month == 4 and out["Session 1"].day == 20
+    assert "Session 38a" in out
+    assert out["Session 38a"].month == 4 and out["Session 38a"].day == 29
+
+
+def test_resolved_key_stable_under_text_changes():
+    a = {"session": "Session 19", "line": 909, "text": "trigger A"}
+    b = {"session": "Session 19", "line": 909, "text": "trigger A (whitespace edit)"}
+    assert glint._resolved_key(a) == glint._resolved_key(b)
+    # Different line -> different key.
+    c = {"session": "Session 19", "line": 910, "text": "trigger A"}
+    assert glint._resolved_key(a) != glint._resolved_key(c)
+
+
+def test_apply_watchlist_resolution_filters_resolved_entries():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    triggers = [
+        {"session": "Session 19", "line": 909, "text": "x", "status": "MANUAL_CHECK_REQUIRED"},
+        {"session": "Session 90", "line": 100, "text": "y", "status": "MANUAL_CHECK_REQUIRED"},
+    ]
+    resolved = {
+        "Session_19_L909": {
+            "resolved_at": (now - timedelta(days=1)).isoformat(),
+            "reason": "auto_time_based_30d",
+            "trigger_text_snippet": "x",
+            "unresolved_count_24h": 0,
+        }
+    }
+    filtered, updated = glint._apply_watchlist_resolution(triggers, resolved, now)
+    assert len(filtered) == 1
+    assert filtered[0]["session"] == "Session 90"
+    assert "Session_19_L909" in updated  # still resolved
+
+
+def test_apply_watchlist_resolution_unresolves_on_fresh_trigger():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    triggers = [
+        {"session": "Session 19", "line": 909, "text": "x", "status": "TRIGGERED"},
+    ]
+    resolved = {
+        "Session_19_L909": {
+            "resolved_at": (now - timedelta(days=1)).isoformat(),
+            "reason": "auto_time_based_30d",
+            "trigger_text_snippet": "x",
+            "unresolved_count_24h": 0,
+        }
+    }
+    filtered, updated = glint._apply_watchlist_resolution(triggers, resolved, now)
+    assert len(filtered) == 1  # un-resolved entry surfaces this scan
+    assert "Session_19_L909" not in updated  # removed from resolved set
+    # Thrash counter is recorded under the _RECENT suffix.
+    recent = updated.get("Session_19_L909_RECENT")
+    assert recent is not None
+    assert recent["unresolved_count_24h"] == 1
+
+
+def test_apply_watchlist_resolution_thrash_protection():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    triggers = [{"session": "Session 19", "line": 909, "text": "x", "status": "MANUAL_CHECK_REQUIRED"}]
+    resolved = {
+        "Session_19_L909": {
+            "resolved_at": (now - timedelta(hours=1)).isoformat(),
+            "reason": "auto_time_based_30d",
+            "trigger_text_snippet": "x",
+            "unresolved_count_24h": 3,  # over threshold (>2)
+            "last_unresolved_at": (now - timedelta(hours=2)).isoformat(),
+        }
+    }
+    filtered, _updated = glint._apply_watchlist_resolution(triggers, resolved, now)
+    assert len(filtered) == 1  # keep visible despite resolved entry — thrash protection
+
+
+def test_maybe_auto_resolve_resolves_old_entries(tmp_path: Path):
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    claude_text = (
+        "### ☑ Session 1 — Settlement + pattern pipeline (Apr 1)\n"  # 38d old
+        "Watch-list trigger: when X happens.\n"
+        "### ☑ Session 90 — re-entry breaker (May 9)\n"  # today
+        "Watch-list trigger: when Y happens.\n"
+    )
+    triggers = [
+        {"session": "Session 1", "line": 2, "text": "Watch-list trigger: when X", "status": "MANUAL_CHECK_REQUIRED"},
+        {"session": "Session 90", "line": 4, "text": "Watch-list trigger: when Y", "status": "MANUAL_CHECK_REQUIRED"},
+    ]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    assert "Session_1_L2" in updated  # 38d old → resolved
+    assert "Session_90_L4" not in updated  # today → still visible
+    assert updated["Session_1_L2"]["reason"] == "auto_time_based_30d"
+
+
+def test_maybe_auto_resolve_skips_thrashed_keys(tmp_path: Path):
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 1 — old (Apr 1)\nWatch-list trigger: x.\n"
+    triggers = [{"session": "Session 1", "line": 2, "text": "Watch-list trigger: x", "status": "MANUAL_CHECK_REQUIRED"}]
+    resolved = {
+        "Session_1_L2_RECENT": {"unresolved_count_24h": 5, "reason": "fresh_trigger_fired"},
+    }
+    updated = glint._maybe_auto_resolve(triggers, resolved, claude_text, now)
+    assert "Session_1_L2" not in updated  # thrash → don't auto-resolve
+    assert "Session_1_L2_RECENT" in updated  # thrash record preserved
+
+
+def test_load_save_watchlist_resolved_round_trip(tmp_path: Path):
+    paths = glint.paths_for(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"Session_19_L909": {"resolved_at": "2026-05-09T00:00:00+00:00", "reason": "auto_time_based_30d"}}
+    glint._save_watchlist_resolved(paths, payload)
+    out = glint._load_watchlist_resolved(paths)
+    assert out == payload
+
+
+def test_load_watchlist_resolved_returns_empty_when_missing(tmp_path: Path):
+    paths = glint.paths_for(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    assert glint._load_watchlist_resolved(paths) == {}
+
+
+# ---------------------------------------------------------------------------
+# Session 91 sub-feature 3: Active observations registry (§10)
+# ---------------------------------------------------------------------------
+
+def test_render_active_observations_empty():
+    md = glint.render_active_observations([], datetime.now(timezone.utc))
+    assert "## 10. Active Observations" in md
+    assert "No active observations" in md
+
+
+def test_render_active_observations_with_entries():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    obs = [{
+        "session": 90,
+        "shipped_at": (now - timedelta(days=1)).isoformat(),
+        "description": "circuit breaker test",
+        "observation_window_days": 14,
+        "metrics": [{"name": "reentry_blocked", "current_value": 0, "expectation": ">=1 per attempt"}],
+    }]
+    md = glint.render_active_observations(obs, now)
+    assert "Session 90" in md
+    assert "circuit breaker test" in md
+    assert "reentry_blocked" in md
+    assert "13d remaining" in md
+
+
+def test_render_active_observations_expired_window_excluded():
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    obs = [{
+        "session": 50,
+        "shipped_at": (now - timedelta(days=30)).isoformat(),
+        "description": "old ship",
+        "observation_window_days": 14,
+        "metrics": [],
+    }]
+    md = glint.render_active_observations(obs, now)
+    assert "old ship" not in md
+    assert "No active observations within their watch window" in md
+
+
+def test_load_active_observations_seed_present():
+    # The seeded bot/state/active_observations.json should load with at least
+    # the Session 90 circuit breaker entry.
+    paths = glint.paths_for(REPO_ROOT)
+    obs = glint._load_active_observations(paths)
+    assert isinstance(obs, list)
+    sessions = {o.get("session") for o in obs if isinstance(o, dict)}
+    assert 90 in sessions, f"expected Session 90 entry in active_observations.json; got sessions={sessions}"
+
+
+def test_load_active_observations_returns_empty_when_missing(tmp_path: Path):
+    paths = glint.paths_for(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    assert glint._load_active_observations(paths) == []

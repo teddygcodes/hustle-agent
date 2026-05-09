@@ -10,6 +10,7 @@ the consolidator-owned snapshot artifacts:
 from __future__ import annotations
 
 import ast
+import calendar
 import csv
 import json
 import os
@@ -190,6 +191,71 @@ def _pid_is_alive(pid: Optional[int]) -> bool:
         return True
     except OSError:
         return False
+
+
+# Session 91 sub-feature 4: Kalshi ticker -> settlement timestamp parser.
+# Scope: daily-settle families only (weather, index). Live-game tickers
+# (KXMLBGAME-26MAY082210ATLLAD-LAD etc.) intentionally return None — game-end
+# timing varies too much (MLB extras / tennis 3-vs-5 set / UFC KO-vs-decision)
+# to render a reliable "+4h" approximation.
+_MONTH_ABBR_UP: dict[str, int] = {m.upper(): i for i, m in enumerate(calendar.month_abbr) if m}
+_DAILY_SETTLE_PREFIXES: tuple[str, ...] = ("KXHIGH", "KXLOW", "KXTEMP", "KXINX")
+_DAILY_TICKER_RE = re.compile(r"^(KX[A-Z]+)-(\d{2})([A-Z]{3})(\d{2})(?:-.*)?$")
+
+
+def _parse_kalshi_settlement(ticker: str, now: datetime) -> Optional[datetime]:
+    """Parse end-of-day settlement timestamp from a daily-settle ticker.
+
+    Returns None for unrecognized prefixes (live games, futures, anything
+    we don't currently model). Caller filters out None.
+    """
+    if not ticker or not any(ticker.startswith(p) for p in _DAILY_SETTLE_PREFIXES):
+        return None
+    m = _DAILY_TICKER_RE.match(ticker)
+    if not m:
+        return None
+    yy_s, mmm, dd_s = m.group(2), m.group(3), m.group(4)
+    month = _MONTH_ABBR_UP.get(mmm.upper())
+    if month is None:
+        return None
+    try:
+        year = 2000 + int(yy_s)
+        day = int(dd_s)
+        et_eod = datetime(year, month, day, 23, 59, 59, tzinfo=helpers.ET)
+        return et_eod.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def render_settlements_24h(positions: list[dict], now: datetime) -> str:
+    """Summary line + next-to-settle for positions resolving in the next 24h.
+
+    Returns "" when nothing is upcoming (caller decides whether to render
+    surrounding scaffolding). Active-position filter mirrors Battle Scar #2:
+    filled > 0 AND status in ('filled', 'partial').
+    """
+    horizon = now + timedelta(hours=24)
+    upcoming: list[tuple[datetime, dict]] = []
+    for p in positions:
+        if not isinstance(p, dict):
+            continue
+        if (p.get("filled") or 0) <= 0 or p.get("status") not in ("filled", "partial"):
+            continue
+        settle = _parse_kalshi_settlement(p.get("ticker", ""), now)
+        if settle is None or settle <= now or settle > horizon:
+            continue
+        upcoming.append((settle, p))
+    if not upcoming:
+        return ""
+    upcoming.sort(key=lambda x: x[0])
+    notional = sum(float(p.get("cost") or 0.0) for _, p in upcoming)
+    next_settle, next_p = upcoming[0]
+    delta = _format_duration(next_settle - now)
+    return (
+        f"Settlements next 24h: {len(upcoming)} positions / "
+        f"${notional:,.2f} notional at risk\n"
+        f"Next: {next_p['ticker']} in {delta} (${float(next_p.get('cost') or 0.0):.2f})"
+    )
 
 
 def render_bot_vitals(state: dict, lock_pid: Optional[int], now: datetime) -> str:
@@ -655,6 +721,140 @@ def detect_anomalies(paths: Paths, metrics: dict, now_utc: datetime) -> list[Fla
     return flags
 
 
+# Session 91 sub-feature 1: watch-list auto-resolver constants + helpers.
+WATCHLIST_RESOLVED_FILENAME = "watchlist_resolved.json"
+RESOLVE_WINDOW_DAYS = 30
+THRASH_THRESHOLD_24H = 2
+# Match the date suffix on a session header like
+# "### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)" or
+# "### ☑ Session 38a — re-enable atp main tour (Apr 29, shipped)".
+_SESSION_HEADER_DATE_RE = re.compile(
+    r"^#{2,4}\s+[☑☐]?\s*(Session\s+[^—\n]+)—.*?\(([A-Z][a-z]{2})\s+(\d{1,2})",
+    re.MULTILINE,
+)
+
+
+def _extract_session_dates(claude_text: str, current_year: int) -> dict[str, datetime]:
+    """Map session label -> header date as UTC datetime at 00:00 ET on that day.
+
+    `current_year` anchors the year for `MMM DD` headers; if the resulting date
+    lies in the future relative to header context, treat as previous year. The
+    bot project started 2026-04, so 2026 is the default anchor — adjust when
+    sessions cross year boundaries.
+    """
+    out: dict[str, datetime] = {}
+    for m in _SESSION_HEADER_DATE_RE.finditer(claude_text):
+        label = m.group(1).strip()
+        mmm = m.group(2)
+        dd = int(m.group(3))
+        month = _MONTH_ABBR_UP.get(mmm.upper())
+        if month is None:
+            continue
+        try:
+            dt = datetime(current_year, month, dd, 0, 0, 0, tzinfo=helpers.ET).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        out[label] = dt
+    return out
+
+
+def _resolved_key(trigger: dict) -> str:
+    """Stable hash for resolved entries: (session_label, line_number).
+
+    Per Plan-agent recommendation: hashing on text is fragile under whitespace
+    edits in CLAUDE-sessions.md; (session, line) survives normal editing while
+    intentional moves get re-resolved on the next pass.
+    """
+    sess = str(trigger.get("session") or "Unknown").strip().replace(" ", "_")
+    line = int(trigger.get("line") or 0)
+    return f"{sess}_L{line}"
+
+
+def _load_watchlist_resolved(paths: Paths) -> dict:
+    fpath = paths.state_dir / WATCHLIST_RESOLVED_FILENAME
+    data = _load_json(fpath, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _save_watchlist_resolved(paths: Paths, resolved: dict) -> None:
+    try:
+        state_io.save_json(paths.state_dir / WATCHLIST_RESOLVED_FILENAME, resolved)
+    except OSError:
+        pass
+
+
+def _apply_watchlist_resolution(
+    triggers: list[dict],
+    resolved: dict,
+    now: datetime,
+) -> tuple[list[dict], dict]:
+    """Filter resolved triggers; un-resolve fresh fires; track thrash count.
+
+    Reversibility-first: if a resolved entry's status is now TRIGGERED, remove
+    it from the resolved set and surface the trigger this scan. Bumps the
+    `unresolved_count_24h` counter on the entry; if that counter exceeds
+    THRASH_THRESHOLD_24H, future auto-resolution is suppressed for that key
+    so the entry stays operator-visible.
+    """
+    updated = dict(resolved)
+    filtered: list[dict] = []
+    for t in triggers:
+        key = _resolved_key(t)
+        entry = updated.get(key)
+        if t.get("status") == "TRIGGERED" and entry is not None:
+            count = int(entry.get("unresolved_count_24h", 0) or 0) + 1
+            updated.pop(key, None)
+            updated[f"{key}_RECENT"] = {
+                "unresolved_count_24h": count,
+                "last_unresolved_at": now.isoformat(),
+                "reason": "fresh_trigger_fired",
+            }
+            filtered.append(t)
+            continue
+        if entry is not None and int(entry.get("unresolved_count_24h", 0) or 0) <= THRASH_THRESHOLD_24H:
+            continue  # filtered out — stays resolved
+        filtered.append(t)
+    return filtered, updated
+
+
+def _maybe_auto_resolve(
+    triggers: list[dict],
+    resolved: dict,
+    claude_text: str,
+    now: datetime,
+) -> dict:
+    """Time-based auto-resolution pass.
+
+    A MANUAL_CHECK_REQUIRED entry whose session header date is ≥30 days old
+    AND whose key isn't already resolved or thrash-marked gets a new
+    `auto_time_based_30d` resolved record.
+    """
+    updated = dict(resolved)
+    session_dates = _extract_session_dates(claude_text, current_year=now.year)
+    cutoff = now - timedelta(days=RESOLVE_WINDOW_DAYS)
+    for t in triggers:
+        if t.get("status") != "MANUAL_CHECK_REQUIRED":
+            continue
+        key = _resolved_key(t)
+        if key in updated:
+            continue
+        recent = updated.get(f"{key}_RECENT")
+        if recent and int(recent.get("unresolved_count_24h", 0) or 0) > THRASH_THRESHOLD_24H:
+            continue  # thrash protection — stay visible until manual review
+        sess_label = str(t.get("session") or "").strip()
+        sess_date = session_dates.get(sess_label)
+        if sess_date is None or sess_date > cutoff:
+            continue
+        updated[key] = {
+            "resolved_at": now.isoformat(),
+            "reason": "auto_time_based_30d",
+            "session_date": sess_date.isoformat(),
+            "trigger_text_snippet": (str(t.get("text") or ""))[:120],
+            "unresolved_count_24h": 0,
+        }
+    return updated
+
+
 def extract_watchlist_triggers(claude_text: str) -> list[dict]:
     triggers: list[dict] = []
     lines = claude_text.splitlines()
@@ -1087,7 +1287,7 @@ def render_pnl_section(metrics: dict, daily: DailyReport, now_utc: datetime) -> 
     return "\n".join(out)
 
 
-def render_positions_section(metrics: dict) -> str:
+def render_positions_section(metrics: dict, now_utc: datetime | None = None) -> str:
     out = ["## 5. Open Positions", ""]
     active = metrics["active_positions"]
     exposure = metrics["exposure"]
@@ -1122,6 +1322,12 @@ def render_positions_section(metrics: dict) -> str:
         else:
             status = "OK"
         out.append(f"| `{family}` | {len(rows)} | {_fmt_money(fam_exp, signed=False)} | ${cap:.0f} | {status} |")
+    # Session 91 sub-feature 4: settlements next 24h (weather/index parser).
+    if now_utc is not None:
+        block = render_settlements_24h(metrics.get("positions") or [], now_utc)
+        if block:
+            out.append("")
+            out.append(block)
     return "\n".join(out)
 
 
@@ -1214,6 +1420,51 @@ def render_strategy_candidates_section(now_utc: datetime) -> str:
     return "\n".join(["## 9. Strategy Candidates", "", body]).rstrip()
 
 
+# Session 91 sub-feature 3: Active observations registry — manually-curated
+# tracker of recent Outcome A ships and the metrics that prove they're working.
+ACTIVE_OBSERVATIONS_FILENAME = "active_observations.json"
+
+
+def _load_active_observations(paths: Paths) -> list:
+    data = _load_json(paths.state_dir / ACTIVE_OBSERVATIONS_FILENAME, [])
+    return data if isinstance(data, list) else []
+
+
+def render_active_observations(observations: list, now: datetime) -> str:
+    out = ["## 10. Active Observations", ""]
+    if not observations:
+        out.append("_No active observations. New Outcome A ships should add an entry here._")
+        return "\n".join(out)
+    active: list[tuple[dict, datetime, datetime]] = []
+    for obs in observations:
+        if not isinstance(obs, dict):
+            continue
+        shipped = _parse_iso(obs.get("shipped_at"))
+        if shipped is None:
+            continue
+        window = int(obs.get("observation_window_days") or 14)
+        expires = shipped + timedelta(days=window)
+        if expires < now:
+            continue
+        active.append((obs, shipped, expires))
+    if not active:
+        out.append("_No active observations within their watch window._")
+        return "\n".join(out)
+    for obs, shipped, expires in active:
+        days_left = max(0, (expires - now).days)
+        out.append(f"**Session {obs.get('session', '?')}** — {obs.get('description', '')}")
+        out.append(f"Shipped {_age_text(now, shipped)} / {days_left}d remaining in window")
+        for m in obs.get("metrics", []) or []:
+            if not isinstance(m, dict):
+                continue
+            name = m.get("name", "?")
+            current = m.get("current_value", "?")
+            expectation = m.get("expectation", "n/a")
+            out.append(f"- `{name}`: {current} (expect: {expectation})")
+        out.append("")
+    return "\n".join(out).rstrip()
+
+
 def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None, persist: bool = True) -> str:
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -1239,6 +1490,15 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     watch_data = watchlist_metrics(paths, metrics, now_utc)
     watch = evaluate_watchlist_triggers(triggers, watch_data)
 
+    # Session 91 sub-feature 1: auto-resolve stale MANUAL_CHECK_REQUIRED
+    # entries (≥30d old, no fresh fire). Reversible — TRIGGERED status
+    # un-resolves on the spot.
+    resolved = _load_watchlist_resolved(paths)
+    resolved = _maybe_auto_resolve(watch, resolved, claude_text, now_utc)
+    watch, resolved = _apply_watchlist_resolution(watch, resolved, now_utc)
+    if persist:
+        _save_watchlist_resolved(paths, resolved)
+
     flags_for_baseline = list(anomalies)
     if daily.stale_note:
         flags_for_baseline.append(Flag("daily_report_stale", "WARN", "latest daily report is stale", "Session 35"))
@@ -1258,6 +1518,7 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     calendar_entries = next_calendar_entries(paths, now_utc)
 
     lock_pid = _load_bot_lock_pid(paths)
+    observations = _load_active_observations(paths)
     sections = [
         render_verdict(
             metrics,
@@ -1272,11 +1533,12 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
         render_diff(last, current_baseline, now_utc),
         render_health_section(daily, now_utc),
         render_pnl_section(metrics, daily, now_utc),
-        render_positions_section(metrics),
+        render_positions_section(metrics, now_utc),
         render_discovery_section(discovery),
         render_anomalies_watchlist(anomalies, watch, daily),
         render_calendar_section(calendar_entries),
         render_strategy_candidates_section(now_utc),
+        render_active_observations(observations, now_utc),
     ]
     output = "\n\n---\n\n".join(s.rstrip() for s in sections).rstrip() + "\n"
 
