@@ -4855,3 +4855,81 @@ TDD discipline: 2 of 4 new tests confirmed failing pre-implementation (block-aft
 - If 30 days elapsed without trigger (a) or (b) — i.e. the breaker barely fires — write a Phase 0 audit confirming the breaker is dormant by intent (most matches don't have multi-entry attempts) and not by bug (the hook isn't firing on real losing exits).
 
 **README sync.** This Session 90 ☑ block IS the canonical record; the README's own Session Recap entry for Session 90 is added in the next commit (Session 88 / 89 single-commit-per-doc discipline preserved as separate commits in the 3-commit ship). All commits pushed together as one `git push origin main` operation.
+
+### ☑ Session 91 — status report overhaul: operator dashboard transformation (May 9, ~3h coder, six bundled sub-features)
+
+**Trigger.** Today's audit of `tools/glint_status.py` output surfaced that the report tracks state but not work — current positions, current P&L, current flags, but no answer to "is the bot working right now," "is what we shipped working," or "what's about to happen." Sessions 80–90 shipped 11 changes with no live observation surface. §7 held 45 MANUAL_CHECK_REQUIRED entries, mostly weeks-old, drowning real triggers. §3 presented 21h-old daily report data as if live. §9 visibly duplicated §7. Per Tyler's "all in one" directive — counter to Session 87's "do NOT bundle" rule which applied to mid-transition threshold tuning, not a cohesive UX rewrite — six sub-features bundled into one ship.
+
+**Phase 0 — six measurements via 3 parallel Explore agents + 1 Plan agent.**
+
+1. **§9 vs §7 duplication.** Verified at `tools/glint_status.py:1104-1128` (pre-ship): §9 had three uniquely-injected `Flag` entries beyond §7's raw anomalies — `daily_report_stale` (line 1107), `watchlist_manual_checks` (line 1111), `watchlist_triggered` (line 1113) — plus severity-bucketed CRITICAL/WARN/INFO headers. Merge required, not a clean delete.
+2. **`bot_state.json` schema.** All vitals fields exist as ISO 8601 UTC strings: `last_heartbeat`, `last_scan`, `running`, `scans_today`, `started_at`, `scan_count`. `bot.lock` = single integer PID. Both signals available for liveness check.
+3. **`positions.json` settlement field.** **NO** `close_at` / `expiration_at` / `settle_time` present in any record. Settlement times are encoded in tickers (`KXHIGHCHI-26MAY09-T63` = end-of-day ET on the encoded date; live games have time embedded too: `KXMLBGAME-26MAY082210ATLLAD-LAD`). Per Plan agent: ship parser for daily-settle families (weather/index) only; live-game tickers' game-end heuristic is too noisy across MLB extras / tennis 3-vs-5 set / UFC KO-vs-decision.
+4. **§3 staleness threshold.** Phase 0 question: 8h vs 12h. Decision: **12h** to match Session 83's existing `stale_note` threshold at `tools/glint_status.py:231`. Single staleness gate keeps operator semantics consistent (the existing `daily_report_stale` WARN flag and the new section-collapse fire on the same boundary).
+5. **Auto-resolver hash strategy.** Plan agent flagged: hashing on `text` is fragile under whitespace edits in CLAUDE-sessions.md. Hash on `(session_id, line_number)` instead — survives normal editing while intentional moves get re-resolved.
+6. **Active observations data path.** No structured "tracked over time" registry exists in the bot. Ship as manually-curated registry (`bot/state/active_observations.json`); auto-compute of `current_value` deferred to follow-on per spec.
+
+**Decision (Outcome A × 6 — all six shipped in this session).** All Phase 0 measurements clean; no Pattern C deferrals. The mid-transition Session 87 "do NOT bundle" rule does not apply: those six features share infrastructure (reading `bot_state.json`, registry pattern), share design philosophy (operator dashboard), and share the cohesive value of one report rewrite vs. six small ones.
+
+**Implementation (3 commits, 1557/0 pytest).**
+
+- **Commit 1 — `feat(glint_status): session 91 sub-features 2/5/6` (rendering refactor).**
+  - Sub-feature 2 (§1 vitals header): new `_format_duration` / `_load_bot_lock_pid` / `_pid_is_alive` / `render_bot_vitals` helpers in `tools/glint_status.py:152-235` (approx). Renders `Bot: PID NNN / uptime ... / heartbeat Ns / scans_today N / last scan Xm ago` as the first line of §1. Renders `🚨 Bot: DEAD — ...` when (a) heartbeat >90s, (b) lockfile missing, or (c) lock PID not running. `os.kill(pid, 0)` liveness check; `PermissionError` treated as alive (other-user process exists).
+  - Sub-feature 5 (§3 staleness collapse): added age_h>12 branch in `render_health_section` that suppresses excerpt body and renders one-line stale notice. Preserves Session 83's always-shows-timestamp behavior; only changes what comes after.
+  - Sub-feature 6 (§9 merge into §7 + delete + renumber): `render_anomalies_watchlist` now takes `daily: DailyReport` and injects the 3 auto-flags into its anomalies list. `render_flags_section` deleted entirely. `render_strategy_candidates_section` renumbered §10 → §9. Sections list in `build_snapshot` rewritten.
+  - Tests: +9 (4 vitals, 2 §3 collapse, 3 §7/§9 merge). 2 existing assertions updated for new section numbering (`test_consolidator_completes_in_under_2s` and `test_glint_strategy_candidates_section_uses_shared_renderer`). 1 cross-file fix in `tests/test_daily_report.py::test_daily_and_glint_strategy_candidate_bodies_match` to look for `## 9` instead of `## 10`.
+
+- **Commit 2 — `feat(glint_status): session 91 sub-features 4/1/3` (data-driven additions).**
+  - Sub-feature 4 (§5 settlements next 24h): `_parse_kalshi_settlement(ticker, now)` parses end-of-day ET from prefixes `KXHIGH/KXLOW/KXTEMP/KXINX` matching `<PREFIX>-<YY><MMM><DD>(-...)?`. Live-game tickers intentionally return None. `render_settlements_24h(positions, now)` summary + next-to-settle line, threaded into `render_positions_section(metrics, now_utc)`. Active-position filter mirrors Battle Scar #2 (`filled > 0` AND `status in ('filled','partial')`).
+  - Sub-feature 1 (watch-list auto-resolver): hybrid policy. New constants `WATCHLIST_RESOLVED_FILENAME`, `RESOLVE_WINDOW_DAYS=30`, `THRASH_THRESHOLD_24H=2`. New helpers `_extract_session_dates`, `_resolved_key` (hashes on `(session_id, line)`), `_load_/_save_watchlist_resolved`, `_apply_watchlist_resolution` (reversibility-first), `_maybe_auto_resolve` (time-based). Wired into `build_snapshot` after `evaluate_watchlist_triggers`. New runtime state file `bot/state/watchlist_resolved.json` (gitignored — runtime-generated).
+  - Sub-feature 3 (§10 Active Observations): `_load_active_observations` + `render_active_observations` renderer. New file `bot/state/active_observations.json` force-added (operator-curated registry, not runtime state). Seeded with Session 90's circuit breaker observation: 3 metrics (reentry_blocked rejects, after-win re-entry direction, per-sport distribution) with expectations and `current_value=0` placeholders. Auto-compute deferred to follow-on.
+  - Tests: +20 (6 settlements, 9 auto-resolver, 5 active observations).
+
+- **Commit 3 — `docs(claude-sessions+claude.md+readme)` (this commit).** Session 91 ☑ block, CLAUDE.md "When Tyler Asks 'How is it looking?'" playbook rewrite, README Session Recap entry.
+
+**Verification gate.**
+- ☑ Pytest pre-change: 1528/0 (Session 90 baseline preserved through pre-Session-91 state).
+- ☑ Pytest post-Commit-1: 1537/0 (1528 + 9 new for sub-features 2/5/6).
+- ☑ Pytest post-Commit-2: 1557/0 (1537 + 20 new for sub-features 4/1/3).
+- ☑ Live `python3 tools/glint_status.py` end-to-end: 9 sections render correctly (§1 vitals + verdict / §2 diff / §3 health / §4 P&L / §5 positions + settlements / §6 discovery / §7 anomalies + watchlist + auto-flags / §8 calendar / §9 strategy candidates / §10 active observations).
+- ☑ Live §1 vitals: `Bot: PID 53838 / uptime 44m / heartbeat 13s / scans_today 2 / last scan 5m ago` rendered correctly.
+- ☑ Live §5 settlements: 9 positions / $1,546.12 notional in 24h window (weather/index only); next-to-settle = `KXHIGHAUS-26MAY09-B87.5 in 22h 48m ($199.51)`.
+- ☑ Live §10 Active Observations: Session 90 circuit breaker entry rendered with 13d remaining in 14d window; 3 metrics shown with placeholder `current_value`.
+- ☑ Watch-list count: pre-ship 45 → post-ship 45. **Auto-resolver mechanism is in place but no entries cleared today** because the bot project started 2026-04-20 (~19 days ago) and the oldest sessions are at 19d, below the 30d threshold. Resolver will start firing on 2026-05-20 when Session 1 reaches 30d. Running `_maybe_auto_resolve` directly on live data confirms 0 auto-resolved (expected); 58 triggers extracted, all with matching session dates.
+- ☑ No bot restart needed (status report is read-only against bot state). PID 53838 unchanged through ship.
+
+**What did NOT change.**
+- Bot trading logic — zero touches to `bot/main.py`, `bot/scanner*.py`, `bot/live_watcher.py`, `bot/executor.py`, `bot/tracker.py`, `bot/config.py`. Pure status-report work.
+- `glint_status_last.json` schema — `flags_for_baseline` builder at `build_snapshot` lines 1166-1172 preserved; baseline diff continues to track flag IDs as before.
+- Existing §1 / §2 / §4 / §6 / §7 (raw anomalies+watchlist body) / §8 / §9 (now Strategy Candidates) rendering paths — only signatures extended; body logic unchanged.
+- Daily report (`tools/daily_report.py`) — its own §11 Strategy Candidates numbering is independent and unchanged. Only the cross-comparison test `test_daily_and_glint_strategy_candidate_bodies_match` was updated to look for the new glint heading.
+- Bot state files (positions.json, paper_trades.json, bot_state.json, decisions.jsonl, etc.) — read-only access. No migrations.
+
+**Out of scope (held — separate sessions if pursued).**
+- Auto-compute of `active_observations.json` `current_value` from data sources (decisions.jsonl, paper_trades.json, etc.) — manual update is fine for now; auto-compute is a future enhancement.
+- Live-game ticker settlement parsing (`KXMLBGAME` / `KXNBAGAME` / `KXNHLGAME` / `KXATPMATCH` / `KXUFC*`) — game-end heuristic too noisy. Future-session if operator value is demonstrated.
+- Condition-based watch-list auto-resolution (parsing satisfaction conditions from CLAUDE-sessions.md text per-trigger) — current ship is time-based only.
+- Severity-bucketed flag rendering in §7 — kept flat severity-prefixed format consistent with the existing §7 anomaly list. Bucketing was unique to the deleted §9 and didn't add operator information beyond what each line's severity prefix already conveys.
+- Restructuring the daily report itself — §3 only changes what the status report does WITH the daily report.
+- Battle Scar additions or changes — pure status-report work.
+- Pre-writing Session 92 — one ship at a time.
+
+**Cross-references.**
+- Session 83 commit `a378c33` — `render_health_section` reference shape (sub-feature 5 modified this).
+- Session 89 commits `235e954` + `e1fd923` — parser-facing changes reference shape; this session preserves the CLAUDE-sessions.md parser convention.
+- Session 90 commit `1c97aee` — first entry seeded into `active_observations.json` (sub-feature 3).
+- Session 87 — "do NOT bundle" rule applied to mid-transition threshold tuning, not to cohesive UX rewrites; this session is the documented exception. Per Tyler's "all in one" directive.
+- CLAUDE.md Future Direction line 767 (criterion #3): _"Operator manual-check load shrinks, not grows."_ Sub-feature 1 directly satisfies this — mechanism in place; visible drop materializes on 2026-05-20.
+- Session 70 — "all tests must always pass" rule preserved (1528 → 1557, +29 new, 0 broken). Pattern C deferral path documented but not exercised.
+- Session 56.5 — README sync mandatory after every session.
+- Battle Scar #2 — active-position filter (`filled > 0` AND `status in ('filled','partial')`) applied in `render_settlements_24h`.
+- Battle Scar #14 — path-rooted PID detection respected by `_pid_is_alive` (bot.lock contains the python child PID, not the wrapper PID).
+
+**Watch-list trigger.** Re-evaluate auto-resolver behavior on **2026-05-20** (when Session 1 reaches 30d). If watch-list count drops from 45 to <30 by 2026-06-08, the substrate-readiness criterion #3 is satisfied. If count remains ≥40 at 2026-06-08, audit:
+- (a) `_extract_session_dates` regex against the actual CLAUDE-sessions.md format (perhaps the year-2026 default mis-parses),
+- (b) `_apply_watchlist_resolution` thrash-protection counter (perhaps too many entries hit the threshold and stay visible),
+- (c) Re-tune `RESOLVE_WINDOW_DAYS` from 30 → 21 if 30d proves too generous given the bot's session cadence (3-5 sessions/day produces high watch-list churn).
+
+If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.jsonl`, manually update `bot/state/active_observations.json` `current_value` for Session 90's first metric. If it reaches ≥10 in 14 days, that's Session 90's pre-existing watch-list trigger firing — separate evaluation.
+
+**README sync.** This Session 91 ☑ block IS the canonical record; the README's Session Recap entry for Session 91 is added in the same commit (single-commit-per-doc discipline). All three docs (CLAUDE-sessions.md, CLAUDE.md, README.md) ship together. `git push origin main` after Commit 3 lands.

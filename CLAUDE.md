@@ -789,15 +789,20 @@ The day we stop learning new wrong premises about our own bot is the day we know
 
 ## When Tyler Asks "How is it looking?"
 
-Run this checklist:
-1. `python3 tools/glint_status.py` — check §10 Strategy Candidates: any HIGH severity? Any new since yesterday's diff?
-2. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — verify ONE Glint **wrapper** line (the python child doesn't appear here; its cmdline has no repo path). Wrapper-presence = bot alive (launchd KeepAlive guarantees child respawn). Path-rooted filter is critical: bare `bot.main` grep matches other fleet bots like Bob (see Battle Scar #14). For the python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
-3. `tail -30 bot/logs/bot.log` — verify ticks are firing, no repeated exceptions
-4. `python3 -c "import json; p=json.load(open('bot/state/positions.json')); active=[x for x in p if isinstance(x,dict) and x.get('filled',0)>0 and x.get('status') in ('filled','partial')]; print(f'Active: {len(active)} positions, ${sum(x.get(\"cost\",0) for x in active):.2f} exposure')"` — verify exposure is under balance
-5. Check `strategy_audit.json → settlement_log` for any settlements since last check
-6. If exposure is maxed out (blocking new trades), note which bets are about to settle and when — that's when capital frees up
+Run `python3 tools/glint_status.py` and scan top-down. Session 91 reshaped the report into an operator dashboard: read sections in order and most questions answer themselves.
 
-Answer in terms of: single process ✓/✗, exposure vs balance, what's settling soon, any repeated blocked-trade warnings. Don't invent performance numbers — pull them from `trade_history.json` and `strategy_audit.json`.
+1. **§1 Verdict line 1 (vitals).** `Bot: PID NNN / uptime ... / heartbeat Ns / scans_today N / last scan Xm ago`. If you see `🚨 Bot: DEAD —` instead, restart per Battle Scar #14: `WRAPPER=$(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"); launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Vitals incorporate `bot.lock` PID liveness check (`os.kill(pid, 0)`), `last_heartbeat` age, and `scans_today` — wrapper-presence + fresh heartbeat + alive PID = healthy.
+2. **§1 Verdict line 2 (status label).** CRITICAL / Degraded / Healthy + position count + exposure + P&L + flag counts + discovery NEW + watch-list summary.
+3. **§2 Diff Since Last Check.** What changed since the last `glint_status` snapshot — P&L delta, position delta, exposure delta, new flags. If empty (`_No baseline yet_`), this is the first snapshot since restart.
+4. **§3 Health Pulse.** Always shows the daily report's source path + age. If age >12h, the body is collapsed (Session 91 sub-feature 5) — run a fresh daily report to refresh.
+5. **§5 Open Positions + Settlements next 24h.** Family table (N/Exposure/Cap/Status) plus the operator-actionable line: "X positions / $Y notional at risk" and the next-to-settle ticker. **This is your "what's about to free up capital" answer.** Live-game tickers don't appear here — game-end timing is too noisy to estimate; check the family table for those.
+6. **§7 Anomalies + Watch-List Status.** Anomalies first (CRITICAL/WARN/INFO entries inline with prefixes), then per-entry watch-list status (TRIGGERED / NOT_YET_TRIGGERED / MANUAL_CHECK_REQUIRED). Session 91 sub-feature 6 absorbed the old §9 auto-flags here (`daily_report_stale`, `watchlist_manual_checks` count, `watchlist_triggered` count). Session 91 sub-feature 1 retires obviously-stale entries (≥30d MANUAL_CHECK_REQUIRED with no recurrence) into `bot/state/watchlist_resolved.json`.
+7. **§9 Strategy Candidates** (renumbered from §10 in Session 91). Any HIGH severity? Any new since yesterday's §2 diff? Apply the "When Tyler Asks 'What's Ready to Promote?'" bar before recommending action.
+8. **§10 Active Observations** (new in Session 91). Manually-curated registry of recent Outcome A ships and the metrics that prove they're working. Read each entry: `Session N — description / shipped Xd ago / Yd remaining` plus per-metric `current_value` vs `expectation`. If a metric is outside its expectation, that ship needs investigation. Edit `bot/state/active_observations.json` to add new entries when shipping Outcome A.
+
+**Answer in plain English:** "Bot is alive (X uptime), Y exposure, Z settling in 24h, top concern is...". Don't invent performance numbers — pull from `trade_history.json` and `strategy_audit.json` if specific P&L claims are needed.
+
+**When the report itself looks wrong** (e.g. vitals show DEAD but you can see the bot in `ps aux`), check `lsof -p <PID> | grep cwd` to confirm the working directory matches Glint, not Bob (Battle Scar #14). If `python3 tools/glint_status.py` errors out, the upstream `paths.claude_md.read_text()` or `_load_json` calls usually surface the actual file issue.
 
 ---
 
