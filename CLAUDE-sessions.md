@@ -4,7 +4,7 @@ This file is the historical session log for the Glint trading bot. Each entry be
 
 - Operator manual lives in [CLAUDE.md](CLAUDE.md). Read that first for project scope, strategies, safety architecture, battle scars, schema reference, operating posture, and the "When Tyler Asks..." playbooks.
 - This file is append-only-but-curated. New session entries land here, NOT in CLAUDE.md.
-- Most recent ship: Session 88 (2026-05-08).
+- Most recent ship: Session 90 (2026-05-09).
 
 ---
 
@@ -4767,3 +4767,91 @@ Promotability under Session 84 bar (`N ≥ 30 AND mean_clv ≥ +5 AND +CLV% ≥ 
 **Watch-list trigger.** None — clean structural ship. The only future "re-investigate" trigger this session creates is implicit: if a future session ever wants to write its ☑ block in CLAUDE.md instead of CLAUDE-sessions.md, the convention reminder above is the load-bearing prose to override.
 
 **README sync.** This Session 89 ☑ block IS the canonical record; the README's own Session Recap entry for Session 89 is added in the same commit as this CLAUDE-sessions.md update (mirroring Session 88 single-commit discipline). Both updates pushed together with the prior 3 commits as one `git push origin main` operation.
+
+---
+
+### ☑ Session 90 — live_momentum re-entry-after-loss circuit breaker (May 9, ~3h coder, scoped code+tests ship)
+
+**Trigger.** May 8 added -$14.40 to live_momentum (6 ATP trades / 33% WR), and `KXATPMATCH-26MAY08PRIDJO-DJO` was entered three times within 50 minutes — each entry exiting on stop-loss for a clean -$2.00. Top-line live_momentum P&L of +$10.20 / 96 settled obscured the question Session 88's incidental cohort split surfaced: where, exactly, is this strategy bleeding? Phase 1 of the live_momentum arc was scoped as "exhaust the data we already collect before chasing new sources" (Tyler standing directive). This session is that mining + ship.
+
+**Phase 0 — full inventory + four cohort slices.**
+
+Inventory (verified at session start): `paper_trades.json` 97 live_momentum records (`type == "live_momentum"`, 2026-04-15 → 2026-05-08; sport mix NBAGAME 25 / ATPMATCH 18 / ATPCHALLENGERMATCH 18 / NHLGAME 11 / IPLGAME 10 / UFCFIGHT 8 / WTAMATCH 6 / WTACHALLENGERMATCH 1); `decisions.jsonl` + archives 964 live_momentum (114 current + 850 archived, 24% accept); `live_ticks.jsonl` + archives 14,121 current + 85+ `.gz`; `clv.json` 1,436 live_momentum CFs (1,261 open + 175 settled). All numbers within ±1% of plan-time inventory.
+
+**Cohort mining (3 parallel sub-agents + 1 sequential):**
+
+1. **Agent A — entry-count cohort (LOAD-BEARING).** Derived `entry_count` by sorting same-ticker same-day records by timestamp. 1st entry n=91 +$0.22/trade (WR 0.589); 2nd entry n=5 -$1.50/trade (WR 0.20); 3rd+ n=1 -$2.00/trade (WR 0.0). Statistical test: 1st vs 2nd diff = +1.72, SE=1.40 → 1.23 SE — directional but below 2-SE threshold. **WR drop 0.589 → 0.20 is the sharper signal.** 1st-entry sport breakdown: NHLGAME +$0.93/trade (n=11) is the only n≥10 sport with positive 1st-entry P&L; NBA, ATP main, ATP Challenger all negative at n≥10. IPLGAME +$9.16/trade (n=9) is the load-bearing positive contributor at thin n.
+2. **Agent B — tick-signature pre-entry.** No actionable signal. 28% of entries (27/96) lack any in-window pre-entry ticks (pre-tracking era); 0/69 matched entries had non-None `dqs` (dqs added to schema after these entries). Best dimension separation (momentum) was driven by zero-variance bins (52/64 windows had momentum=0 exactly); volatility constant in 99.6% of windows. **Recommendation: defer to Phase 2 once dqs accumulates.**
+3. **Agent C — leader-strength bucket.** L bucket [0.60, 0.70) is the clear loser at -$3.82/trade n=10 WR 40%; M [0.70, 0.80) +$0.70 n=55; H [0.80, 0.90) +$0.31 n=32. **Borderline-thin at n=10; queued for Phase 1, not Session-90 ship.** Sport×bucket interactions interesting (NBA-L -$6/trade n=3, NHL-H +$2.80/trade n=8, IPL-M +$7.83/trade n=10) but cells thin.
+4. **Agent D — re-entry mechanism (sequential, inline Python).** Of 5 multi-entry ticker-days (PRIDJO 3x, STEZAL 2x UFC, SRHMI 2x IPL, HIJBAS 2x ATP, CLEDET 2x NBA): re-entries-after-loss n=4 → **0/4 LOSSES, -$7.30 sum**; re-entries-after-win n=2 → 1W/1L (-$2.20 sum). PRIDJO contributes the cleanest mechanism trace — 3 STOP-LOSS exits (75¢→65¢, 72¢→62¢, 70¢→60¢) on the same match within 50 minutes with zero per-ticker memory in `live_watcher.py`. **HIJBAS's profitable 2nd entry (+$2.0) is the standing case AGAINST a blanket "block all re-entries" design — preserving the after-win path matters even at n=2.**
+
+**Decision (Outcome A — single fix shipped, two queued).** Confidence-weighted dollar impact tiebreaker per the approved plan:
+- **Re-entry-after-loss breaker** (PRIDJO-class): est. recovery ~$7.3 over 3-week period × confidence 1.0 (mechanism reproducible in fixture) = **score 7.3**. SHIPPED.
+- **Sport-disable ATP**: -$14.40 today × confidence 0.3 (n=18 below Session 38a's n=56 precedent for sport decisions) = score 4.3. QUEUED.
+- **Tighten `MOMENTUM_LEADER_MIN` 0.65 → 0.70**: -$3.82 × n=10 = $38 over period × confidence 0.6 (n=10 borderline + sport×bucket interactions complicate). Higher raw score but a *strategy operating-point* shift (not bounded-downside like the breaker) and would sacrifice the M-bucket positive cohort. QUEUED for follow-on session with explicit Phase 0 sport×bucket cross-tab.
+
+Tyler's "don't bundle fixes" discipline → ship only the breaker this session; queue the others.
+
+**Implementation (3 hooks, 1 config constant, 1 reject reason).**
+
+1. **`bot/config.py:158`** — `MOMENTUM_REENTRY_LOSS_LIMIT = 1` (with full evidence comment).
+2. **`bot/live_watcher.py:461-464`** — `self._entry_losses: list[dict] = []` in `__init__` (per-watcher = per-match scope, so list not dict).
+3. **`bot/live_watcher.py:1148-1162`** — record-on-exit hook: after `_check_exit` mutates `self.bets_placed`, if the just-appended `self.exits[-1]` has `pnl < 0`, append `{reason, pnl, ts}` to `_entry_losses`. Cooldown timer (existing) continues to set unconditionally.
+4. **`bot/live_watcher.py:1175-1182`** — extend `can_enter`: `len(self._entry_losses) < MOMENTUM_REENTRY_LOSS_LIMIT`.
+5. **`bot/live_watcher.py:1208-1212`** — add `reentry_blocked` reject reason branch in the dampened decisions logger; `losses_seen` added to `extra` dict for downstream visibility.
+
+**`reentry_blocked` is structural, not tunable** — like `sport_disabled`, it doesn't emit counterfactuals (no threshold to sweep). The CF emission pipeline at `bot/clv.py` is unchanged.
+
+**Tests added (4 new, all pass — pytest 1524 → 1528).**
+
+- `test_reentry_blocked_after_loss_recorded_session90` — preload `_entry_losses=[{loss}]`, drive a dip-eligible tick (DQS-mocked-pass), assert `_auto_bet_momentum` not called AND `_log_decision_dampened` fires with `reason='reentry_blocked'` AND `extra.losses_seen == 1`.
+- `test_reentry_allowed_when_no_losses_recorded_session90` — `_entry_losses=[]` (winning prior exit equivalent), assert `_auto_bet_momentum` IS called.
+- `test_loss_exit_appends_to_entry_losses_session90` — mock `_check_exit` to pop bet + append loss exit_record (-$2.0 STOP-LOSS), assert `_entry_losses` has 1 record post-tick AND `_cooldown_remaining == 5` (preserves existing).
+- `test_winning_exit_does_not_pollute_entry_losses_session90` — same shape but mock with +$2.0 TAKE-PROFIT, assert `_entry_losses` stays empty AND cooldown still set.
+
+TDD discipline: 2 of 4 new tests confirmed failing pre-implementation (block-after-loss, record-on-loss-exit). Other 2 (regression-protection: allow-after-win, no-pollution-on-win) passed in both states — they're contract guards.
+
+**Verification gate.**
+- ☑ Pytest pre-change: 1524 collected, 0 failures (baseline preserved through Session 89's restructure).
+- ☑ Pytest post-change: **1528 passed in 32.26s, 0 failures.** (1524 baseline + 4 new tests; net +4.)
+- ☑ Bot restart: `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` at 00:23:13. Old PID 3072 (5h 4min uptime) terminated cleanly via Session 58 cancel-then-stop ordering. New wrapper PID 53835, new python child PID 53838.
+- ☑ Post-restart `bot.lock`: contains `53838`, mtime advanced via 30s heartbeat (Battle Scar #6 alive signal).
+- ☑ Post-restart `bot.log`: clean — only the OLD bot's expected `Telegram Conflict` during shutdown handoff (00:23:13). NEW bot logs `Live scan: new day 2026-05-09 — cleared volume cache and recently_watched` at 00:23:25, then `LIVE_SCAN_TELEMETRY: seen=84 spawned=0 capacity=5 drops={'disabled_sport': 1, 'no_markets': 2, 'low_volume': 11, 'not_today': 25, 'no_leader': 25, 'settled': 3, 'no_vol_growth_first_seen': 20}` at 00:23:39 — the new code is in the hot path with no AttributeError on `_entry_losses`. spawned=0 is normal for the time of day; the breaker hot path will exercise on the next live 1v1 match.
+- ☑ `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"` returns single wrapper PID 53835. Path-rooted check (Battle Scar #14 discipline) — no Bob collision risk.
+
+**What did NOT change.**
+- Exit-side logic: `_check_exit` paths (TP / near-settle / trailing-stop / score-flip / hard-SL / dollar-SL) untouched. The breaker is purely on the entry side.
+- `MOMENTUM_DISABLED_SPORTS` (still `{atp_challenger, wta, wta_challenger}`); ATP main re-enable from Session 38a holds.
+- `MOMENTUM_LEADER_MIN` 0.65; per-sport overrides; `SPORT_PROFILES` dict — all untouched.
+- `MOMENTUM_REENTRY_COOLDOWN = 5` ticks — preserved alongside the new breaker. Cooldown still fires on every exit; breaker is an additional gate.
+- CF emission pipeline (`bot/clv.py`) — `reentry_blocked` is structural, no CFs.
+- All other strategies (`vig_stack_series`, `vig_stack_futures`, watcher-side arbs) — untouched.
+- All `bot/state/*` files — no migration, no backfill. The 97 historical paper_trades records are unchanged; only forward-looking entries see the breaker.
+
+**Out of scope (held — separate sessions if pursued).**
+- Phase 2 tick-replay variant backtest — requires Session-19 backtester to replay all 97 entries with the breaker enabled and compare net P&L. Future session.
+- Phase 3 new data sources (ESPN APIs, news, sentiment) — Tyler standing deferral; only triggered if Phase 1-2 identifies a specific need.
+- Sport-disable ATP — n=18 below Session 38a's n=56 precedent. Queue with explicit Phase 0 (a) post-Session-54 ATP cohort with controlled cell n, (b) per-sport breaker carve-out as alternative architecture.
+- Tighten `MOMENTUM_LEADER_MIN` 0.65 → 0.70 — Agent C surfaced this as a stronger raw-dollar candidate but at borderline n=10 with sport×bucket interactions. Queue with explicit Phase 0 sport×bucket cross-tab; consider per-family-floor-override architecture (Session 67 pattern) instead of global tightening.
+- Tick-signature features — Agent B returned no actionable signal; revisit when `dqs` accumulates ≥30 entries per quartile (post-Session-54 dqs began populating; ~22/97 records have it now).
+- Re-entry breaker threshold N=2 (block after ANY exit) — would also catch SRHMI's -$4.20 after-win loss but kills HIJBAS's +$2.0 after-win win. At n=2 in the after-win bucket we don't have evidence to choose; tighter-then-loosen is recoverable. Watch-list trigger below covers re-evaluation.
+- Cross-strategy learning (Future Direction territory; readiness gate not met).
+- vig_stack analysis — different strategy, different ship.
+- Sizing optimization — adjacent but its own ship.
+
+**Cross-references.**
+- Session 88 ☑ block — cohort split discovery (pre-Session-54 -$0.26/trade vs post-Session-54 +$1.79/trade at n=17). Phase 0.2 sub-tables in this session reproduced the directional finding while explicitly disqualifying sport-level conclusions on the n=17 sub-cohort.
+- Session 54 ☑ block — paper sizing fix on May 5 (`PAPER_STARTING_BALANCE`-aware reconstruction); the cohort boundary timestamp `2026-05-05T01:45:53Z`. Boundary used for Tables 1/3 in Agent A's report.
+- Session 86 ☑ block — emission-time CF dedup; same timing-discipline shape (catch-at-source, not after the fact). The breaker similarly fires at the entry-decision site, not at downstream cleanup.
+- Session 84 ☑ block — promotion bar: re-entry-after-loss did not enter via §10 Strategy Candidates (no `counterfactual_hotspots` row; structural pattern not threshold-tunable). Surfaced via direct paper-trades mining instead — a legitimate alternate path documented in the Operating Posture section ("the bot has a search frontier — keep it active").
+- Session 70 ☑ block — "all tests must always pass" rule; baseline 1524/0 preserved through this session (1524 → 1528, +4 new, 0 broken).
+- Session 56.5 / Session 88 — single-commit-per-session-doc convention; Session 90 follows the 3-commit shape (code+tests / CLAUDE-sessions.md ☑ block / README sync) per Style Rules.
+- Operating Posture section in CLAUDE.md — "Pattern C is legitimate"; Phase 0 surfaced 1 actionable + 2 queued + 1 negative finding (Agent B). The search frontier narrowed 4 candidate dimensions down to a single high-confidence ship without inventing pre-decided conclusions.
+
+**Watch-list trigger.** Re-evaluate breaker threshold N when EITHER (a) after-win re-entry n reaches 5 (currently n=2 with mixed direction), OR (b) the `reentry_blocked` rejection log accumulates ≥10 entries in 14 days, OR (c) 30 days elapsed (2026-06-08). At trigger:
+- If after-win re-entry direction is consistently negative (≥3 of 5 losing), consider tightening to N=1 on entries (block ALL re-entries) — accepts the HIJBAS-class regret in exchange for catching SRHMI-class losses.
+- If after-win is consistently positive, current N=1-on-losses is correct; leave alone.
+- If `reentry_blocked` rejections are all from one sport, consider per-sport `MOMENTUM_REENTRY_LOSS_LIMIT` override (Session 64-style architectural pattern).
+- If 30 days elapsed without trigger (a) or (b) — i.e. the breaker barely fires — write a Phase 0 audit confirming the breaker is dormant by intent (most matches don't have multi-entry attempts) and not by bug (the hook isn't firing on real losing exits).
+
+**README sync.** This Session 90 ☑ block IS the canonical record; the README's own Session Recap entry for Session 90 is added in the next commit (Session 88 / 89 single-commit-per-doc discipline preserved as separate commits in the 3-commit ship). All commits pushed together as one `git push origin main` operation.
