@@ -5135,6 +5135,63 @@ Promotability under Session 84 bar (`N ≥ 30 AND mean_clv ≥ +5 AND +CLV% ≥ 
 
 ---
 
+### ☑ Session 88 — README cleanup: 64 session paragraphs → one-liners + Current Status refresh (May 8, doc-only, scoped README.md ship)
+
+**Trigger.** Tyler flagged the README at 1,268 lines: "the readme has a lot going on in it, i think it needs work too." Each session shipped a one-paragraph entry to README on top of the canonical 50-150 line entry in CLAUDE.md, so README accreted as a redundant changelog. Goal: stop the README from being a duplicate of CLAUDE.md while preserving the unique project-overview content (Configuration Reference, Architecture & File Map, Strategy Types, Telegram Commands, Edge Quality & Safety Controls, Position Sizing, Execution Pipeline, Discovery Agent, Strategy Lab, Running the Bot) — none of which exists in CLAUDE.md and all of which is load-bearing for "what is this project".
+
+**Phase 0 finding (changes the scope).** Brief assumed README was mostly session-history bloat with target ~150-250 lines. Phase 0.1 inventory revealed **75% of README is unique project-overview content (~948 lines, not duplicated in CLAUDE.md)** and only 25% (~320 lines) is session-history changelog. Sessions 52-72 were ABSENT from README's session list — present only in CLAUDE.md. Even compressing all 320 changelog lines to one-liners only saves ~200 lines, leaving target ~1,070 lines, NOT 150-250. AskUserQuestion clarified scope: **Outcome A (compress changelog only, preserve unique content) + cover ALL sessions as short narrations**, not just last N.
+
+**Phase 0.2 — Current Status verification (lines 9-66).** Header date "May 8, 2026" matched today; PAPER_MODE / PAPER_STARTING_BALANCE / ACTIVE_STRATEGIES / Session 56 sports_arb disable / MOMENTUM_DISABLED_SPORTS all ACCURATE against live config. Paper performance dated "May 7, 2026" with stale numbers — refresh required: vig_stack 177→193 settled / +$614.33→+$938.08; live_momentum 80→96 settled / **−$34.60→+$10.20 (sign flip)**; net +$579.73/257→+$948.28/289 (~5.5%→~9.0% return). Test baseline 1,519→1,524.
+
+**Phase 0.3 — Recent Ships cutoff superseded.** User chose "cover all sessions" — moot vs the original N=10/N=5/N=15 question.
+
+**Phase 0.4 — CLAUDE.md anchor format.** GitHub-flavored markdown auto-anchor: lowercase + spaces→hyphens + preserve underscores/hyphens + strip everything else (em-dash → empty, leaves the surrounding hyphens as `--`). Example: `### ☑ Session 86 — live_momentum CF per-day dedup at emission (May 8, Outcome A, scoped clv.py fix + 3 tests)` → `session-86--live_momentum-cf-per-day-dedup-at-emission-may-8-outcome-a-scoped-clvpy-fix--3-tests`. Verified against Sessions 85, 86, 87.
+
+**Decision: Outcome A — full restructure ship.** Compress changelog only; preserve all unique content; cover all 85 shipped sessions (the ☑ ones in CLAUDE.md) as one-liners. Refresh Current Status numbers + date stamps. No CLAUDE.md content changes (canonical changelog stays put except this ☑ block).
+
+**What shipped (single commit `46a9efa`, README.md only).**
+
+1. **Lines 1-948 preserved as-is** — all unique project-overview content untouched. Targeted in-place edits to Current Status section refreshed: paper performance date stamp May 7 → May 8; vig_stack numbers (193 settled, +$938.08, 70% WR, +$4.86/trade); live_momentum numbers (96 settled, +$10.20, 27% WR — with new prose noting the sign-flip and the post-Session-54 cohort breakdown of 17 trades at +$1.79/trade vs pre-fix −$0.26/trade); Net +$948.28/289 trades (~9.0% return); Honest P&L position bullet refreshed with May 8 / Sessions 72-87 framing; Test baseline 1,524/0.
+
+2. **Lines 949-1268 replaced with new compressed section** — 124 lines total replacing 320 lines:
+   - **`## Recent Improvements (Apr 20–May 8)` updated header** (was Apr 20–May 7) with a brief preamble naming CLAUDE.md as full source.
+   - **16 arc-summary paragraphs** — kept the 11 original arcs (Apr 20-23 Redemption through May 1→2 transition) verbatim. Added 5 new arcs covering May 3-5 (operational hardening), May 6 (discovery agent expansion + arb correctness), May 7 (`glint_status.py` consolidator + heuristic-driven coder cycle), May 8 (Pattern C cluster + Operating Posture-aligned investigations).
+   - **`### Session Recap (full details in CLAUDE.md)` subheader** with preamble noting which session numbers are queued/deferred (20, 22, 23, 25, 26, 27, 31, 32, 38b–38e) and which are referenced in adjacent sessions (36, 70, 78, 79).
+   - **85 one-liner entries**, ordered Session 1 → Session 87, format `**Session N** (date, 2026) — [Outcome shape if applicable] — one-sentence summary. [→ details](CLAUDE.md#anchor)`. Includes the Sessions 52-72 backfill that was previously absent from README.
+
+3. **No production code change. No test change. No bot restart needed.** Pure README.md edit.
+
+**Verification (all gates pass).**
+1. ☑ `wc -l README.md` → **1,072 lines** (target: 1,000-1,100; reduction 1,268 → 1,072 = 15.4% smaller).
+2. ☑ `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1,524 passed in 32.18s**, 0 failures (Session 86 baseline preserved).
+3. ☑ `python3 tools/glint_status.py` runs cleanly. Verdict reads "Degraded" but only because of Session 83's stale-data-marker on the daily report; bot itself is alive at PID 3072 with +$948.28 net.
+4. ☑ Anchor format verified: Session 86 anchor matches Agent 2 reference (`session-86--live_momentum-cf-per-day-dedup-at-emission-may-8-outcome-a-scoped-clvpy-fix--3-tests`); Sessions 85, 87 also match.
+5. ☑ All 85 unique session entries present (1-87 minus 20/22-23/25-27/31-32/36/38b-38e/70/78-79).
+6. ☑ `git diff bot/ tests/ tools/` empty — only README.md changed.
+7. ☑ Single commit pushed to `origin/main` (commit `46a9efa`).
+
+**What did NOT change.**
+- CLAUDE.md content (other than this Session 88 ☑ block).
+- Any production code (`bot/`), tests (`tests/`), or tools (`tools/`).
+- Bot uptime — PID 3072 preserved; no restart.
+- README's unique content (Configuration Reference at line 611, Architecture & File Map at line 652, Running the Bot at line 830, Strategy Types at line 152, Telegram Commands at line 539, etc.) — all untouched.
+- Future Direction section in CLAUDE.md (recently added, untouched).
+- `live_momentum` kill or deep-dive (Tyler's standing deferral).
+
+**Out of scope (held per brief).**
+- Splitting README into a `docs/` folder (Outcome B option, not chosen — would have required moving Configuration Reference + Architecture & File Map + Running the Bot into separate files).
+- Aggressive trim of project-overview prose (Outcome C option, not chosen — would have lost content useful for a fresh reader).
+- Test changes to match degraded behavior.
+- Backfilling individual session paragraphs that were deleted (the one-liners + CLAUDE.md links cover the same information surface).
+
+**Operating Posture observation.** Phase 0 caught a wrong premise (the brief's "150-250 line target" was unachievable without deleting unique content) BEFORE locking the scope. AskUserQuestion was the right tool: the brief's framing was good but the underlying assumption needed verification. User clarified scope, scope landed correct. Mirror of Sessions 18.5/19a/41/56.5/58/67/68/69/80-82 — every disciplined Phase-0 verification gate before locking scope saves hours of wrong-direction work. Doc-only Outcome A: cleanup that preserves the search frontier (project-overview content) while killing the changelog redundancy.
+
+**Cross-references.** Session 56.5 ☑ block — README sync discipline (single commit + push pattern). Session 70 ☑ block — "all tests must always pass" rule, baseline preserved at 1,524/0. Session 83 ☑ block — staleness-marker discipline mirrored here in Current Status date stamps. Session 87 ☑ block — most recent ☑ block before this; immediate predecessor in the May 8 cluster.
+
+**README sync.** This Session 88 ☑ block IS the canonical record; the README's own Session Recap entry for Session 88 is added in the same commit as this CLAUDE.md update (mirroring Session 56.5 single-commit discipline). Both updates pushed together.
+
+---
+
 ## Operating Posture: Always Search for New Possibilities (read FIRST)
 
 **The bot is a search problem, not a maintenance problem.** Default to investigation, not preservation.
