@@ -131,6 +131,40 @@ class TestRestingOrderPaperLedger:
         assert saved_trade["cancel_reason"] == "market_settled_unfilled"
         assert any(a["type"] == "stale_orders_cancelled" for a in alerts)
 
+    def test_terminal_paper_trade_reconciles_stale_active_position(self, tracker_env):
+        """Session 92 verification: paper exit wins over stale active position."""
+        position = _base_position(
+            ticker="KXNBAGAME-26MAY09OKCLAL-OKC",
+            order_id="PAPER-46D8723E",
+            side="yes",
+            price_cents=67,
+            filled=20,
+        )
+        position["type"] = "live_momentum"
+        position["opp_type"] = "live_momentum"
+        tracker_env["seed"]([position])
+        tracker_env["paper_file"].write_text(json.dumps([{
+            "id": "PAPER-46D8723E",
+            "ticker": "KXNBAGAME-26MAY09OKCLAL-OKC",
+            "status": "exited_early",
+            "entry_price": 0.67,
+            "exit_price": 0.69,
+            "contracts": 20,
+            "pnl": 0.4,
+            "resolved_at": "2026-05-10T01:39:41.847886+00:00",
+        }]))
+
+        alerts = tracker.update_positions(called_from="_position_check_loop")
+
+        assert alerts == []
+        saved_pos = tracker_env["read"]()[0]
+        assert saved_pos["status"] == "exited"
+        assert saved_pos["exit_price"] == 0.69
+        assert saved_pos["realized_pnl"] == 0.4
+        assert saved_pos["unrealized_pnl"] == 0.4
+        assert saved_pos["resolved_at"] == "2026-05-10T01:39:41.847886+00:00"
+        assert saved_pos["paper_reconciled_from"] == "paper_trades"
+
 
 class TestMFEMAEInitialization:
 

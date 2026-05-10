@@ -33,6 +33,55 @@ logger = logging.getLogger("nexus.tracker")
 # Position updates
 # ---------------------------------------------------------------------------
 
+_TERMINAL_PAPER_STATUSES = ("exited_early", "won", "lost")
+
+
+def _reconcile_positions_from_paper_trades(positions: list[dict]) -> None:
+    """Honor paper_trades terminal rows before ratcheting active positions.
+
+    live_watcher exits paper trades directly, while tracker.update_positions()
+    ratchets positions on a separate cadence. If both loops save positions.json
+    around the same time, a stale tracker snapshot can resurrect a position that
+    paper_trades.json already marked terminal. Treat the paper ledger as the
+    source of truth for paper exits.
+    """
+    paper_trades = _load_json(PAPER_TRADES_FILE)
+    if not isinstance(paper_trades, list):
+        return
+
+    terminal_by_id = {
+        t.get("id"): t
+        for t in paper_trades
+        if isinstance(t, dict)
+        and t.get("id")
+        and t.get("status") in _TERMINAL_PAPER_STATUSES
+    }
+    if not terminal_by_id:
+        return
+
+    for pos in positions:
+        if (
+            not isinstance(pos, dict)
+            or pos.get("status") not in ("filled", "partial")
+            or not pos.get("paper")
+        ):
+            continue
+        trade = terminal_by_id.get(pos.get("order_id"))
+        if not trade:
+            continue
+
+        terminal_status = trade.get("status")
+        pos["status"] = "exited" if terminal_status == "exited_early" else "resolved"
+        if trade.get("exit_price") is not None:
+            pos["exit_price"] = trade.get("exit_price")
+        if trade.get("pnl") is not None:
+            pos["realized_pnl"] = trade.get("pnl")
+            pos["unrealized_pnl"] = trade.get("pnl")
+        if trade.get("resolved_at"):
+            pos["resolved_at"] = trade.get("resolved_at")
+        pos["paper_reconciled_from"] = "paper_trades"
+
+
 def update_positions(called_from: str = "unspecified") -> list[dict]:
     """
     Check all open positions against current Kalshi prices.
@@ -53,6 +102,8 @@ def update_positions(called_from: str = "unspecified") -> list[dict]:
         except Exception:
             logger.exception("tracker_cadence logging failed")
         return []
+
+    _reconcile_positions_from_paper_trades(positions)
 
     num_open = sum(
         1 for p in positions

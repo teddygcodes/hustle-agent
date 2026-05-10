@@ -24,5 +24,25 @@
         "last_updated": "2026-05-09T00:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 92,
+    "shipped_at": "2026-05-10T03:00:00+00:00",
+    "description": "vig_stack family cap enforced at executor entry boundary",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "new position_over_family_cap flags after this ship",
+        "expectation": "0; any fresh post-Session-92 flag means executor-level cap enforcement regressed or a non-vig_stack path is mislabeled",
+        "current_value": 0,
+        "last_updated": "2026-05-10T03:00:00+00:00"
+      },
+      {
+        "name": "cap_exceeded_reject rejects in decisions.jsonl",
+        "expectation": ">=1 only when stale/manual/malformed vig_stack sizing exceeds family cap; normal scanner path should size down before this guard",
+        "current_value": 0,
+        "last_updated": "2026-05-10T03:00:00+00:00"
+      }
+    ]
   }
 ]

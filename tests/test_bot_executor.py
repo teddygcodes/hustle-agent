@@ -365,6 +365,79 @@ class TestSession62FamilyCapExecutor:
         written_cost = trades[0]["contracts"] * trades[0]["entry_price"]
         assert written_cost <= float(expected_cap)
 
+    def test_oversized_vig_stack_futures_rejected_at_entry(self, tmp_state):
+        """Session 92: stale/manual oversized vig_stack sizing cannot place."""
+        from bot.executor import execute_trade
+
+        opp = _make_opp(
+            opp_type="vig_stack_futures",
+            side="no",
+            price_cents=44,
+            fair_value=0.78,
+            edge=0.10,
+            relative_edge=0.20,
+        )
+        opp["ticker"] = "KXMLBGAME-26MAY092110ATLLAD-LAD"
+        opp["title"] = "Atlanta vs Los Angeles D Winner?"
+        opp["market"] = {"yes_ask": 56, "no_ask": 44, "close_ts": "2026-05-13T01:10:00Z"}
+        opp["edge_result"]["self_check_passed"] = True
+        sizing = _make_sizing(contracts=454, price_cents=44)
+
+        with patch("bot.decisions.log_decision") as mock_log:
+            result = execute_trade(opp, sizing)
+
+        assert result["success"] is False
+        assert "cap_exceeded_reject" in result["reason"]
+        assert json.loads(tmp_state["paper_trades"].read_text()) == []
+
+        mock_log.assert_called_once()
+        _, kwargs = mock_log.call_args
+        assert kwargs["decision"] == "reject"
+        assert kwargs["reason"] == "cap_exceeded_reject"
+        assert kwargs["gates"]["position_cap"] is True
+        assert kwargs["gates"]["family_cap"] is False
+        assert kwargs["extra"]["family"] == "KXMLBGAME"
+        assert kwargs["extra"]["family_cap"] == 50.0
+        assert kwargs["extra"]["incoming_cost"] == 199.76
+        assert kwargs["extra"]["contracts"] == 454
+        assert kwargs["extra"]["price_cents"] == 44
+        assert kwargs["extra"]["cap_action"] == "cap_exceeded_reject"
+        assert kwargs["extra"]["close_ts"] == "2026-05-13T01:10:00Z"
+
+    def test_under_cap_vig_stack_futures_still_executes(self, tmp_state):
+        """Session 92: KXMLBGAME vig_stack sizing at <= $50 still works."""
+        from bot.executor import execute_trade
+
+        opp = _make_opp(
+            opp_type="vig_stack_futures",
+            side="no",
+            price_cents=44,
+            fair_value=0.78,
+            edge=0.10,
+            relative_edge=0.20,
+        )
+        opp["ticker"] = "KXMLBGAME-26MAY092110ATLLAD-LAD"
+        opp["title"] = "Atlanta vs Los Angeles D Winner?"
+        opp["market"] = {"yes_ask": 56, "no_ask": 44, "close_ts": "2026-05-13T01:10:00Z"}
+        opp["edge_result"]["self_check_passed"] = True
+        sizing = _make_sizing(contracts=113, price_cents=44)
+
+        with patch("bot.executor.get_market") as mock_market, \
+             patch("bot.decisions.log_decision") as mock_log:
+            mock_market.return_value = {"yes_ask": 56, "no_ask": 44}
+            result = execute_trade(opp, sizing)
+
+        assert result["success"] is True
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        assert trades[0]["contracts"] * trades[0]["entry_price"] <= 50.0
+        reject_reasons = [
+            call.kwargs["reason"]
+            for call in mock_log.call_args_list
+            if call.kwargs.get("decision") == "reject"
+        ]
+        assert "cap_exceeded_reject" not in reject_reasons
+
 
 # ---------------------------------------------------------------------------
 # Session 50 — paper_trades.json observability fields (confidence/dqs/sport)

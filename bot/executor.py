@@ -28,6 +28,8 @@ from bot.config import (
     PRICE_MOVE_CENTS_BY_STRATEGY,
     PAPER_TRADES_FILE, PAPER_STARTING_BALANCE,
     STRATEGY_BUDGETS,
+    VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS,
+    VIG_STACK_FAMILY_MAX_POSITION_DOLLARS,
 )
 
 
@@ -45,6 +47,8 @@ _STRATEGY_BUDGET_BUCKET = {
     "sports_monotonicity_arb": "arbs",
     "sports_consistency_arb":  "arbs",
 }
+
+_VIG_STACK_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_futures")
 
 
 def _budget_bucket(opp_type: str | None) -> str:
@@ -65,16 +69,17 @@ _PAPER_TYPE_MAP = {
 # Order matters: rejection records earlier gates as True, the rejecting one
 # as False, downstream gates omitted.
 _POS_GATE_ORDER = [
-    "position_cap", "duplicate", "same_game", "cooldown",
+    "position_cap", "family_cap", "duplicate", "same_game", "cooldown",
     "daily_loss", "strategy_budget", "total_exposure",
 ]
 _EDGE_GATE_ORDER = ["market_data", "yes_ask", "price_moved", "edge_evaporated"]
 
 
 def _pos_gate_fingerprint(reason: str) -> dict[str, bool]:
+    gate_reason = "family_cap" if reason == "cap_exceeded_reject" else reason
     out: dict[str, bool] = {}
     for name in _POS_GATE_ORDER:
-        if name == reason:
+        if name == gate_reason:
             out[name] = False
             return out
         out[name] = True
@@ -203,6 +208,8 @@ def _check_position_limits(
     ticker: str,
     opp_type: str | None = None,
     close_ts: str | None = None,
+    contracts: int | None = None,
+    price_cents: int | None = None,
 ) -> tuple[bool, str]:
     """Check position limits: per-position cap, dedupe, cooldown, daily loss,
     per-strategy budget (Tier 2.1), and global exposure.
@@ -232,6 +239,31 @@ def _check_position_limits(
             f"Position too large: ${cost_dollars:.2f} > "
             f"{MAX_POSITION_PERCENT:.0%} of ${balance:.2f} (${balance * MAX_POSITION_PERCENT:.2f})"
         )
+
+    if opp_type in _VIG_STACK_TYPES and ticker:
+        family = ticker.split("-", 1)[0]
+        family_cap = float(
+            VIG_STACK_FAMILY_MAX_POSITION_DOLLARS.get(
+                family, VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS
+            )
+        )
+        if cost_dollars > family_cap:
+            _log_position_reject(
+                ticker, opp_type, "cap_exceeded_reject",
+                extra={
+                    "family": family,
+                    "family_cap": round(family_cap, 2),
+                    "incoming_cost": round(cost_dollars, 2),
+                    "contracts": contracts,
+                    "price_cents": price_cents,
+                    "cap_action": "cap_exceeded_reject",
+                },
+                close_ts=close_ts,
+            )
+            return False, (
+                f"cap_exceeded_reject: {family} vig_stack position "
+                f"${cost_dollars:.2f} > family cap ${family_cap:.2f}"
+            )
 
     positions = _load_json(POSITIONS_FILE)
 
@@ -847,7 +879,8 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         or (opportunity.get("market") or {}).get("close_ts")
     )
     pos_ok, pos_msg = _check_position_limits(
-        balance, total_cost, ticker, opp_type=opp_type, close_ts=_close_ts
+        balance, total_cost, ticker, opp_type=opp_type, close_ts=_close_ts,
+        contracts=contracts, price_cents=price_cents,
     )
     checks.append({"name": "position_limits", "passed": pos_ok, "detail": pos_msg})
 
@@ -881,9 +914,10 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
             from bot import decisions
             decisions.log_decision(
                 ticker=ticker, opp_type=opp_type, edge=opportunity.get("edge"),
-                gates={"position_cap": True, "duplicate": True, "same_game": True,
-                       "cooldown": True, "daily_loss": True, "strategy_budget": True,
-                       "total_exposure": True, "edge_recheck": True, "self_check": False},
+                gates={"position_cap": True, "family_cap": True, "duplicate": True,
+                       "same_game": True, "cooldown": True, "daily_loss": True,
+                       "strategy_budget": True, "total_exposure": True,
+                       "edge_recheck": True, "self_check": False},
                 decision="reject", reason="self_check_failed",
                 extra={
                     "edge": opportunity.get("edge"),
@@ -903,9 +937,10 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         from bot import decisions
         decisions.log_decision(
             ticker=ticker, opp_type=opp_type, edge=opportunity.get("edge"),
-            gates={"position_cap": True, "duplicate": True, "same_game": True,
-                   "cooldown": True, "daily_loss": True, "strategy_budget": True,
-                   "total_exposure": True, "edge_recheck": True, "self_check": True},
+            gates={"position_cap": True, "family_cap": True, "duplicate": True,
+                   "same_game": True, "cooldown": True, "daily_loss": True,
+                   "strategy_budget": True, "total_exposure": True,
+                   "edge_recheck": True, "self_check": True},
             decision="accept", reason="all_gates_passed",
             extra={"contracts": contracts, "price_cents": price_cents,
                    "cost_dollars": round(total_cost, 2),
