@@ -4933,3 +4933,49 @@ TDD discipline: 2 of 4 new tests confirmed failing pre-implementation (block-aft
 If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.jsonl`, manually update `bot/state/active_observations.json` `current_value` for Session 90's first metric. If it reaches ≥10 in 14 days, that's Session 90's pre-existing watch-list trigger firing — separate evaluation.
 
 **README sync.** This Session 91 ☑ block IS the canonical record; the README's Session Recap entry for Session 91 is added in the same commit (single-commit-per-doc discipline). All three docs (CLAUDE-sessions.md, CLAUDE.md, README.md) ship together. `git push origin main` after Commit 3 lands.
+
+### ☑ Session 92 — Enforce vig_stack family cap at entry boundary (May 9, ~2h coder)
+
+**Trigger.** Session 91's dashboard made the cap-bypass visible: `KXMLBGAME-26MAY082210ATLLAD-LAD` entered at $199.68 and lost full notional; `KXMLBGAME-26MAY092110ATLLAD-LAD` entered at $199.76 and won +$204.30. Both violated the Session 53 KXMLBGAME $50 family cap, and §7 correctly flagged `position_over_family_cap` before settlement. The system was warning after entry, not enforcing at the final entry boundary.
+
+**Phase 0 evidence.**
+- Cap surface: `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` lives in `bot/config.py` with `KXMLBGAME: 50`; `git blame` pins it to commit `b4acf15` on 2026-05-05 15:11 ET.
+- Normal sizing path: `bot/sizing.py` already size-downs to family cap when `family` is passed. `bot/main.py` only added `vig_stack_futures` to `_VIG_STACK_SIZING_TYPES` in commit `63ee9ca` on 2026-05-07 08:23 ET.
+- Ledger/timeline: TEXNYY over-cap positions opened 2026-05-03 and 2026-05-04 (pre-cap / pre-futures-fix legacy); ATLLAD positions opened 2026-05-07 09:42 UTC and 10:54 UTC, after Session 53's cap but before the Session 62 futures-sizing fix. Real bypass relative to Session 53 intent, now grandfathered relative to the current sizer.
+- Current residual gap: `execute_trade()` trusted incoming `sizing`. Stale pending/manual/malformed vig_stack opportunities could still place an over-cap order even though the scanner path now sizes down.
+
+**Decision.** Keep existing size-down behavior in the normal Kelly path, and add a loud executor-level reject as the last line of defense. Reject reason is `cap_exceeded_reject`, gate fingerprint is `family_cap=False`. This preserves profitable under-cap exposure while making any stale over-cap entry obvious in `decisions.jsonl`.
+
+**Implementation.**
+- `bot/executor.py:71-80` — added `family_cap` to the position-limit gate order and mapped `cap_exceeded_reject` to that gate for fingerprints.
+- `bot/executor.py:243-266` — `_check_position_limits()` now applies to `vig_stack_no`, `vig_stack_series`, and `vig_stack_futures`; derives family from ticker prefix; compares incoming cost against `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` with default `$200`; rejects before duplicate/same-game/budget/exposure checks.
+- `bot/executor.py:879-880` — `execute_trade()` passes `contracts` and `price_cents` into the position-limit check so reject logs carry useful diagnostics.
+- Reject extras: `family`, `family_cap`, `incoming_cost`, `contracts`, `price_cents`, `cap_action="cap_exceeded_reject"`, and `close_ts` when available.
+- `bot/state/active_observations.json` — added Session 92 observation: new `position_over_family_cap` flags after ship should remain 0; `cap_exceeded_reject` should only appear for stale/manual/malformed over-cap sizing.
+- Verification-discovered repair: first full `pytest` run found 1 real state-consistency failure, not in the cap code. `tests/test_positions_paper_trades_consistency.py::test_paper_trades_open_count_matches_positions_active` saw `KXNBAGAME-26MAY09OKCLAL-OKC` still active in `positions.json` while matching paper row `PAPER-46D8723E` was already `exited_early`. Root cause: tracker could save a stale active-position snapshot after live_watcher had terminally updated `paper_trades.json`.
+- `bot/tracker.py:36-106` — added `_reconcile_positions_from_paper_trades()` before tracker market updates: terminal paper statuses (`exited_early`, `won`, `lost`) now force matching active paper positions to `exited`/`resolved`, copy exit price + P&L, and mark `paper_reconciled_from="paper_trades"`. Live state repaired once through the helper; no trade semantics changed.
+
+**Tests.**
+- `tests/test_bot_executor.py:368-405` — oversized KXMLBGAME `vig_stack_futures` sizing ($199.76) rejects before paper order placement, writes no paper trade, and logs `decision=reject`, `reason=cap_exceeded_reject`, `family_cap=False`.
+- `tests/test_bot_executor.py:407-439` — under-cap KXMLBGAME sizing ($49.72) still executes through the real `execute_trade()` paper path.
+- `tests/test_tracker.py:134-166` — stale active paper position reconciles when the ledger row is terminal, locking the full-suite failure as a regression test instead of hand-waving it away.
+- Existing Session 53/62 sizing tests remain intact: configured families still size down in `kelly_size()`.
+
+**Verification gate.**
+- ☑ Focused suite: `pytest tests/test_bot_executor.py::TestSession62FamilyCapExecutor tests/test_sizing.py tests/test_main.py::test_handle_opportunity_vig_stack_futures_uses_family_and_no_probability tests/test_main.py::test_handle_opportunity_per_game_mlb_series_uses_family_and_no_probability` → **31 passed**.
+- ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
+- ☑ Consistency/tracker focused repair check: `pytest tests/test_positions_paper_trades_consistency.py tests/test_tracker.py::TestRestingOrderPaperLedger::test_terminal_paper_trade_reconciles_stale_active_position` → **5 passed**.
+- ☑ Full pytest: **1560 passed / 0 failed** (Session 91 baseline 1557 + 2 executor cap tests + 1 tracker reconciliation test).
+- ☑ Bot restart: `launchctl kickstart -k gui/501/com.hustle-agent.bot` at 2026-05-09 23:04 ET. Wrapper PID 53835 → 41934; bot lock PID 53838 → 41996. `lsof -p 41996` confirms cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (not Bob).
+- ☑ Post-restart `python3 tools/glint_status.py`: §1 shows `Bot: PID 41996`; §5 shows remaining KXMLBGAME exposure at `$49.98` vs `$50`; §7 has **no active `position_over_family_cap` anomaly**; §10 Session 92 active observation reports `new position_over_family_cap flags after this ship: 0`.
+- ☑ `rg -n "cap_exceeded_reject" bot/state/decisions.jsonl` has no matches yet, expected because the normal scanner path should size down before the executor guard unless stale/manual/malformed sizing appears.
+
+**What did NOT change.**
+- No cap value changes. KXMLBGAME stays $50.
+- No forced exits or resizing of existing over-cap positions. Legacy positions ride to settlement.
+- No live_momentum changes; no KXHIGH per-trade-cap changes.
+- No `tools/glint_status.py` changes. It remains the reporting surface; executor is now the enforcement surface.
+
+**Watch-list trigger.** If a NEW post-Session-92 `position_over_family_cap` WARN appears in §7, the fix regressed or a non-vig_stack/mislabeled path is entering outside the guarded types. First check `decisions.jsonl` for `cap_exceeded_reject`; if absent, inspect the entry path that created the new position.
+
+**README sync.** Add a Session 92 recap entry calling out the final-boundary reject, the legacy-vs-new-entry distinction, and the verification-discovered tracker reconciliation fix. Three-commit ship pattern preserved: code+tests, CLAUDE-sessions.md, README.md; then `git push origin main`.
