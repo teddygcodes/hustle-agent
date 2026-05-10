@@ -658,6 +658,35 @@ VIG_STACK_FAMILY_MAX_POSITION_DOLLARS = {
     "KXHIGHMIA": 200,
 }
 
+# Per-family vig_stack disable (Session 93, May 10 2026). When a family is
+# in this set, the executor's _check_position_limits rejects ALL new vig_stack
+# entries on that family BEFORE the family-cap math, with reason
+# `family_disabled_reject`. Existing positions are NOT force-exited; they ride
+# to natural settlement. Cap reduction was analyzed as the alternative lever
+# and explicitly rejected because the loss/win ratio is structural (5x+ on
+# both KXHIGHCHI and KXINX), not size-dependent — even at $25 cap, KXHIGHCHI
+# still loses ~$76 across the same trade count. The breakeven WR each family
+# would need (~84%) exceeds their actual WR (77-79%) and 7-day rolling
+# performance confirms persistence (KXHIGHCHI 7d −$24.90 / 12 trades; KXINX
+# 7d −$158.17 / 8 trades, loss/win ratio worsening 5.0x → 8.18x).
+#
+# Architectural mirror: VIG_STACK_FAMILY_FLOOR_OVERRIDES (Session 64) — same
+# Pattern B per-family knob shape, just opt-out (disable) rather than relaxed
+# floor (override). Future re-enable: remove the family entry; restart bot.
+VIG_STACK_DISABLED_FAMILIES: set[str] = {
+    "KXHIGHCHI",  # n=39 lifetime, 77% WR, loss/win 5.2x, P&L −$84.94 / 7d −$24.90
+    "KXINX",      # n=28 lifetime, 79% WR, loss/win 5.0x, P&L −$72.92 / 7d −$158.17
+}
+
+
+def is_vig_stack_family_disabled(family: str) -> bool:
+    """Return True if vig_stack entries on this family are disabled.
+
+    Used at the executor entry boundary in bot/executor._check_position_limits
+    to short-circuit disabled families before the family-cap math runs.
+    """
+    return family in VIG_STACK_DISABLED_FAMILIES
+
 # ---------------------------------------------------------------------------
 # DraftKings Sportsbook API (primary odds source — no auth needed)
 # Blocked by Akamai WAF on some residential IPs; works from cloud/VPS.

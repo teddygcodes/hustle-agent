@@ -44,5 +44,31 @@
         "last_updated": "2026-05-10T03:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 93,
+    "shipped_at": "2026-05-10T12:00:00+00:00",
+    "description": "vig_stack disabled on KXHIGHCHI and KXINX at executor entry boundary",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "family_disabled_reject events in decisions.jsonl",
+        "expectation": ">=1 per scan that surfaces a KXHIGHCHI or KXINX vig_stack opportunity; 0 in 14d means the guard is dead code or scan stopped surfacing these families",
+        "current_value": 0,
+        "last_updated": "2026-05-10T12:00:00+00:00"
+      },
+      {
+        "name": "new vig_stack positions opened on KXHIGHCHI or KXINX after ship",
+        "expectation": "0; any post-Session-93 entry on these families means the disable regressed",
+        "current_value": 0,
+        "last_updated": "2026-05-10T12:00:00+00:00"
+      },
+      {
+        "name": "30-day rolling P&L counterfactual: would-have-traded KXHIGHCHI/KXINX vig_stack",
+        "expectation": "tracked manually via paper_trades.json filter; if positive sustained, reconsider re-enable; if negative or flat, disable validated",
+        "current_value": "n/a (post-ship)",
+        "last_updated": "2026-05-10T12:00:00+00:00"
+      }
+    ]
   }
 ]

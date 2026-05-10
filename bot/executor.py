@@ -30,6 +30,8 @@ from bot.config import (
     STRATEGY_BUDGETS,
     VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS,
     VIG_STACK_FAMILY_MAX_POSITION_DOLLARS,
+    VIG_STACK_DISABLED_FAMILIES,
+    is_vig_stack_family_disabled,
 )
 
 
@@ -68,15 +70,28 @@ _PAPER_TYPE_MAP = {
 # Session 6 — gate fingerprint for the executor's safety chain.
 # Order matters: rejection records earlier gates as True, the rejecting one
 # as False, downstream gates omitted.
+# Session 93 (2026-05-10): inserted "family_disabled" between position_cap and
+# family_cap. A disabled family rejects BEFORE the cap math runs, so the
+# fingerprint shows position_cap=True, family_disabled=False, and downstream
+# gates are omitted (cap math never reached).
 _POS_GATE_ORDER = [
-    "position_cap", "family_cap", "duplicate", "same_game", "cooldown",
+    "position_cap", "family_disabled", "family_cap", "duplicate", "same_game", "cooldown",
     "daily_loss", "strategy_budget", "total_exposure",
 ]
 _EDGE_GATE_ORDER = ["market_data", "yes_ask", "price_moved", "edge_evaporated"]
 
 
+# Map reject-reason strings to their corresponding gate name in _POS_GATE_ORDER.
+# Session 6: "cap_exceeded_reject" → "family_cap" (the cap gate is what failed).
+# Session 93: "family_disabled_reject" → "family_disabled" (the new disable gate).
+_REASON_TO_GATE = {
+    "cap_exceeded_reject":   "family_cap",
+    "family_disabled_reject": "family_disabled",
+}
+
+
 def _pos_gate_fingerprint(reason: str) -> dict[str, bool]:
-    gate_reason = "family_cap" if reason == "cap_exceeded_reject" else reason
+    gate_reason = _REASON_TO_GATE.get(reason, reason)
     out: dict[str, bool] = {}
     for name in _POS_GATE_ORDER:
         if name == gate_reason:
@@ -242,6 +257,26 @@ def _check_position_limits(
 
     if opp_type in _VIG_STACK_TYPES and ticker:
         family = ticker.split("-", 1)[0]
+
+        # Session 93: family-disable check — fires BEFORE the cap math so a
+        # disabled family rejects with `family_disabled_reject` instead of the
+        # misleading `cap_exceeded_reject` that a cap=$0 proxy would produce.
+        if is_vig_stack_family_disabled(family):
+            _log_position_reject(
+                ticker, opp_type, "family_disabled_reject",
+                extra={
+                    "family": family,
+                    "disabled_set": sorted(VIG_STACK_DISABLED_FAMILIES),
+                    "incoming_cost": round(cost_dollars, 2),
+                    "contracts": contracts,
+                    "price_cents": price_cents,
+                },
+                close_ts=close_ts,
+            )
+            return False, (
+                f"family_disabled_reject: {family} vig_stack disabled at config"
+            )
+
         family_cap = float(
             VIG_STACK_FAMILY_MAX_POSITION_DOLLARS.get(
                 family, VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS

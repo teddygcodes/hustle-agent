@@ -313,14 +313,17 @@ class TestExecuteTradePaperHappyPath:
 
 
 class TestSession62FamilyCapExecutor:
+    # Session 93 (2026-05-10): KXINX and KXHIGHCHI removed from this parametrize.
+    # Both are now in VIG_STACK_DISABLED_FAMILIES and reject at the executor's
+    # family_disabled gate BEFORE the family_cap gate is reached. The cap-
+    # enforcement contract no longer applies to disabled families. Disabled-
+    # family rejection is exercised in TestSession93FamilyDisableExecutor below.
     @pytest.mark.parametrize(
         "family,expected_cap",
         [
-            ("KXINX", 50),
             ("KXMLBGAME", 50),
-            ("KXHIGHCHI", 150),
             ("KXHIGHDEN", 150),
-            ("KXHIGHNY", 150),
+            ("KXHIGHNY",  150),
             ("KXHIGHAUS", 200),
             ("KXHIGHMIA", 200),
         ],
@@ -437,6 +440,103 @@ class TestSession62FamilyCapExecutor:
             if call.kwargs.get("decision") == "reject"
         ]
         assert "cap_exceeded_reject" not in reject_reasons
+
+
+# ---------------------------------------------------------------------------
+# Session 93 (2026-05-10) — per-family vig_stack disable at executor entry.
+# KXHIGHCHI + KXINX added to VIG_STACK_DISABLED_FAMILIES based on lifetime
+# breakeven-WR analysis (loss/win ratio 5x+ requires WR ≥ 84%; actual 77-79%).
+# The family_disabled gate fires before family_cap; reject reason
+# "family_disabled_reject" emits a clean signal in decisions.jsonl rather than
+# the misleading "cap_exceeded_reject" that a cap=$0 proxy would produce.
+# ---------------------------------------------------------------------------
+class TestSession93FamilyDisableExecutor:
+    @pytest.mark.parametrize(
+        "family,ticker",
+        [
+            ("KXHIGHCHI", "KXHIGHCHI-26MAY101200-T70"),
+            ("KXINX",     "KXINX-26MAY10H1600-B5400.5"),
+        ],
+    )
+    def test_disabled_family_vig_stack_rejected_with_family_disabled_reject(
+        self, tmp_state, family, ticker,
+    ):
+        """Session 93: vig_stack on disabled family rejects before cap math."""
+        from bot.executor import execute_trade
+
+        opp = _make_opp(
+            opp_type="vig_stack_series",
+            side="no",
+            price_cents=44,
+            fair_value=0.78,
+            edge=0.10,
+            relative_edge=0.20,
+        )
+        opp["ticker"] = ticker
+        opp["title"] = f"{family} disabled-family regression"
+        opp["market"] = {"yes_ask": 56, "no_ask": 44, "close_ts": "2026-05-13T01:10:00Z"}
+        opp["edge_result"]["self_check_passed"] = True
+        # Sized far below any cap — proves the disable gate fires regardless of size.
+        sizing = _make_sizing(contracts=10, price_cents=44)
+
+        with patch("bot.decisions.log_decision") as mock_log:
+            result = execute_trade(opp, sizing)
+
+        assert result["success"] is False
+        assert "family_disabled_reject" in result["reason"]
+        assert family in result["reason"]
+        assert json.loads(tmp_state["paper_trades"].read_text()) == []
+
+        mock_log.assert_called_once()
+        _, kwargs = mock_log.call_args
+        assert kwargs["decision"] == "reject"
+        assert kwargs["reason"] == "family_disabled_reject"
+        # family_disabled gate fires AFTER position_cap and BEFORE family_cap.
+        assert kwargs["gates"]["position_cap"] is True
+        assert kwargs["gates"]["family_disabled"] is False
+        # Fingerprint stops at the rejecting gate; family_cap not reached.
+        assert "family_cap" not in kwargs["gates"]
+        assert kwargs["extra"]["family"] == family
+        # disabled_set persisted in extra for forensic context — must include both.
+        assert "KXHIGHCHI" in kwargs["extra"]["disabled_set"]
+        assert "KXINX" in kwargs["extra"]["disabled_set"]
+        assert kwargs["extra"]["close_ts"] == "2026-05-13T01:10:00Z"
+
+    def test_kxhighaus_vig_stack_passes_family_disabled_gate(self, tmp_state):
+        """Session 93 control: KXHIGHAUS NOT disabled — disable gate must pass."""
+        from bot.executor import execute_trade
+
+        opp = _make_opp(
+            opp_type="vig_stack_series",
+            side="no",
+            price_cents=44,
+            fair_value=0.78,
+            edge=0.10,
+            relative_edge=0.20,
+        )
+        opp["ticker"] = "KXHIGHAUS-26MAY101200-T80"
+        opp["title"] = "KXHIGHAUS allow-through control"
+        opp["market"] = {"yes_ask": 56, "no_ask": 44, "close_ts": "2026-05-13T01:10:00Z"}
+        opp["edge_result"]["self_check_passed"] = True
+        sizing = _make_sizing(contracts=10, price_cents=44)  # $4.40, well under $200 cap
+
+        with patch("bot.executor.get_market") as mock_market, \
+             patch("bot.decisions.log_decision") as mock_log:
+            mock_market.return_value = {"yes_ask": 56, "no_ask": 44}
+            result = execute_trade(opp, sizing)
+
+        # Trade succeeds — disable gate passed, cap gate passed, all downstream ok.
+        assert result["success"] is True
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        # Defense in depth: even if other gates rejected for some reason,
+        # family_disabled_reject MUST NOT appear among any reject reasons.
+        reject_reasons = [
+            call.kwargs["reason"]
+            for call in mock_log.call_args_list
+            if call.kwargs.get("decision") == "reject"
+        ]
+        assert "family_disabled_reject" not in reject_reasons
 
 
 # ---------------------------------------------------------------------------
