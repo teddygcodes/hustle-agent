@@ -4979,3 +4979,55 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 **Watch-list trigger.** If a NEW post-Session-92 `position_over_family_cap` WARN appears in §7, the fix regressed or a non-vig_stack/mislabeled path is entering outside the guarded types. First check `decisions.jsonl` for `cap_exceeded_reject`; if absent, inspect the entry path that created the new position.
 
 **README sync.** Add a Session 92 recap entry calling out the final-boundary reject, the legacy-vs-new-entry distinction, and the verification-discovered tracker reconciliation fix. Three-commit ship pattern preserved: code+tests, CLAUDE-sessions.md, README.md; then `git push origin main`.
+
+### ☑ Session 93 — Disable vig_stack on KXHIGHCHI and KXINX (May 10, ~2h coder)
+
+**Trigger.** Post–Session 92 per-family analysis of 213 settled vig_stack trades surfaced two families whose actual win rate is below their structural breakeven WR. Both win frequently (76-79%) but lose enough on the rare losses (loss/win ratio 5.0-5.2x) that the math doesn't close. Reducing per-family caps was analyzed and explicitly rejected: the loss/win ratio is structural, not size-dependent — KXHIGHCHI at a hypothetical $25 cap still loses ~$76 across 39 trades. The right lever is to stop entering the family entirely.
+
+| Family | Lifetime n | WR | Loss/Win | Breakeven WR | Lifetime P&L | 7d n | 7d P&L |
+|---|---|---|---|---|---|---|---|
+| **KXHIGHCHI** | 39 | 76.9% | 5.23x | 84% | **−$84.94** | 12 | **−$24.90** |
+| **KXINX** | 28 | 78.6% | 5.00x | 84% | **−$72.92** | 8 | **−$158.17** (worse) |
+
+**Phase 0 evidence (strict per-family filter).** First-pass exploration used a `KXHIGH*` wildcard and produced misleading "KXHIGHCHI recovered +$585 / 7d" stats. Re-running with strict `ticker.split("-",1)[0] == "KXHIGHCHI"` exactly (matching the executor's family extraction at [bot/executor.py:244](bot/executor.py:244)) restored the correct picture: 12 trades / −$24.90 in last 7d. Lifetime numbers match exactly. Both families confirmed still losing in 7d, with KXINX deteriorating (loss/win 5.0x → 8.18x in the recent window). Inventory check: zero open vig_stack positions in either family at plan time, so no wind-down to manage. Distinct vig_stack family prefixes confirmed via `Counter`: KXHIGHAUS=44, KXHIGHCHI=39, KXHIGHDEN=38, KXHIGHMIA=31, KXINX=28, KXHIGHNY=25, KXMLBGAME=8 — each prefix is its own clean family.
+
+**Decision.** Outcome A per Session 93 plan: disable both families at the executor entry boundary with a new reject reason `family_disabled_reject`, fired before the family-cap math so the signal in `decisions.jsonl` is clean (not a misleading `cap_exceeded_reject` from a cap=$0 proxy). Existing positions are not force-exited (zero open anyway). KXHIGHNY (currently +$3 across 25 trades) stays enabled with a watch-list trigger for re-evaluation. Other 5 vig_stack families untouched.
+
+**Implementation.**
+- `bot/config.py:661-684` — added `VIG_STACK_DISABLED_FAMILIES: set[str] = {"KXHIGHCHI", "KXINX"}` plus `is_vig_stack_family_disabled(family)` helper. Pattern B mirror of `VIG_STACK_FAMILY_FLOOR_OVERRIDES` (Session 64): same per-family-knob shape, opt-out semantic.
+- `bot/executor.py:24-35` — imported `VIG_STACK_DISABLED_FAMILIES` + `is_vig_stack_family_disabled` from config alongside the existing cap imports.
+- `bot/executor.py:71-77` — inserted `"family_disabled"` into `_POS_GATE_ORDER` between `position_cap` and `family_cap`. Comment documents the ordering invariant: a disabled family rejects before the cap math runs.
+- `bot/executor.py:80-94` — replaced the inline `cap_exceeded_reject → family_cap` mapping with a `_REASON_TO_GATE` dict that handles both `cap_exceeded_reject → family_cap` (Session 92) and `family_disabled_reject → family_disabled` (Session 93). Unifies the indirection.
+- `bot/executor.py:248-265` — new family-disable guard inside `_check_position_limits()` immediately after family extraction (`ticker.split("-", 1)[0]`) and before the cap-math block. Reject reason `family_disabled_reject`, extras include `family`, `disabled_set` (sorted), `incoming_cost`, `contracts`, `price_cents`, plus `close_ts` for regime tagging.
+- `bot/state/active_observations.json` — appended Session 93 record with three metrics: `family_disabled_reject` events in `decisions.jsonl` (≥1 per surfacing scan), new vig_stack positions on disabled families (0), 30-day rolling counterfactual P&L (manual tracking, validates the disable).
+
+**Tests.**
+- `tests/test_bot_executor.py:TestSession93FamilyDisableExecutor` — new class with 3 cases:
+  - Parametrized over `(KXHIGHCHI, KXINX)`: vig_stack_series sized $4.40 (well below any cap) rejects with `family_disabled_reject`. Asserts `result["success"] is False`, `gates["position_cap"] is True`, `gates["family_disabled"] is False`, `"family_cap" not in gates` (fingerprint stops at the rejecting gate), `extra["family"]` matches, `extra["disabled_set"]` contains both, `close_ts` threaded.
+  - `test_kxhighaus_vig_stack_passes_family_disabled_gate` — control: KXHIGHAUS vig_stack_series at the same size succeeds (disable gate passes, downstream gates pass, paper trade written). Defense in depth: even if other rejects fire, `family_disabled_reject` MUST NOT appear among the reasons.
+- `tests/test_bot_executor.py:316-330` — Session 62 cap parametrize updated: removed `KXINX` and `KXHIGHCHI` entries with a comment pointing to TestSession93. Cap-enforcement contract no longer applies to disabled families; the disable test is the new contract for them. The 5 still-enabled families (KXMLBGAME, KXHIGHDEN, KXHIGHNY, KXHIGHAUS, KXHIGHMIA) continue to be exercised by the cap parametrize.
+- Existing Session 92 tests remain intact: `test_oversized_vig_stack_futures_rejected_at_entry` (KXMLBGAME over-cap rejects) and `test_under_cap_vig_stack_futures_still_executes` (under-cap KXMLBGAME succeeds) still pass — the disable check is invisible to non-disabled families.
+
+**Verification gate.**
+- ☑ Targeted suite: `pytest tests/test_bot_executor.py::TestSession93FamilyDisableExecutor tests/test_bot_executor.py::TestSession62FamilyCapExecutor -v` → **10 passed** (3 disable + 7 cap).
+- ☑ Full pytest: **1561 passed / 0 failed**. Net delta from Session 92's 1560 baseline is +1 (3 new disable tests minus 2 removed cap parametrize entries that no longer apply to disabled families). The "+1, not +3" delta is intentional and the right shape — disable tests replace cap tests for the two disabled families.
+- ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json` succeeded; Session 93 record appended cleanly.
+- Bot restart pending (next step): `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`; verify wrapper-PID via `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"`, child-PID via `pgrep -P $WRAPPER`, `lsof -p $CHILD | grep cwd` confirms cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cross-bot guard).
+- Post-restart verification (next step): `python3 tools/glint_status.py` §5 should show no NEW KXHIGHCHI or KXINX positions opening; `tail -f bot/logs/bot.log | grep family_disabled_reject` and `rg "family_disabled_reject" bot/state/decisions.jsonl` should accumulate ≥1 event per scan cycle that surfaces a vig_stack opp on either family.
+
+**What did NOT change.**
+- No cap value changes. KXMLBGAME stays $50; KXHIGHDEN/NY at $150; KXHIGHAUS/MIA at $200. KXHIGHCHI's $150 entry in the cap dict is now dead code (disabled before cap math) but stays for forensic clarity — the cap value documents the historical decision.
+- No forced exits. Phase 0.3 inventory found zero open positions in either family, so this is moot in practice. The principle holds: existing positions ride to settlement.
+- No live_momentum changes. Different strategy, separate analysis (Session 90 already addressed re-entry; sport-cohort sizing is a future ship).
+- No KXHIGHNY action. Currently +$3 across 25 trades — borderline. Watch-list trigger documented; no code change.
+- No `tools/glint_status.py` changes. The dashboard remains the reporting surface; executor is the enforcement surface.
+
+**Watch-list triggers.**
+- **KXHIGHNY:** re-investigate disable when 30-day rolling vig_stack P&L crosses −$50 (currently +$3, n=25). No action this ship.
+- **KXHIGHCHI / KXINX re-enable:** track 30-day rolling counterfactual P&L (would-have-traded) via `paper_trades.json` filter against decisions.jsonl `family_disabled_reject` events. If the counterfactual recovers to net-positive sustained 30+ days, reconsider re-enable. Default: stays disabled until explicitly re-enabled.
+- **`family_disabled_reject` silent failure:** if 0 events fire in 14 days, the guard may be dead code (executor not reaching it, or scan no longer surfacing these families). Investigate; do NOT assume "no rejects = working as intended."
+- **Cap-dict drift:** the `KXHIGHCHI: 150` entry in `VIG_STACK_FAMILY_MAX_POSITION_DOLLARS` is now dead code. If a future session removes/edits cap values for the dead entry, surface this Session 93 block — the cap is preserved for historical documentation, not enforcement.
+
+**Methodology validation.** This ship validates the breakeven-WR analysis methodology (loss/win ratio × actual WR vs. structural breakeven WR). If forward P&L improves vs. counterfactual continuation, the framework becomes reusable for future per-family decisions. If it fails (some unforeseen factor restores profitability), we learn the analysis is incomplete. Either outcome is informative — the 14-day observation window in `active_observations.json` will resolve it.
+
+**README sync.** Add a Session 93 recap entry calling out the breakeven-WR analysis, the per-family disable mechanism, the strict-filter Phase 0 reverification, and the +1 (not +3) test delta. Three-commit ship pattern preserved: code+tests, CLAUDE-sessions.md, README.md; then `git push origin main`.
