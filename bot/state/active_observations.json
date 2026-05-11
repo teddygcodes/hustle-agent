@@ -210,5 +210,37 @@
         "last_updated": "2026-05-11T18:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 101,
+    "shipped_at": "2026-05-11T21:40:23+00:00",
+    "description": "_kalshi_get total wall-clock timeout via daemon-thread guard (30s cap). Bounds the slow-drip case where urlopen's per-recv timeout=10 is bypassed by trickle responses, restoring inner-deadline effectiveness in snapshot_universe. Brief was re-scoped mid-session: original directive listed snapshot_universe as out-of-scope based on counter-absent inference, but Phase 0 evidence (bot.log lines 53934/54338/54349) showed today's gap WAS snapshot_universe with the outer wait_for failing silently. Layer 1 only; Layer 2 (outer wait_for binding fix) deferred to Session 102 with watch-list trigger.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "longest SCAN CYCLE gap in last 24h during awake hours",
+        "expectation": "< 60 min after Session 101. Pre-ship: 1h 59min (13:22-15:21 EDT) AND 2h 6min (15:21-17:28 EDT) on 2026-05-11 — two ~2h gaps in 4h. Post-ship expect inner deadline (300s) to bound to ~5min normal, ~5-10min worst-case. If gaps still > 60min within 14d, the Layer 1 daemon-thread guard isn't bounding the leak — investigate per the watch-list.",
+        "current_value": "n/a (pre-observation; first post-restart SCAN CYCLE not yet logged)",
+        "last_updated": "2026-05-11T21:40:23+00:00"
+      },
+      {
+        "name": "median SCAN CYCLE interval during awake hours",
+        "expectation": "approx 30 min (config IDLE = 1800s) with ≤30s overshoot per Step 9 wall-clock sleep tolerance. Pre-ship median was severely degraded by the multi-hour gaps. Post-ship target: ≤ 35 min median across rolling 24h awake-hours window.",
+        "current_value": "n/a (pre-observation)",
+        "last_updated": "2026-05-11T21:40:23+00:00"
+      },
+      {
+        "name": "count of '_kalshi_get total wall-clock timeout' log entries in last 24h",
+        "expectation": "0-10 under normal Kalshi health; non-zero confirms the new daemon-thread guard is firing on individual hung calls. Higher counts during degradation events are expected and a feature (the guard is doing its job). If sustained > 50/day, Kalshi is severely degraded — flag in the next session brief.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T21:40:23+00:00"
+      },
+      {
+        "name": "Layer 2 watch-list — outer wait_for binding fix (Session 102 candidate)",
+        "expectation": "If snapshot_outer_timeout_count_24h in bot_state.json remains absent for >=7 days while the new '_kalshi_get total wall-clock timeout' log line fires non-zero times during the same window, the Session 98 outer guard is provably broken (it should fire when inner-guard activity sustained enough to overshoot 600s). Open Session 102 with the asyncio.get_event_loop() -> asyncio.get_running_loop() migration on Python 3.14 (deprecation hypothesis) plus a regression test for the actual production binding scenario.",
+        "current_value": "n/a (7d window opens 2026-05-11)",
+        "last_updated": "2026-05-11T21:40:23+00:00"
+      }
+    ]
   }
 ]
