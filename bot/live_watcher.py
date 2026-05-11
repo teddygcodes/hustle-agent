@@ -66,6 +66,207 @@ _FINAL_STATUSES = {"STATUS_FINAL", "STATUS_POSTPONED", "STATUS_CANCELED"}
 _STATE_DIR = pathlib.Path(__file__).resolve().parent / "state"
 LIVE_JOURNAL_FILE = _STATE_DIR / "live_journal.json"
 
+_LIVE_MOMENTUM_CONTEXT_FIELDS: tuple[str, ...] = (
+    "sport", "ticker", "leader_ticker", "leader_side", "leader_price",
+    "opponent_price", "yes_bid", "yes_ask", "spread_cents", "volume_24h",
+    "recent_high", "dip_cents", "dqs", "momentum", "wp_edge", "completion",
+    "score_state", "match_phase", "time_remaining", "game_clock", "period",
+    "skip_reason", "entry_gate", "source",
+)
+
+
+def _compact_number(value, *, ndigits: int = 3):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num:
+        return None
+    if num.is_integer():
+        return int(num)
+    return round(num, ndigits)
+
+
+def _market_volume_24h(leader_market: dict | None, opponent_market: dict | None) -> int | None:
+    values = []
+    for market in (leader_market, opponent_market):
+        if not isinstance(market, dict):
+            continue
+        value = market.get("volume_24h")
+        if value is None:
+            continue
+        num = _compact_number(value, ndigits=0)
+        if num is not None:
+            values.append(int(num))
+    if not values:
+        return None
+    return sum(values)
+
+
+def _context_match_phase(sport: str | None, elapsed_seconds) -> str | None:
+    elapsed = _compact_number(elapsed_seconds, ndigits=0)
+    if elapsed is None or elapsed < 0:
+        return None
+    sport_lc = (sport or "").lower()
+    if sport_lc in {"atp", "atp_challenger", "wta", "wta_challenger"}:
+        if elapsed < 1800:
+            return "early"
+        if elapsed < 5400:
+            return "mid"
+        return "late"
+    if sport_lc == "ufc":
+        if elapsed < 300:
+            return "round_1"
+        if elapsed < 600:
+            return "round_2"
+        return "round_3+"
+    return None
+
+
+def _build_live_momentum_decision_context(
+    *,
+    sport: str | None = None,
+    ticker: str | None = None,
+    leader_market: dict | None = None,
+    opponent_market: dict | None = None,
+    leader_side: str | None = None,
+    leader_price: int | float | None = None,
+    opponent_price: int | float | None = None,
+    recent_high: int | float | None = None,
+    dip_cents: int | float | None = None,
+    dqs: int | float | None = None,
+    game_ctx=None,
+    espn_data: dict | None = None,
+    skip_reason: str | None = None,
+    entry_gate: str | None = None,
+    source: str | None = None,
+    elapsed_seconds: int | float | None = None,
+) -> dict:
+    """Build compact live_momentum decision context from already-fetched data.
+
+    Forward-only instrumentation helper: callers pass the market/game objects
+    already available at the decision point. The output is allowlisted so full
+    market/game/ESPN blobs cannot leak into decisions or journal extras.
+    """
+    leader_market = leader_market if isinstance(leader_market, dict) else None
+    opponent_market = opponent_market if isinstance(opponent_market, dict) else None
+    espn_data = espn_data if isinstance(espn_data, dict) else None
+
+    yes_ask = leader_price if leader_price is not None else (
+        leader_market.get("yes_ask") if leader_market else None
+    )
+    yes_bid = leader_market.get("yes_bid") if leader_market else None
+    opp_price = opponent_price if opponent_price is not None else (
+        opponent_market.get("yes_ask") if opponent_market else None
+    )
+    spread = None
+    ask_num = _compact_number(yes_ask)
+    bid_num = _compact_number(yes_bid)
+    if ask_num is not None and bid_num is not None:
+        spread = max(0, ask_num - bid_num)
+
+    completion = None
+    momentum = None
+    wp_edge = None
+    score_state = None
+    time_remaining = None
+    period = None
+    if game_ctx is not None:
+        try:
+            completion = _compact_number(game_ctx.game_completion_pct)
+            time_remaining = round(max(0.0, 1.0 - float(completion)), 3) if completion is not None else None
+        except Exception:
+            completion = None
+            time_remaining = None
+        try:
+            momentum = _compact_number(game_ctx.momentum)
+        except Exception:
+            momentum = None
+        try:
+            if ask_num is not None:
+                wp_edge = _compact_number(float(game_ctx.win_probability) - (float(ask_num) / 100.0))
+        except Exception:
+            wp_edge = None
+        try:
+            if getattr(game_ctx, "_snapshots", None):
+                snap = game_ctx._snapshots[-1]
+                score_state = f"{snap.our_score}-{snap.their_score}"
+                period = snap.period
+        except Exception:
+            score_state = None
+            period = None
+
+    if espn_data:
+        if score_state is None and espn_data.get("home_score") is not None and espn_data.get("away_score") is not None:
+            score_state = f"{espn_data.get('away_score')}-{espn_data.get('home_score')}"
+        if period is None:
+            period = espn_data.get("period")
+
+    context = {
+        "sport": (sport or "").lower() if sport else None,
+        "ticker": ticker or (leader_market.get("ticker") if leader_market else None),
+        "leader_ticker": leader_market.get("ticker") if leader_market else ticker,
+        "leader_side": leader_side,
+        "leader_price": _compact_number(yes_ask, ndigits=1),
+        "opponent_price": _compact_number(opp_price, ndigits=1),
+        "yes_bid": _compact_number(yes_bid, ndigits=1),
+        "yes_ask": _compact_number(yes_ask, ndigits=1),
+        "spread_cents": _compact_number(spread, ndigits=1),
+        "volume_24h": _market_volume_24h(leader_market, opponent_market),
+        "recent_high": _compact_number(recent_high, ndigits=1),
+        "dip_cents": _compact_number(dip_cents, ndigits=1),
+        "dqs": _compact_number(dqs),
+        "momentum": momentum,
+        "wp_edge": wp_edge,
+        "completion": completion,
+        "score_state": score_state,
+        "match_phase": _context_match_phase(sport, elapsed_seconds),
+        "time_remaining": time_remaining,
+        "game_clock": espn_data.get("clock") if espn_data else None,
+        "period": period,
+        "skip_reason": skip_reason,
+        "entry_gate": entry_gate,
+        "source": source,
+    }
+    compact = {k: v for k, v in context.items() if v is not None}
+    missing = [k for k in _LIVE_MOMENTUM_CONTEXT_FIELDS if k not in compact]
+    compact["context_available"] = any(
+        k in compact for k in (
+            "leader_price", "opponent_price", "yes_bid", "yes_ask",
+            "volume_24h", "recent_high", "dip_cents", "momentum",
+            "wp_edge", "completion", "score_state", "game_clock", "period",
+        )
+    )
+    compact["missing_context_fields"] = missing
+    return compact
+
+
+def _annotate_live_momentum_context(
+    context: dict,
+    *,
+    skip_reason: str | None = None,
+    entry_gate: str | None = None,
+    source: str | None = None,
+    dqs: int | float | None = None,
+) -> dict:
+    """Return context plus late-bound decision labels with missing list fixed."""
+    out = dict(context or {})
+    if skip_reason is not None:
+        out["skip_reason"] = skip_reason
+    if entry_gate is not None:
+        out["entry_gate"] = entry_gate
+    if source is not None:
+        out["source"] = source
+    if dqs is not None:
+        out["dqs"] = _compact_number(dqs)
+    out["missing_context_fields"] = [
+        k for k in _LIVE_MOMENTUM_CONTEXT_FIELDS if k not in out
+    ]
+    out["context_available"] = bool(out.get("context_available"))
+    return out
+
 
 def _journal_append(entry: dict):
     """Append an entry to the live watcher journal (thread-safe-ish).
@@ -104,6 +305,7 @@ def _journal_record_scan(
     price: int | None = None,
     volume: int | None = None,
     event_ticker: str | None = None,
+    extra: dict | None = None,
 ):
     """Record a scan_found journal event with optional skip_reason (Session 21).
 
@@ -135,6 +337,8 @@ def _journal_record_scan(
         entry["volume"] = volume
     if event_ticker is not None:
         entry["event_ticker"] = event_ticker
+    if extra:
+        entry["extra"] = extra
     _journal_append(entry)
 
 
@@ -1215,6 +1419,38 @@ class LiveGameWatcher:
             # state path over time path.
             "elapsed_seconds": elapsed,
         }
+        primary_context = _build_live_momentum_decision_context(
+            sport=self.sport,
+            ticker=self.ticker,
+            leader_market=market,
+            opponent_market=opp_market,
+            leader_side="primary",
+            leader_price=yes_ask,
+            opponent_price=opp_yes_ask or None,
+            recent_high=recent_high,
+            dip_cents=dip_cents,
+            dqs=None,
+            game_ctx=self._game_ctx,
+            espn_data=espn_data,
+            source="watcher",
+            elapsed_seconds=elapsed,
+        )
+        opponent_context = _build_live_momentum_decision_context(
+            sport=self.sport,
+            ticker=self._opponent_ticker,
+            leader_market=opp_market,
+            opponent_market=market,
+            leader_side="opponent",
+            leader_price=opp_yes_ask or None,
+            opponent_price=yes_ask,
+            recent_high=opp_recent_high or None,
+            dip_cents=opp_dip_cents,
+            dqs=None,
+            game_ctx=self._game_ctx,
+            espn_data=espn_data,
+            source="watcher",
+            elapsed_seconds=elapsed,
+        )
 
         if not can_enter:
             sport_lc = (self.sport or "").lower()
@@ -1240,7 +1476,11 @@ class LiveGameWatcher:
             self._log_decision_dampened(
                 decision="reject", reason=_reason, gates=_gates,
                 edge=wp_edge,
-                extra={**mom_ctx, "sport": sport_lc,
+                extra={**mom_ctx,
+                       **_annotate_live_momentum_context(
+                           primary_context, skip_reason=_reason, entry_gate=_reason,
+                       ),
+                       "sport": sport_lc,
                        "entry_count": self._entry_count,
                        "cooldown_remaining": self._cooldown_remaining,
                        "open_bets": len(self.bets_placed),
@@ -1288,7 +1528,15 @@ class LiveGameWatcher:
                                 gates={"can_enter": True, "is_leader": True,
                                        "dip_window": True, "variance_quality": False},
                                 edge=wp_edge,
-                                extra={**mom_ctx, "q_reason": q_reason},
+                                extra={
+                                    **mom_ctx,
+                                    **_annotate_live_momentum_context(
+                                        primary_context,
+                                        skip_reason="variance_quality",
+                                        entry_gate="variance_quality",
+                                    ),
+                                    "q_reason": q_reason,
+                                },
                                 close_ts=_close_ts,
                             )
                         else:
@@ -1341,8 +1589,17 @@ class LiveGameWatcher:
                                 gates={"can_enter": True, "is_leader": True,
                                        "dip_window": True, "dqs": False},
                                 edge=wp_edge,
-                                extra={**mom_ctx, "dqs": round(dqs, 3),
-                                       "threshold": MOMENTUM_DQS_THRESHOLD},
+                                extra={
+                                    **mom_ctx,
+                                    **_annotate_live_momentum_context(
+                                        primary_context,
+                                        skip_reason="dqs_fail",
+                                        entry_gate="dqs",
+                                        dqs=dqs,
+                                    ),
+                                    "dqs": round(dqs, 3),
+                                    "threshold": MOMENTUM_DQS_THRESHOLD,
+                                },
                                 close_ts=_close_ts,
                             )
                 else:
@@ -1356,7 +1613,15 @@ class LiveGameWatcher:
                         gates={"can_enter": True, "is_leader": True,
                                "dip_min": True, "dip_max": False},
                         edge=wp_edge,
-                        extra={**mom_ctx, "max_dip": max_dip},
+                        extra={
+                            **mom_ctx,
+                            **_annotate_live_momentum_context(
+                                primary_context,
+                                skip_reason="dip_too_big",
+                                entry_gate="dip_max",
+                            ),
+                            "max_dip": max_dip,
+                        },
                         close_ts=_close_ts,
                     )
 
@@ -1376,6 +1641,22 @@ class LiveGameWatcher:
                             logger.info(
                                 "LiveGameWatcher VARIANCE REJECT (opp): %s dip=%dc price=%dc (%s)",
                                 self._opponent_ticker, opp_dip_cents, opp_yes_ask, q_reason,
+                            )
+                            self._log_decision_dampened(
+                                decision="reject", reason="variance_quality",
+                                gates={"can_enter": True, "is_leader": True,
+                                       "dip_window": True, "variance_quality": False},
+                                edge=wp_edge,
+                                extra={
+                                    **mom_ctx,
+                                    **_annotate_live_momentum_context(
+                                        opponent_context,
+                                        skip_reason="variance_quality",
+                                        entry_gate="variance_quality",
+                                    ),
+                                    "q_reason": q_reason,
+                                },
+                                close_ts=_close_ts,
                             )
                         else:
                             # Tennis/UFC scalp mode — skip DQS
@@ -1433,12 +1714,46 @@ class LiveGameWatcher:
                                 self._opponent_ticker, opp_dip_cents, dqs, MOMENTUM_DQS_THRESHOLD,
                             )
                             self._tick_telem["dqs_fail"] += 1
+                            self._log_decision_dampened(
+                                decision="reject", reason="dqs_fail",
+                                gates={"can_enter": True, "is_leader": True,
+                                       "dip_window": True, "dqs": False},
+                                edge=wp_edge,
+                                extra={
+                                    **mom_ctx,
+                                    **_annotate_live_momentum_context(
+                                        opponent_context,
+                                        skip_reason="dqs_fail",
+                                        entry_gate="dqs",
+                                        dqs=dqs,
+                                    ),
+                                    "dqs": round(dqs, 3),
+                                    "threshold": MOMENTUM_DQS_THRESHOLD,
+                                },
+                                close_ts=_close_ts,
+                            )
                 else:
                     logger.info(
                         "LiveGameWatcher SKIP: %s opp dip too large (%dc > %dc max)",
                         self._opponent_ticker, opp_dip_cents, max_dip,
                     )
                     self._tick_telem["dip_too_big"] += 1
+                    self._log_decision_dampened(
+                        decision="reject", reason="dip_too_big",
+                        gates={"can_enter": True, "is_leader": True,
+                               "dip_min": True, "dip_max": False},
+                        edge=wp_edge,
+                        extra={
+                            **mom_ctx,
+                            **_annotate_live_momentum_context(
+                                opponent_context,
+                                skip_reason="dip_too_big",
+                                entry_gate="dip_max",
+                            ),
+                            "max_dip": max_dip,
+                        },
+                        close_ts=_close_ts,
+                    )
 
         # --- Conviction Entry: "read the game, buy without a dip" ---
         # Sometimes there IS no dip. The team is dominating, the price just
@@ -1571,6 +1886,13 @@ class LiveGameWatcher:
             reentry_tag = f" [RE-ENTRY #{self._entry_count + 1}]" if self._entry_count > 0 else ""
             # Conviction entries use reduced sizing
             conviction_mode = buy_dip == 0 and "conviction" in buy_reason.lower()
+            buy_context = primary_context if buy_ticker == self.ticker else opponent_context
+            buy_context = _annotate_live_momentum_context(
+                buy_context,
+                skip_reason=None,
+                entry_gate="conviction" if conviction_mode else "dip_buy",
+                dqs=buy_dqs if buy_dqs else None,
+            )
             # Session 6 — accept-path log (dampened). Note: executor will also
             # log its own accept after position-limit + edge-recheck gates.
             self._log_decision_dampened(
@@ -1579,7 +1901,7 @@ class LiveGameWatcher:
                 gates={"can_enter": True, "is_leader": True,
                        "dip_window": True, "dqs": True},
                 edge=wp_edge,
-                extra={**mom_ctx,
+                extra={**mom_ctx, **buy_context,
                        "dqs": round(buy_dqs, 3) if buy_dqs else None,
                        "buy_price": buy_price, "buy_dip": buy_dip,
                        "ticker": buy_ticker},
@@ -1592,6 +1914,7 @@ class LiveGameWatcher:
                 dip_cents=buy_dip if not conviction_mode else 4,  # use min dip for sizing
                 dqs_score=buy_dqs,
                 conviction=conviction_mode,
+                decision_context=buy_context,
             )
 
         # Build score string for logging
@@ -1702,6 +2025,7 @@ class LiveGameWatcher:
         self, market: dict, yes_ask: int, reason: str,
         ticker_override: str | None = None, dip_cents: float = 4,
         dqs_score: float = 0.0, conviction: bool = False,
+        decision_context: dict | None = None,
     ):
         """Place a momentum buy — YES on the leader. Supports both sides via ticker_override."""
         from bot.executor import execute_trade
@@ -1814,6 +2138,7 @@ class LiveGameWatcher:
             "paper_confidence": _paper_conf,
             "paper_dqs": dqs_score if dqs_score else None,  # 0.0 → None for empty-DQS scalp paths
             "paper_sport": self.sport.lower() if self.sport else None,
+            "decision_context": decision_context,
         }
 
         try:
@@ -2983,6 +3308,8 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
             # Must have real trading activity (live match, not upcoming)
             if total_vol < MIN_VOLUME_LIVE:
                 _telem["low_volume"] += 1
+                _higher = side_a if price_a >= price_b else side_b
+                _lower = side_b if _higher is side_a else side_a
                 _journal_record_scan(
                     ticker=side_a.get("ticker", "") or event_tk,
                     sport=sport,
@@ -2990,10 +3317,20 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=max(price_a, price_b),
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_decision_context(
+                        sport=sport,
+                        ticker=_higher.get("ticker") or event_tk,
+                        leader_market=_higher,
+                        opponent_market=_lower,
+                        leader_side="scan",
+                        leader_price=max(price_a, price_b),
+                        opponent_price=min(price_a, price_b),
+                        skip_reason="low_volume",
+                        entry_gate="low_volume",
+                        source="scan",
+                    ),
                 )
                 # Session 23: CF for low_volume — leader-side bet semantics.
-                _higher = side_a if price_a >= price_b else side_b
-                _lower = side_b if _higher is side_a else side_a
                 _maybe_emit_live_momentum_cf(
                     ticker=_higher.get("ticker") or event_tk,
                     sport=sport,
@@ -3042,6 +3379,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=max(price_a, price_b),
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_decision_context(
+                        sport=sport,
+                        ticker=higher_side.get("ticker") or event_tk,
+                        leader_market=higher_side,
+                        opponent_market=lower_side,
+                        leader_side="scan",
+                        leader_price=max(price_a, price_b),
+                        opponent_price=min(price_a, price_b),
+                        skip_reason="no_leader",
+                        entry_gate="no_leader",
+                        source="scan",
+                    ),
                 )
                 # Session 23: CF for no_leader. measured_value is the
                 # higher-priced side's prob (cents); threshold is the floor
@@ -3139,9 +3488,11 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
 
             # Find opponent ticker (the other side of this event)
             opponent_ticker = None
+            opponent_market_for_candidate = None
             for s in sides:
                 if s.get("ticker") != leader_ticker:
                     opponent_ticker = s.get("ticker")
+                    opponent_market_for_candidate = s
                     break
 
             candidates.append({
@@ -3150,8 +3501,14 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 "sport": sport,
                 "ticker": leader_ticker,
                 "opponent_ticker": opponent_ticker,
+                "leader_market": leader,
+                "opponent_market": opponent_market_for_candidate,
                 "event_ticker": event_tk,
                 "price": leader_price,
+                "opponent_price": (
+                    opponent_market_for_candidate.get("yes_ask")
+                    if opponent_market_for_candidate else None
+                ),
                 "volume": total_vol,
                 "volume_24h": total_vol_24h,
             })
@@ -3184,6 +3541,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 price=c["price"],
                 volume=current_vol,
                 event_ticker=c.get("event_ticker"),
+                extra=_build_live_momentum_decision_context(
+                    sport=c["sport"],
+                    ticker=c["ticker"],
+                    leader_market=c.get("leader_market"),
+                    opponent_market=c.get("opponent_market"),
+                    leader_side="scan",
+                    leader_price=c["price"],
+                    opponent_price=c.get("opponent_price"),
+                    skip_reason="no_vol_growth_first_seen",
+                    entry_gate="no_vol_growth_first_seen",
+                    source="scan",
+                ),
             )
             # Session 23: CF for first-seen idle. Leader bet by candidate
             # construction. Threshold is implicit 0 (no prior baseline).
@@ -3215,6 +3584,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 price=c["price"],
                 volume=current_vol,
                 event_ticker=c.get("event_ticker"),
+                extra=_build_live_momentum_decision_context(
+                    sport=c["sport"],
+                    ticker=c["ticker"],
+                    leader_market=c.get("leader_market"),
+                    opponent_market=c.get("opponent_market"),
+                    leader_side="scan",
+                    leader_price=c["price"],
+                    opponent_price=c.get("opponent_price"),
+                    skip_reason="no_vol_growth_idle",
+                    entry_gate="no_vol_growth_idle",
+                    source="scan",
+                ),
             )
             # Session 23: CF for idle. measured_value is the observed growth;
             # threshold is the 500-volume floor. Closer-to-threshold (i.e.
@@ -3249,6 +3630,18 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                 price=c["price"],
                 volume=c["volume"],
                 event_ticker=c.get("event_ticker"),
+                extra=_build_live_momentum_decision_context(
+                    sport=c["sport"],
+                    ticker=c["ticker"],
+                    leader_market=c.get("leader_market"),
+                    opponent_market=c.get("opponent_market"),
+                    leader_side="scan",
+                    leader_price=c["price"],
+                    opponent_price=c.get("opponent_price"),
+                    skip_reason="capacity_capped",
+                    entry_gate="capacity_capped",
+                    source="scan",
+                ),
             )
     for c in active_candidates[:slots]:
         logger.info(
@@ -3263,6 +3656,17 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
             price=c["price"],
             volume=c["volume"],
             event_ticker=c.get("event_ticker"),
+            extra=_build_live_momentum_decision_context(
+                sport=c["sport"],
+                ticker=c["ticker"],
+                leader_market=c.get("leader_market"),
+                opponent_market=c.get("opponent_market"),
+                leader_side="scan",
+                leader_price=c["price"],
+                opponent_price=c.get("opponent_price"),
+                entry_gate="spawn",
+                source="scan",
+            ),
         )
         # Mark this event as watched so scanner doesn't restart it
         if c.get("event_ticker"):

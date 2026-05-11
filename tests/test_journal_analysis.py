@@ -246,6 +246,110 @@ class TestComputeSessionEnds:
         assert bucket["worst_5"][0]["pnl"] == -0.30
 
 
+class TestLiveMomentumNoEntryContext:
+    def test_aggregates_enriched_and_non_enriched_records(self):
+        journal = [
+            _ev(
+                "scan_found", "KXNBAGAME-1", "2026-05-10T12:00:00+00:00",
+                sport="nba", skip_reason="no_leader",
+                extra={
+                    "context_available": True,
+                    "sport": "nba",
+                    "leader_price": 55,
+                    "dip_cents": 0,
+                    "spread_cents": 2,
+                    "volume_24h": 1000,
+                    "missing_context_fields": ["dqs"],
+                },
+            ),
+            _ev(
+                "scan_found", "KXNBAGAME-2", "2026-05-10T12:01:00+00:00",
+                sport="nba", skip_reason="no_leader",
+            ),
+        ]
+        decisions = [
+            {
+                "opp_type": "live_momentum",
+                "decision": "reject",
+                "reason": "dqs_fail",
+                "ticker": "KXNBAGAME-3",
+                "extra": {
+                    "context_available": True,
+                    "sport": "nba",
+                    "leader_price": 65,
+                    "dip_cents": 5,
+                    "dqs": 0.31,
+                    "spread_cents": 1,
+                    "volume_24h": 2000,
+                    "missing_context_fields": ["score_state"],
+                },
+            },
+            {
+                "opp_type": "vig_stack_series",
+                "decision": "reject",
+                "reason": "irrelevant",
+            },
+        ]
+
+        agg = journal_module.compute_live_momentum_no_entry_context(journal, decisions)
+
+        assert agg["total"] == 3
+        assert agg["enriched"] == 2
+        assert agg["by_key"][("nba", "no_leader")]["count"] == 2
+        assert agg["by_key"][("nba", "no_leader")]["enriched"] == 1
+        assert agg["by_key"][("nba", "dqs_fail")]["values"]["dqs"] == [0.31]
+        assert agg["missing"]["dqs"] == 1
+        assert agg["missing"]["score_state"] == 1
+
+    def test_render_context_section_formats_stats_and_coverage(self):
+        journal = [
+            _ev(
+                "scan_found", "KXNBAGAME-1", "2026-05-10T12:00:00+00:00",
+                sport="nba", skip_reason="no_leader",
+                extra={
+                    "context_available": True,
+                    "sport": "nba",
+                    "leader_price": 55,
+                    "dip_cents": 0,
+                    "spread_cents": 2,
+                    "volume_24h": 1000,
+                    "missing_context_fields": ["dqs"],
+                },
+            ),
+            _ev(
+                "scan_found", "KXNBAGAME-2", "2026-05-10T12:01:00+00:00",
+                sport="nba", skip_reason="no_leader",
+            ),
+        ]
+        decisions = [
+            {
+                "opp_type": "live_momentum",
+                "decision": "reject",
+                "reason": "dqs_fail",
+                "ticker": "KXNBAGAME-3",
+                "extra": {
+                    "context_available": True,
+                    "sport": "nba",
+                    "leader_price": 65,
+                    "dip_cents": 5,
+                    "dqs": 0.31,
+                    "spread_cents": 1,
+                    "volume_24h": 2000,
+                    "missing_context_fields": ["score_state"],
+                },
+            },
+        ]
+
+        md = journal_module.render_markdown(journal, decisions)
+
+        assert "Live Momentum No-Entry Context" in md
+        assert "66.7%" in md
+        assert "| nba | no_leader | 2 | 50%" in md
+        assert "| nba | dqs_fail | 1 | 100%" in md
+        assert "dqs (1)" in md
+        assert "score_state (1)" in md
+
+
 class TestSchemaTolerance:
     def test_missing_mode_classifies_as_unknown_mode(self):
         recs = [

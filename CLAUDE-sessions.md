@@ -5115,3 +5115,40 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - README Session 95 recap added.
 
 **Watch-list trigger.** If `bot/state/shadow_trades.jsonl` stays absent while new `family_disabled_reject`, `sport_disabled`, or `reentry_blocked` decisions appear after this restart, the shadow writer path is miswired. If Session 93's disabled-family entry count rises above the current 1, the disable guard is still not protecting every hot path and needs immediate investigation.
+
+---
+
+### ☑ Session 96 — live_momentum no-entry context instrumentation (May 10-11, data-substrate code+tests ship)
+
+**Trigger.** The May 10 deep dive showed `live_momentum` still negative, especially ATP/NBA, but reject/no-entry rows did not consistently carry enough structured context to decide whether gates were too strict, correctly protective, or sport-specific. Session 95 fixed blocked-trade shadow evidence; this session makes “why no trade?” analyzable without changing any strategy behavior.
+
+**Implementation.**
+- Added `_build_live_momentum_decision_context(...)` in `bot/live_watcher.py`, a compact allowlisted helper for already-available market/game context. It emits leader/opponent prices, bid/ask spread, 24h volume, recent high, dip, DQS, momentum/WP/completion/score fields when present, plus `context_available` and `missing_context_fields`. It deliberately omits full market dicts, GameContext objects, ESPN blobs, and order blobs.
+- Wired the helper into live_watcher decision extras for `dqs_fail`, `variance_quality`, `dip_too_big`, `cooldown`, `position_open`, `reentry_blocked`, `sport_disabled`, and accept paths. Opponent-side `variance_quality`, `dqs_fail`, and `dip_too_big` now use the existing dampened decision logger instead of only freeform log lines.
+- Added `scan_found.extra` context for scan/no-entry rows where side context exists: `low_volume`, `no_leader`, `no_vol_growth_first_seen`, `no_vol_growth_idle`, `capacity_capped`, and spawned watcher rows.
+- Passed a `decision_context` from live_momentum opportunities into executor position-limit rejects, merged only when `opp_type=="live_momentum"`. This enriches executor-side duplicate/cooldown/same-game/position/budget rejects without touching vig_stack or changing rejection behavior.
+- Extended `tools/journal_analysis.py` with a compact “Live Momentum No-Entry Context” section over current + archived decisions and live journal rows: counts by `(sport, reason)`, avg/median leader price / dip / DQS / spread / 24h volume, context coverage, and top missing fields.
+
+**Tests.**
+- Added helper unit tests for complete context, missing-field handling, and no blob leaks.
+- Added live_watcher logging tests for enriched `dqs_fail`, `reentry_blocked`, scan skip context, and opponent-side `dip_too_big`.
+- Added journal-analysis tests for enriched/non-enriched aggregation, numeric avg/median rendering, context coverage, and top missing fields.
+
+**Verification.**
+- ☑ Targeted suite: `python3 -m pytest tests/test_live_watcher.py tests/test_journal_analysis.py tests/test_glint_status.py -v --tb=short` → **147 passed**.
+- ☑ Full suite: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1574 passed** (Session 95 baseline 1567 + 7 net tests).
+- ☑ `python3 tools/journal_analysis.py` rendered the new section. After restart, forward-only coverage had already begun at **0.4% (333/79118)** from fresh scan rows; the table is capped to the top 30 reason buckets.
+- ☑ `python3 tools/glint_status.py` post-restart: bot PID `32944`, uptime seconds, heartbeat fresh, no new criticals.
+- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: wrapper PID `32917`, child PID `32944`, `lsof -p 32944` cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- ☑ Reviewed diff: no `bot/config.py` changes; no active strategy list, disabled sports/families, thresholds, sizing, entry logic, exit logic, or vig_stack behavior changed.
+
+**What did NOT change.**
+- No strategy behavior, thresholds, disabled sports, disabled families, sizing, entry logic, or exit logic.
+- No backfill of historical decisions or live journal rows.
+- No new network calls; all context comes from market/game objects already present at the decision point.
+- No `agent/engine.py` work.
+
+**Docs.**
+- `CLAUDE.md` State Files table and Canonical Data Schema Reference now document the Session 96 live_momentum context shape under `decisions.jsonl.extra` and `live_journal.json scan_found.extra`.
+- `CLAUDE.md` Data Collection Backlog Priority 2 marked shipped.
+- README Session 96 recap added.

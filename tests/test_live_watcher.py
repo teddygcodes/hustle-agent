@@ -18,6 +18,105 @@ def test_live_watch_config():
 
 
 # ---------------------------------------------------------------------------
+# Session 96: live_momentum decision context helper
+# ---------------------------------------------------------------------------
+
+def test_live_momentum_context_helper_complete_context():
+    from bot.game_context import GameContext
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    gc = GameContext(sport="nba")
+    gc.update(
+        espn_data={"clock": "04:12", "home_score": 95, "away_score": 101},
+        our_score=101,
+        their_score=95,
+        period=4,
+        clock_str="04:12",
+    )
+    ctx = _build_live_momentum_decision_context(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY10TEST-LAL",
+        leader_market={
+            "ticker": "KXNBAGAME-26MAY10TEST-LAL",
+            "yes_ask": 68,
+            "yes_bid": 66,
+            "volume_24h": 1200,
+        },
+        opponent_market={
+            "ticker": "KXNBAGAME-26MAY10TEST-BOS",
+            "yes_ask": 34,
+            "volume_24h": 800,
+        },
+        leader_side="primary",
+        recent_high=73,
+        dip_cents=5,
+        dqs=0.44,
+        game_ctx=gc,
+        espn_data={"clock": "04:12", "period": 4, "home_score": 95, "away_score": 101},
+        skip_reason="dqs_fail",
+        entry_gate="dqs",
+        source="watcher",
+        elapsed_seconds=1500,
+    )
+
+    assert ctx["sport"] == "nba"
+    assert ctx["leader_ticker"] == "KXNBAGAME-26MAY10TEST-LAL"
+    assert ctx["leader_side"] == "primary"
+    assert ctx["leader_price"] == 68
+    assert ctx["opponent_price"] == 34
+    assert ctx["spread_cents"] == 2
+    assert ctx["volume_24h"] == 2000
+    assert ctx["recent_high"] == 73
+    assert ctx["dip_cents"] == 5
+    assert ctx["dqs"] == 0.44
+    assert ctx["score_state"] == "101-95"
+    assert ctx["game_clock"] == "04:12"
+    assert ctx["period"] == 4
+    assert ctx["skip_reason"] == "dqs_fail"
+    assert ctx["entry_gate"] == "dqs"
+    assert ctx["context_available"] is True
+    assert "leader_price" not in ctx["missing_context_fields"]
+
+
+def test_live_momentum_context_helper_missing_fields_listed():
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    ctx = _build_live_momentum_decision_context(
+        sport="atp",
+        ticker="KXATPMATCH-26MAY10TEST-AAA",
+        source="watcher",
+    )
+
+    assert ctx["sport"] == "atp"
+    assert ctx["ticker"] == "KXATPMATCH-26MAY10TEST-AAA"
+    assert ctx["context_available"] is False
+    assert "leader_price" in ctx["missing_context_fields"]
+    assert "score_state" in ctx["missing_context_fields"]
+
+
+def test_live_momentum_context_helper_does_not_leak_blobs():
+    from bot.game_context import GameContext
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    gc = GameContext(sport="nba")
+    leader = {"ticker": "T1", "yes_ask": 70, "yes_bid": 69, "raw_blob": {"huge": True}}
+    espn = {"clock": "01:00", "competitions": [{"large": "blob"}]}
+    ctx = _build_live_momentum_decision_context(
+        sport="nba",
+        ticker="T1",
+        leader_market=leader,
+        game_ctx=gc,
+        espn_data=espn,
+        source="watcher",
+    )
+
+    dumped = repr(ctx)
+    assert "raw_blob" not in dumped
+    assert "competitions" not in dumped
+    assert "GameContext" not in dumped
+
+
+# ---------------------------------------------------------------------------
 # Task 2: Notifier methods
 # ---------------------------------------------------------------------------
 
@@ -1063,6 +1162,71 @@ def test_tick_record_includes_dqs_field_when_computed(monkeypatch):
     w._auto_bet_momentum.assert_not_called()
 
 
+def test_dqs_fail_decision_extra_includes_session96_context(monkeypatch):
+    import asyncio
+    from bot import game_context, live_watcher
+
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY10TEST-LAL",
+        price_history=[70, 70, 69, 70, 70],
+        yes_ask=65,
+        opp_yes_ask=34,
+    )
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+    monkeypatch.setattr(
+        game_context, "compute_dip_quality",
+        lambda **kwargs: (0.31, {"score": 0.31, "stage": 0.5, "total": 0.31}),
+    )
+
+    asyncio.run(w._tick_momentum())
+
+    reject = next(
+        c for c in w._log_decision_dampened.call_args_list
+        if c.kwargs.get("reason") == "dqs_fail"
+    )
+    extra = reject.kwargs["extra"]
+    assert extra["context_available"] is True
+    assert extra["leader_ticker"] == "KXNBAGAME-26MAY10TEST-LAL"
+    assert extra["leader_price"] == 65
+    assert extra["opponent_price"] == 34
+    assert extra["spread_cents"] == 1
+    assert extra["recent_high"] == 70
+    assert extra["dip_cents"] == 5
+    assert extra["dqs"] == 0.31
+    assert extra["skip_reason"] == "dqs_fail"
+    assert "market" not in extra
+
+
+def test_opponent_side_dip_too_big_logs_context_without_entry(monkeypatch):
+    import asyncio
+    from bot import live_watcher
+
+    w = _build_momentum_watcher(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY10TEST-LAL",
+        price_history=[50, 50, 50, 50, 50],
+        yes_ask=50,
+        opp_yes_ask=65,
+        opp_history=[90, 90, 90],
+    )
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    w._auto_bet_momentum.assert_not_called()
+    reject = next(
+        c for c in w._log_decision_dampened.call_args_list
+        if c.kwargs.get("reason") == "dip_too_big"
+    )
+    extra = reject.kwargs["extra"]
+    assert extra["leader_side"] == "opponent"
+    assert extra["leader_price"] == 65
+    assert extra["opponent_price"] == 50
+    assert extra["dip_cents"] == 25
+    assert extra["skip_reason"] == "dip_too_big"
+
+
 def test_dqs_null_when_not_computed(monkeypatch):
     """Session 33: when compute_dip_quality is not called, tick row has dqs=None.
 
@@ -1314,6 +1478,9 @@ def test_reentry_blocked_after_loss_recorded_session90(monkeypatch):
             assert extra.get("losses_seen") == 1, (
                 f"expected losses_seen=1 in extra, got {extra.get('losses_seen')!r}"
             )
+            assert extra.get("context_available") is True
+            assert extra.get("leader_price") == 65
+            assert extra.get("skip_reason") == "reentry_blocked"
             break
     assert found_reentry, (
         "no _log_decision_dampened call carried reason='reentry_blocked' — "
@@ -1573,6 +1740,13 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "no_leader" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "no_leader")
+        assert row["extra"]["context_available"] is True
+        assert row["extra"]["leader_price"] == 55
+        assert row["extra"]["opponent_price"] == 45
+        assert row["extra"]["volume_24h"] == 20000
+        assert row["extra"]["entry_gate"] == "no_leader"
+        assert "market" not in row["extra"]
 
     def test_settled_records_skip_reason(self, skip_reason_env):
         # Leader >= 95

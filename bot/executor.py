@@ -226,6 +226,7 @@ def _check_position_limits(
     contracts: int | None = None,
     price_cents: int | None = None,
     side: str | None = None,
+    decision_context: dict | None = None,
 ) -> tuple[bool, str]:
     """Check position limits: per-position cap, dedupe, cooldown, daily loss,
     per-strategy budget (Tier 2.1), and global exposure.
@@ -238,17 +239,25 @@ def _check_position_limits(
             reject log's `extra` dict so bot.regime.tag can populate
             event_horizon_hr (Session 15.5).
     """
+    def _with_decision_context(extra: dict | None) -> dict | None:
+        if opp_type != "live_momentum" or not isinstance(decision_context, dict):
+            return extra
+        merged = dict(decision_context)
+        if extra:
+            merged.update(extra)
+        return merged
+
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
         _log_position_reject(
             ticker, opp_type, "position_cap",
-            extra={
+            extra=_with_decision_context({
                 "cost_dollars": round(cost_dollars, 2),
                 "max_allowed": round(balance * MAX_POSITION_PERCENT, 2),
                 "balance": round(balance, 2),
                 "exposure_pct": round(cost_dollars / balance, 4) if balance > 0 else None,
                 "max_pct": MAX_POSITION_PERCENT,
-            },
+            }),
             close_ts=close_ts,
         )
         return False, (
@@ -386,11 +395,11 @@ def _check_position_limits(
             else:
                 _log_position_reject(
                     ticker, opp_type, "duplicate",
-                    extra={
+                    extra=_with_decision_context({
                         "existing_count": len(existing),
                         "existing_status": existing[0].get("status") if existing else None,
                         "existing_filled": existing[0].get("filled", 0) if existing else 0,
-                    },
+                    }),
                     close_ts=close_ts,
                 )
                 return False, f"Already hold open position in {ticker} — skipping duplicate entry"
@@ -413,11 +422,11 @@ def _check_position_limits(
             held_team = same_game[0]["ticker"].rsplit("-", 1)[1]
             _log_position_reject(
                 ticker, opp_type, "same_game",
-                extra={
+                extra=_with_decision_context({
                     "game_key": game_key,
                     "held_team": held_team,
                     "held_ticker": same_game[0].get("ticker"),
-                },
+                }),
                 close_ts=close_ts,
             )
             return False, (
@@ -444,10 +453,10 @@ def _check_position_limits(
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
                 _log_position_reject(
                     ticker, opp_type, "cooldown",
-                    extra={
+                    extra=_with_decision_context({
                         "last_trade_age_min": int((_now - exited_at).total_seconds() / 60),
                         "cooldown_min": int(_COOLDOWN.total_seconds() / 60),
-                    },
+                    }),
                     close_ts=close_ts,
                 )
                 return False, f"COOLDOWN: {ticker} exited {int((_now - exited_at).total_seconds() / 60)}m ago — {remaining}m remaining"
@@ -474,10 +483,10 @@ def _check_position_limits(
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
         _log_position_reject(
             ticker, opp_type, "daily_loss",
-            extra={
+            extra=_with_decision_context({
                 "daily_ticker_loss": round(daily_ticker_loss, 2),
                 "limit": _DAILY_TICKER_LOSS_LIMIT,
-            },
+            }),
             close_ts=close_ts,
         )
         return False, f"DAILY_LOSS_LIMIT: {ticker} has lost ${daily_ticker_loss:.2f} today (limit ${_DAILY_TICKER_LOSS_LIMIT:.2f})"
@@ -528,14 +537,14 @@ def _check_position_limits(
         if (bucket_exposure + cost_dollars) > bucket_cap:
             _log_position_reject(
                 ticker, opp_type, "strategy_budget",
-                extra={
+                extra=_with_decision_context({
                     "bucket": bucket,
                     "current_exposure": round(bucket_exposure, 2),
                     "incoming_cost": round(cost_dollars, 2),
                     "cap": round(bucket_cap, 2),
                     "budget_frac": budget_frac,
                     "exposure_pct": round((bucket_exposure + cost_dollars) / bucket_cap, 4) if bucket_cap > 0 else None,
-                },
+                }),
                 close_ts=close_ts,
             )
             return False, (
@@ -550,13 +559,13 @@ def _check_position_limits(
     if (total_exposure + cost_dollars) > equity * MAX_TOTAL_EXPOSURE:
         _log_position_reject(
             ticker, opp_type, "total_exposure",
-            extra={
+            extra=_with_decision_context({
                 "total_exposure": round(total_exposure, 2),
                 "incoming_cost": round(cost_dollars, 2),
                 "cap": round(equity * MAX_TOTAL_EXPOSURE, 2),
                 "exposure_pct": round((total_exposure + cost_dollars) / (equity * MAX_TOTAL_EXPOSURE), 4) if equity > 0 else None,
                 "max_pct": MAX_TOTAL_EXPOSURE,
-            },
+            }),
             close_ts=close_ts,
         )
         return False, (
@@ -938,6 +947,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     pos_ok, pos_msg = _check_position_limits(
         balance, total_cost, ticker, opp_type=opp_type, close_ts=_close_ts,
         contracts=contracts, price_cents=price_cents, side=side,
+        decision_context=opportunity.get("decision_context"),
     )
     checks.append({"name": "position_limits", "passed": pos_ok, "detail": pos_msg})
 

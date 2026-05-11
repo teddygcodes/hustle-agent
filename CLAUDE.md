@@ -302,7 +302,7 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | `order_microstructure.jsonl` | **Per-live-order microstructure log (Apr 25, Session 15).** One row per live Kalshi order at terminal status (filled / canceled / rejected). Schema: `{ts_placed, ts_filled, ts_canceled, requested/filled price+qty, slippage_cents, slippage_source, latency_ms, queue_depth_at_place, partial_fill_count, strategy_name, opp_type, ticker, side, terminal_status, kalshi_order_id, regime}`. Read by `tools/microstructure_report.py`. **Empty until PAPER_MODE=False.** Paper trades do NOT write here — paper write path is unchanged. Daily rotation to `archive/`. |
 | `archive/order_microstructure-YYYY-MM-DD.jsonl.gz` | Daily gzipped microstructure archives. Created by `scheduler._rotate_order_microstructure_log()` at midnight ET (Apr 25, Session 15). |
 | `pending.json` | Queue of opportunities waiting for GO/SKIP. Max `PENDING_MAX = 20`. |
-| `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. |
+| `live_journal.json` | Live watcher journal: scan_found, bet, exit, session_end events. Feeds RECAP. Session 96 adds compact live_momentum no-entry context under `scan_found.extra` forward-only. |
 | `live_ticks.jsonl` | Append-only **enriched** tick log: price, leader, wp, momentum, lead_trend, completion, wp_edge, bid, opp_bid, volatility, espn_scores, game_state. Feeds ANALYZE. |
 | `strategy_audit.json` | **Read this to understand every strategy's real-money status.** Auto-updated by `tracker.py` on every settlement (append to `settlement_log`). |
 | `patterns.json` | Historical win rate per strategy type for dynamic confidence (`scanner.py:_get_dynamic_confidence`). |
@@ -669,6 +669,67 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
 }
 ```
 
+**Session 96 live_momentum decision context (forward-only).** For
+`opp_type=="live_momentum"` decisions, `extra` may include a compact
+allowlisted no-entry/entry context:
+
+```python
+{
+  "sport": str,
+  "ticker": str,
+  "leader_ticker": str,
+  "leader_side": "primary" | "opponent" | "scan",
+  "leader_price": int | float,         # cents
+  "opponent_price": int | float,       # cents
+  "yes_bid": int | float,              # leader market bid, cents
+  "yes_ask": int | float,              # leader market ask, cents
+  "spread_cents": int | float,
+  "volume_24h": int,                   # two-sided sum when both sides available
+  "recent_high": int | float,
+  "dip_cents": int | float,
+  "dqs": float | None,
+  "momentum": float | None,
+  "wp_edge": float | None,
+  "completion": float | None,          # 0.0-1.0 when GameContext exists
+  "score_state": str | None,           # compact score only; no ESPN blob
+  "match_phase": str | None,
+  "time_remaining": float | None,      # 1.0 - completion
+  "game_clock": str | None,
+  "period": int | str | None,
+  "skip_reason": str | None,
+  "entry_gate": str | None,
+  "source": "watcher" | "scan",
+  "context_available": bool,
+  "missing_context_fields": list[str],
+}
+```
+
+Rows only include fields available at that decision point. Missing values are
+omitted and named in `missing_context_fields`. Do not add full market dicts,
+GameContext objects, ESPN payloads, or order blobs to `extra`.
+
+### `bot/state/live_journal.json` live_momentum scan context
+
+`scan_found` events keep their existing top-level schema:
+
+```python
+{
+  "event": "scan_found",
+  "ticker": str,
+  "sport": str | None,
+  "skip_reason": str | None,           # None means watcher spawned
+  "match": str,                        # optional
+  "price": int,                        # optional, cents
+  "volume": int,                       # optional
+  "event_ticker": str,                 # optional
+  "extra": dict,                       # optional Session 96 context shape above
+  "timestamp": str,
+}
+```
+
+Forward-only rule: pre-Session-96 journal rows lack `extra`; readers must
+treat missing context as non-enriched, not malformed.
+
 ### `bot/state/shadow_trades.jsonl` records
 
 Forward-only append-only ledger for blocked/disallowed opportunities. Session 95
@@ -848,17 +909,17 @@ Bundle only when the data path, owner files, and verification story are shared. 
 
 **Do not include yet.** Broad shadow mode for every rejected gate, strategy auto-promotion, or orderbook sizing. Those are larger lifecycle pieces.
 
-### Priority 2: Live momentum no-entry context
+### Priority 2: Live momentum no-entry context — shipped Session 96
 
 **Gap.** We know watch-but-no-enter is high, and `scan_found.skip_reason` exists, but many no-entry decisions still lack enough structured context to decide whether the gate is too strict. We need the "why not" surface to carry the same discipline as accepted trades.
 
-**Manageable session shape.** One live_watcher instrumentation session:
+**Shipped shape.** Session 96 added one live_watcher instrumentation session:
 
-- Add structured fields on live_momentum rejects and scan/no-entry records: `sport`, `leader_ticker`, `leader_price`, `opponent_price`, `spread`, `volume_24h`, `recent_high`, `dip_cents`, `dqs`, `momentum`, `wp_edge`, `completion`, `score_state`, `match_phase`, and `time_remaining` when available.
-- Keep forward-only; do not backfill.
-- Add a compact report slice in `tools/journal_analysis.py` or `tools/cohort_report.py` that shows no-entry reasons by sport and gate with the new fields.
+- Structured context on live_momentum watcher rejects/accepts, executor-side live_momentum position-limit rejects, and scan/no-entry `scan_found.extra` rows.
+- Forward-only only; no backfill.
+- Compact `tools/journal_analysis.py` slice showing no-entry/reject counts by `(sport, reason)`, avg/median leader price / dip / DQS / spread / 24h volume, context coverage, and top missing fields.
 
-**Do not include yet.** New entry logic or threshold changes. This session is data collection only.
+**What did not change.** No entry logic, exit logic, sizing, disabled sports, thresholds, active strategy lists, or vig_stack behavior. This was data collection only.
 
 ### Priority 3: live_momentum fair-value proxy
 

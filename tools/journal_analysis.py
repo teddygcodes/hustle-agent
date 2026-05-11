@@ -31,10 +31,11 @@ Convention notes
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +45,9 @@ from bot.regime import _ticker_to_sport  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 JOURNAL_FILE = ROOT / "bot" / "state" / "live_journal.json"
+STATE_DIR = ROOT / "bot" / "state"
+ARCHIVE_DIR = STATE_DIR / "archive"
+DECISIONS_FILE = STATE_DIR / "decisions.jsonl"
 
 # Findings recorded after running the tool against production data.
 # Each string is one bullet rendered in the Findings section. Empty list
@@ -104,6 +108,37 @@ def load_journal() -> list[dict]:
     if not isinstance(records, list):
         return []
     return [r for r in records if isinstance(r, dict) and r.get("event")]
+
+
+def _iter_jsonl_lines(path: Path, opener):
+    with opener(path, "rt") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
+
+
+def load_decisions() -> list[dict]:
+    """Read current + archived decisions for the no-entry context slice."""
+    records: list[dict] = []
+    sources: list[tuple[Path, callable]] = []
+    if DECISIONS_FILE.exists():
+        sources.append((DECISIONS_FILE, open))
+    if ARCHIVE_DIR.exists():
+        for path in sorted(ARCHIVE_DIR.glob("decisions-*.jsonl.gz")):
+            sources.append((path, gzip.open))
+    for path, opener in sources:
+        try:
+            records.extend(_iter_jsonl_lines(path, opener))
+        except (OSError, EOFError):
+            continue
+    return records
 
 
 def _parse_ts(s):
@@ -396,6 +431,163 @@ def compute_skip_reason_breakdown(records: list[dict]) -> dict[str, dict[str, in
     }
 
 
+_NO_ENTRY_NUMERIC_FIELDS = (
+    "leader_price", "dip_cents", "dqs", "spread_cents", "volume_24h",
+)
+
+
+def _numeric_value(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num:
+        return None
+    return num
+
+
+def _context_from_record(rec: dict) -> dict:
+    extra = rec.get("extra") if isinstance(rec.get("extra"), dict) else {}
+    return extra or {}
+
+
+def _context_sport(rec: dict, context: dict) -> str:
+    return (
+        context.get("sport")
+        or rec.get("sport")
+        or _record_sport(rec)
+        or "unknown_sport"
+    )
+
+
+def compute_live_momentum_no_entry_context(
+    journal_records: list[dict],
+    decision_records: list[dict],
+) -> dict:
+    """Aggregate enriched live_momentum reject/no-entry context."""
+    rows: list[dict] = []
+    for rec in decision_records:
+        if rec.get("opp_type") != "live_momentum" or rec.get("decision") != "reject":
+            continue
+        context = _context_from_record(rec)
+        rows.append({
+            "sport": _context_sport(rec, context),
+            "reason": rec.get("reason") or "unknown",
+            "context": context,
+        })
+    for rec in journal_records:
+        if rec.get("event") != "scan_found":
+            continue
+        reason = rec.get("skip_reason")
+        if reason is None:
+            continue
+        context = _context_from_record(rec)
+        rows.append({
+            "sport": _context_sport(rec, context),
+            "reason": str(reason),
+            "context": context,
+        })
+
+    by_key: dict[tuple[str, str], dict] = defaultdict(lambda: {
+        "count": 0,
+        "enriched": 0,
+        "values": {field: [] for field in _NO_ENTRY_NUMERIC_FIELDS},
+        "missing": Counter(),
+    })
+    total = 0
+    enriched_total = 0
+    missing_total: Counter = Counter()
+    for row in rows:
+        total += 1
+        context = row["context"]
+        enriched = bool(context.get("context_available"))
+        if enriched:
+            enriched_total += 1
+        bucket = by_key[(str(row["sport"]), str(row["reason"]))]
+        bucket["count"] += 1
+        if enriched:
+            bucket["enriched"] += 1
+        for field in _NO_ENTRY_NUMERIC_FIELDS:
+            num = _numeric_value(context.get(field))
+            if num is not None:
+                bucket["values"][field].append(num)
+        missing = context.get("missing_context_fields")
+        if isinstance(missing, list):
+            for field in missing:
+                if isinstance(field, str):
+                    bucket["missing"][field] += 1
+                    missing_total[field] += 1
+
+    return {
+        "total": total,
+        "enriched": enriched_total,
+        "by_key": dict(by_key),
+        "missing": missing_total,
+    }
+
+
+def _fmt_avg_median(values: list[float]) -> str:
+    if not values:
+        return "—"
+    avg = sum(values) / len(values)
+    med = statistics.median(values)
+    return f"{avg:.1f}/{med:.1f}"
+
+
+def _render_live_momentum_no_entry_context_section(agg: dict) -> list[str]:
+    out = [
+        "## Live Momentum No-Entry Context",
+        "",
+        "_Counts existing live_momentum rejects plus scan_found no-entry records. "
+        "Numeric cells are avg/median over enriched rows with that field._",
+        "",
+    ]
+    total = agg.get("total", 0)
+    if not total:
+        out.append("_No live_momentum no-entry/reject records in this dataset._")
+        out.append("")
+        return out
+
+    enriched = agg.get("enriched", 0)
+    coverage = enriched / total * 100 if total else 0.0
+    missing = agg.get("missing") or Counter()
+    top_missing = ", ".join(
+        f"{field} ({count})" for field, count in missing.most_common(5)
+    ) or "none"
+    out.append(
+        f"Context coverage: **{coverage:.1f}%** ({enriched}/{total}); "
+        f"top missing fields: {top_missing}"
+    )
+    out.append("")
+    rows = sorted(
+        (agg.get("by_key") or {}).items(),
+        key=lambda item: (-item[1]["count"], item[0][0], item[0][1]),
+    )
+    if len(rows) > 30:
+        out.append(f"_Showing top 30 of {len(rows)} reason buckets._")
+        out.append("")
+    out.append(
+        "| Sport | Reason | Count | Context % | Leader price | Dip cents | DQS | Spread | Volume 24h |"
+    )
+    out.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    for (sport, reason), bucket in rows[:30]:
+        count = bucket["count"]
+        context_pct = bucket["enriched"] / count * 100 if count else 0.0
+        values = bucket["values"]
+        out.append(
+            f"| {sport} | {reason} | {count} | {context_pct:.0f}% | "
+            f"{_fmt_avg_median(values['leader_price'])} | "
+            f"{_fmt_avg_median(values['dip_cents'])} | "
+            f"{_fmt_avg_median(values['dqs'])} | "
+            f"{_fmt_avg_median(values['spread_cents'])} | "
+            f"{_fmt_avg_median(values['volume_24h'])} |"
+        )
+    out.append("")
+    return out
+
+
 def compute_session_ends(records: list[dict]) -> dict[tuple[str, str], dict]:
     """Per (sport, mode) session_end aggregation: P&L bucket counts,
     median, top-5 best/worst by total_pnl.
@@ -638,7 +830,7 @@ def _render_session_ends_section(by_key: dict[tuple[str, str], dict]) -> list[st
     return out
 
 
-def render_markdown(records: list[dict]) -> str:
+def render_markdown(records: list[dict], decisions: list[dict] | None = None) -> str:
     """Build the Markdown report.
 
     Section order: header → Findings → Time-to-Exit → Exit Reasons →
@@ -663,6 +855,9 @@ def render_markdown(records: list[dict]) -> str:
     out.extend(_render_exit_reasons_section(compute_exit_reasons(records)))
     out.extend(_render_watch_funnel_section(compute_watch_funnel(records)))
     out.extend(_render_skip_reason_section(compute_skip_reason_breakdown(records)))
+    out.extend(_render_live_momentum_no_entry_context_section(
+        compute_live_momentum_no_entry_context(records, decisions or [])
+    ))
     out.extend(_render_session_ends_section(compute_session_ends(records)))
     out.extend(_limitations_section())
     return "\n".join(out)
@@ -671,7 +866,8 @@ def render_markdown(records: list[dict]) -> str:
 def main() -> int:
     argparse.ArgumentParser(description=__doc__.split("\n\n")[0]).parse_args()
     records = load_journal()
-    print(render_markdown(records))
+    decisions = load_decisions()
+    print(render_markdown(records, decisions))
     return 0
 
 
