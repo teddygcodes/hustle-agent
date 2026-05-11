@@ -520,7 +520,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 105 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 106 (2026-05-11).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 
@@ -1035,6 +1035,8 @@ Items where Outcome B was filed but no data accumulates passively.
 - **S90 — Re-entry breaker counterfactual computation.** Shadow rows for `reentry_blocked` carry `sizing_status=unavailable`, making counterfactual P&L uncomputable. Surfaced concretely in S102 (couldn't validate whether the breaker is saving or costing money). **Unblocks:** add sizing computation to `bot/shadow_trades.py` writer for the `reentry_blocked` path so each shadow row has `would_contracts` + `would_notional`. **Why it matters:** without this we can't measure whether S90's threshold (N=1) is correct vs N=2.
 
 - **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **Unblocks:** build a manual labeled Kalshi↔Polymarket pair corpus (~50-100 pairs) by hand-labeling against historical settled markets, OR locate an emerging public dataset. **Why it matters:** without a validation corpus, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
+
+- **S106 — `post_event_reversion` discovery heuristic.** Substrate genuinely can't support 24-72h reversion detection yet: live_ticks.jsonl has 471K rows but **0 resolved tickers carry ≥24h post-resolution coverage** (ticks stop at game end). Universe snapshots are the right source but archive is only ~16 days deep, scan cadence p90 is 135.9m (too coarse for short event detection), and snapshots carry no settlement keys. Source: [`docs/superpowers/specs/2026-05-11-post-event-reversion-design.md`](docs/superpowers/specs/2026-05-11-post-event-reversion-design.md). **Unblocks (any of):** (a) increase universe snapshot scan cadence on non-live markets to enable short-event detection, (b) extend post-resolution tick/snapshot retention so the +24h window is observable, (c) accumulate ≥30 days of universe history naturally — partial auto-resolve via time. **Why it matters:** mean reversion is the only fundamentally different STRATEGY CLASS we've identified vs current vig_stack + live_momentum (both structural-arb shapes); shipping it would diversify our edge type.
 
 ### Operational hygiene not yet shipped
 
