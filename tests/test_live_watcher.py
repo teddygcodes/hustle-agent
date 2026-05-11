@@ -468,6 +468,80 @@ def test_log_decision_dampened_reentry_blocked_shadow_and_dedupe(tmp_path, monke
 
 
 # ---------------------------------------------------------------------------
+# Session 97: per-sport disable set membership + shadow-write coverage
+# ---------------------------------------------------------------------------
+
+def test_session_97_disable_set_membership():
+    """Session 97 added atp + nba_game to MOMENTUM_DISABLED_SPORTS based on
+    breakeven-WR analysis (atp -27.2pp / nba_game -16.9pp gaps post-Session-54).
+    Locks both the additions and the sports deliberately left enabled (ufc
+    at n=11 borderline → watch-list; nhl_game / ipl profitable) so a future
+    edit cannot silently drift the set in either direction."""
+    from bot.config import MOMENTUM_DISABLED_SPORTS
+    # Session 97 additions
+    assert "atp" in MOMENTUM_DISABLED_SPORTS
+    assert "nba_game" in MOMENTUM_DISABLED_SPORTS
+    # Carried from Sessions 2 / 38a-2
+    assert "atp_challenger" in MOMENTUM_DISABLED_SPORTS
+    assert "wta" in MOMENTUM_DISABLED_SPORTS
+    assert "wta_challenger" in MOMENTUM_DISABLED_SPORTS
+    # Deliberately enabled — bundling these would reverse Session 97's discipline
+    for enabled in ("ufc", "nhl_game", "ipl"):
+        assert enabled not in MOMENTUM_DISABLED_SPORTS, (
+            f"{enabled!r} should not be in MOMENTUM_DISABLED_SPORTS — Session 97 "
+            f"deliberately left it enabled (ufc=watch-list, nhl_game/ipl=profitable)"
+        )
+
+
+@pytest.mark.parametrize("sport,ticker", [
+    ("atp", "KXATPMATCH-26MAY11ALCJOK-ALC"),
+    ("atp_challenger", "KXATPCHALLENGERMATCH-26MAY11SMIWAS-SMI"),
+    ("nba_game", "KXNBAGAME-26MAY11LALBOS-BOS"),
+    ("wta", "KXWTAMATCH-26MAY11SWIGAU-SWI"),
+    ("wta_challenger", "KXWTACHALLENGERMATCH-26MAY11ZANYAS-ZAN"),
+])
+def test_each_disabled_sport_writes_shadow_row(sport, ticker, tmp_path, monkeypatch):
+    """Session 97 regression: every sport in MOMENTUM_DISABLED_SPORTS must
+    emit a shadow_trades row when the live_watcher entry path rejects with
+    reason=sport_disabled. Without this, the 14d validation window for
+    Session 97's atp + nba_game disables collects no counterfactual evidence.
+    Mirrors test_log_decision_dampened_sport_disabled_writes_shadow but
+    parametrized across all disabled sports."""
+    import json
+    from bot import decisions
+    import bot.shadow_trades as shadow
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = ticker
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject",
+        reason="sport_disabled",
+        gates={"can_enter": False, "sport_enabled": False},
+        edge=None,
+        extra={"sport": sport, "kalshi_price": 75, "losses_seen": 0},
+        close_ts="2026-05-25T03:00:00Z",
+    )
+
+    rec = json.loads(shadow_f.read_text().splitlines()[0])
+    assert rec["blocked_reason"] == "sport_disabled"
+    assert rec["source"] == "live_watcher"
+    assert rec["sport"] == sport
+    assert rec["ticker"] == ticker
+    assert rec["would_entry_price"] == 0.75
+    assert rec["sizing_status"] == "unavailable"
+
+
+# ---------------------------------------------------------------------------
 # Session 15.5: close_ts threaded through dampener for regime tagging
 # ---------------------------------------------------------------------------
 

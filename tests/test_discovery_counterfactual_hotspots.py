@@ -34,31 +34,31 @@ def _cf(ticker, gate, clv_cents, market_result="yes", days_ago=1):
 
 
 def test_counterfactual_hotspots_positive():
-    """10 CFs, mean=10¢, 80% +CLV, n_no_won=4 → fires notable."""
+    """10 CFs, mean=10¢, 80% +CLV, n_no_won=4 → fires notable.
+
+    Fixture uses KXNHLGAME (nhl_game — non-disabled per Session 97) so the
+    disabled-sport demotion rule does not fire. Contract under test is the
+    severity threshold for the CF distribution, not the disabled-set logic."""
     rows = []
-    # 8 wins (+15¢ each, market_result=yes)
-    rows += [_cf(f"KXATPMATCH-T{i}", "no_leader", 15, market_result="yes")
-             for i in range(8)]
-    # 2 wins (+5¢ each) — wait we need more variety. Let me restructure
-    rows = []
-    rows += [_cf(f"KXATPMATCH-T{i}", "no_leader", 15, market_result="yes") for i in range(6)]
+    rows += [_cf(f"KXNHLGAME-T{i}", "no_leader", 15, market_result="yes") for i in range(6)]
     # 4 leader-loss settlements (n_no_won=4 — passes the >=3 floor)
-    rows += [_cf(f"KXATPMATCH-N{i}", "no_leader", 5, market_result="no") for i in range(4)]
+    rows += [_cf(f"KXNHLGAME-N{i}", "no_leader", 5, market_result="no") for i in range(4)]
     # mean = (6*15 + 4*5)/10 = 110/10 = 11.0¢; +CLV rate = 10/10 = 100%
     findings = CounterfactualHotspots().run(_ctx(clv=rows))
     assert len(findings) == 1
     f = findings[0]
     assert f.severity == "notable"
     assert f.evidence["skip_reason"] == "no_leader"
-    assert f.evidence["sport"] == "atp"
+    assert f.evidence["sport"] == "nhl_game"
     assert f.evidence["count"] == 10
     assert f.evidence["n_no_won"] == 4
 
 
 def test_counterfactual_hotspots_high_severity_at_15c_mean():
-    """Mean CLV >= 15¢ → severity 'high'."""
-    rows = [_cf(f"KXATPMATCH-T{i}", "no_leader", 20, market_result="yes") for i in range(7)]
-    rows += [_cf(f"KXATPMATCH-N{i}", "no_leader", 15, market_result="no") for i in range(3)]
+    """Mean CLV >= 15¢ → severity 'high'. Uses non-disabled sport to isolate
+    the severity threshold contract from disabled-sport demotion."""
+    rows = [_cf(f"KXNHLGAME-T{i}", "no_leader", 20, market_result="yes") for i in range(7)]
+    rows += [_cf(f"KXNHLGAME-N{i}", "no_leader", 15, market_result="no") for i in range(3)]
     findings = CounterfactualHotspots().run(_ctx(clv=rows))
     assert findings[0].severity == "high"
 
@@ -159,16 +159,20 @@ def _build_cohort(prefix: str, gate: str, mean_clv: float, n_no: int, n_yes: int
 
 
 def test_cross_cohort_context_present():
-    """Multi-sport gate fires; new evidence keys populated with correct values."""
+    """Multi-sport gate fires; new evidence keys populated with correct values.
+
+    Fixture uses nhl_game + ipl — both non-disabled per Session 97 — so this
+    test continues to assert the cross-cohort context contract on enabled
+    sports (n_disabled_sport_cohorts_in_top3 stays 0)."""
     rows = []
-    # atp cohort firing (NOT in MOMENTUM_DISABLED_SPORTS): mean +10¢, +CLV=100% uniform.
-    rows += _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
-    # nba_game cohort: mean +5¢ (won't fire — n=8 < MIN_CF_COUNT, but contributes to context).
-    rows += _build_cohort("KXNBAGAME", "no_leader", 5.0, n_no=2, n_yes=6)
+    # nhl_game cohort firing (NOT in MOMENTUM_DISABLED_SPORTS): mean +10¢, +CLV=100% uniform.
+    rows += _build_cohort("KXNHLGAME", "no_leader", 10.0, n_no=3, n_yes=7)
+    # ipl cohort: mean +5¢ (won't fire — n=8 < MIN_CF_COUNT, but contributes to context).
+    rows += _build_cohort("KXIPLGAME", "no_leader", 5.0, n_no=2, n_yes=6)
     findings = CounterfactualHotspots().run(_ctx(clv=rows))
-    assert len(findings) == 1  # only atp cohort clears entry bar
+    assert len(findings) == 1  # only nhl_game cohort clears entry bar
     ev = findings[0].evidence
-    # cross-cohort total = atp(10) + nba_game(8) = 18
+    # cross-cohort total = nhl_game(10) + ipl(8) = 18
     assert ev["cross_cohort_total_n"] == 18
     assert ev["cross_cohort_n_sports"] == 2
     # raw cross-cohort mean = (10*10 + 8*5)/18 = 140/18 ≈ 7.78
@@ -176,8 +180,8 @@ def test_cross_cohort_context_present():
     assert ev["cross_cohort_n_positive_sports"] == 2
     assert ev["cross_cohort_n_negative_sports"] == 0
     breakdown = ev["cross_cohort_breakdown"]
-    assert ("atp", 10, 10.0) in breakdown
-    assert ("nba_game", 8, 5.0) in breakdown
+    assert ("nhl_game", 10, 10.0) in breakdown
+    assert ("ipl", 8, 5.0) in breakdown
     assert ev["n_disabled_sport_cohorts_in_top3"] == 0
     assert ev["this_cohort_is_disabled_sport"] is False
 
@@ -223,8 +227,9 @@ def test_severity_demotion_disabled_sport():
 
 def test_severity_NOT_demoted_when_cross_cohort_aligned():
     """Per-cohort AND cross-cohort positive AND sport NOT disabled → stays at notable."""
-    # atp cohort, mean +10¢ uniform: notable base, no demotion conditions fire.
-    rows = _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    # nhl_game cohort, mean +10¢ uniform: notable base, no demotion conditions fire.
+    # nhl_game is non-disabled per Session 97 (was previously: atp, now disabled).
+    rows = _build_cohort("KXNHLGAME", "no_leader", 10.0, n_no=3, n_yes=7)
     findings = CounterfactualHotspots().run(_ctx(clv=rows))
     assert len(findings) == 1
     f = findings[0]
@@ -268,7 +273,11 @@ def test_session_46_replay():
 
     Reproduces the n=98 cross-cohort distribution from CLAUDE.md Session 46 entry.
     Per-cohort wta (+5.26¢ at n=19) just clears entry bar; cross-cohort raw mean
-    ≈ -1.34¢ + wta ∈ disabled set + 2 of top-3 sports disabled → info.
+    ≈ -1.34¢ + wta ∈ disabled set + all-3-of-top-3 sports disabled → info.
+
+    Note: Session 97 added atp to MOMENTUM_DISABLED_SPORTS, so this replay now
+    reads 3/3 disabled in top-3 (vs Session 46's 2/3). The demotion path is the
+    same (notable → info); only the disabled-count evidence field changed.
     """
     rows = []
     rows += _build_cohort("KXATPCHALLENGERMATCH", "no_vol_growth_idle", 9.17, n_no=4, n_yes=20)
@@ -284,14 +293,14 @@ def test_session_46_replay():
     assert f.evidence["cross_cohort_mean_clv_cents"] < 0
     assert f.evidence["this_cohort_is_disabled_sport"] is True
     # Top-3 by per-cohort mean: atp_challenger (+9.17), wta (+5.26), atp (+4.05).
-    # 2 of those 3 (atp_challenger + wta) are in MOMENTUM_DISABLED_SPORTS.
-    assert f.evidence["n_disabled_sport_cohorts_in_top3"] == 2
+    # All 3 are in MOMENTUM_DISABLED_SPORTS post-Session-97 (atp added).
+    assert f.evidence["n_disabled_sport_cohorts_in_top3"] == 3
 
 
 def test_single_sport_degenerate():
     """Gate fires on only one sport (non-disabled) → cross-cohort = per-cohort, no demotion."""
-    # atp cohort only, mean +10¢: clears entry bar, no contradiction, atp not disabled.
-    rows = _build_cohort("KXATPMATCH", "no_leader", 10.0, n_no=3, n_yes=7)
+    # nhl_game cohort only, mean +10¢: clears entry bar, no contradiction, nhl_game not disabled.
+    rows = _build_cohort("KXNHLGAME", "no_leader", 10.0, n_no=3, n_yes=7)
     findings = CounterfactualHotspots().run(_ctx(clv=rows))
     assert len(findings) == 1
     f = findings[0]

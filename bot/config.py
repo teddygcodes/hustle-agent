@@ -213,10 +213,30 @@ MOMENTUM_SCALE_LARGE_DIP = 1.5   # 1.5x on big dips — DATA: 9-12c dips = 65% w
 # at n=62 / mean CLV -1.02c / 69% +CLV (slightly negative), wta_challenger
 # at n=61 / mean CLV -14.31c / 61% +CLV (strongly negative).
 #
+# May 11 — Session 97 applied the Session 93 breakeven-WR framework to
+# live_momentum sport cohorts. Per-sport analysis on 96+ settled trades
+# (Apr 15 – May 10) flagged two cohorts decisively below breakeven on
+# BOTH lifetime AND post-Session-54 data:
+#   atp (re-added):  n=22 lifetime, WR 40.9% vs BE 68.2% (-27.2pp gap),
+#                    P&L -$45.60. Avg win $2.42 vs avg loss $5.18 — W:L
+#                    magnitude 0.47, structural leak (mathematical, not
+#                    sizing-dependent). Post-Session-54: WR 25% vs BE 73.9%.
+#                    Reverses Session 38a's CF-based re-enable: 22 real
+#                    post-re-enable trades superseded the +11.32¢ CF
+#                    projection. Failure mode that shadow ledger (S95)
+#                    was built to surface; new sport_disabled shadow rows
+#                    will validate or refute this disable over 14d.
+#   nba_game (new):  n=26 lifetime, WR 53.8% vs BE 70.7% (-16.9pp gap),
+#                    P&L -$44.97. Avg win $2.99 vs avg loss $7.24.
+#                    Post-Session-54: WR 25% vs BE 78.6%.
+# UFC held off (n=11 at threshold, gap -23.9pp but post-fix data thin) —
+# watch-list trigger at N>=15. PROFITABLE cohorts left untouched:
+# ipl +$68.16 (n=11, +31.1pp), nhl_game +$11.60 (n=12, +8.9pp).
+#
 # Gate blocks NEW entries only; already-open positions exit normally via the
 # TP / SL / trailing-stop logic in live_watcher._check_exit, which does not
 # consult this set (verified). See live_watcher.py `_tick_momentum` can_enter.
-MOMENTUM_DISABLED_SPORTS = {"atp_challenger", "wta", "wta_challenger"}
+MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "nba_game", "wta", "wta_challenger"}
 
 # ---------------------------------------------------------------------------
 # Sport Instincts — situational awareness thresholds
