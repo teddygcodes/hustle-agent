@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import ast
 import calendar
+import gzip
 import csv
 import json
 import os
 import re
 import sys
 from collections import Counter, defaultdict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
@@ -310,6 +312,7 @@ def load_config_surface(paths: Paths) -> dict:
         "paper_starting_balance": 10500.0,
         "vig_stack_default_cap": 200.0,
         "vig_stack_family_caps": {},
+        "vig_stack_disabled_families": set(),
     }
     try:
         text = paths.config_py.read_text()
@@ -334,6 +337,18 @@ def load_config_surface(paths: Paths) -> dict:
                 surface["vig_stack_family_caps"] = {
                     str(k): float(v) for k, v in caps.items()
                 }
+        except (ValueError, SyntaxError):
+            pass
+    m = re.search(
+        r"^VIG_STACK_DISABLED_FAMILIES\s*:\s*set\[str\]\s*=\s*(\{.*?\})",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    if m:
+        try:
+            disabled = ast.literal_eval(m.group(1))
+            if isinstance(disabled, (set, list, tuple)):
+                surface["vig_stack_disabled_families"] = {str(v) for v in disabled}
         except (ValueError, SyntaxError):
             pass
     return surface
@@ -1430,6 +1445,157 @@ def _load_active_observations(paths: Paths) -> list:
     return data if isinstance(data, list) else []
 
 
+def _iter_decisions_with_archives(
+    paths: Paths,
+    since_utc: datetime,
+    until_utc: datetime,
+) -> Iterable[dict]:
+    archive_dir = paths.state_dir / "archive"
+    if archive_dir.exists():
+        for path in sorted(archive_dir.glob("decisions-*.jsonl.gz")):
+            try:
+                fh = gzip.open(path, "rt")
+            except OSError:
+                continue
+            with fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    if not isinstance(rec, dict):
+                        continue
+                    ts = _parse_iso(rec.get("ts"))
+                    if ts is not None and since_utc <= ts < until_utc:
+                        yield rec
+    yield from helpers.iter_jsonl_tolerant(
+        paths.decisions_file,
+        since_utc=since_utc,
+        until_utc=until_utc,
+    )
+
+
+def _count_reject_reason(decisions: Iterable[dict], reason: str) -> int:
+    return sum(
+        1
+        for d in decisions
+        if d.get("decision") == "reject" and d.get("reason") == reason
+    )
+
+
+def _reentry_sport_distribution(decisions: Iterable[dict]) -> str:
+    counts: Counter[str] = Counter()
+    for d in decisions:
+        if d.get("decision") != "reject" or d.get("reason") != "reentry_blocked":
+            continue
+        extra = d.get("extra") if isinstance(d.get("extra"), dict) else {}
+        sport = extra.get("sport") or "unknown"
+        counts[str(sport)] += 1
+    n = sum(counts.values())
+    if n == 0:
+        return "n=0"
+    parts = ", ".join(
+        f"{sport}={count}"
+        for sport, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    )
+    return f"n={n}: {parts}"
+
+
+def _is_vig_stack_record(record: dict) -> bool:
+    typ = str(record.get("type") or record.get("opp_type") or "")
+    return typ == "vig_stack" or typ.startswith("vig_stack")
+
+
+def _record_opened_at(record: dict) -> datetime | None:
+    for key in ("timestamp", "opened_at", "entry_at", "ts"):
+        dt = _parse_iso(record.get(key))
+        if dt is not None:
+            return dt
+    return None
+
+
+def _new_over_cap_positions(metrics: dict, shipped: datetime) -> int:
+    family_caps = metrics["config"]["vig_stack_family_caps"]
+    default_cap = float(metrics["config"]["vig_stack_default_cap"])
+    total = 0
+    for pos in metrics.get("positions", []):
+        if not isinstance(pos, dict) or not _is_vig_stack_record(pos):
+            continue
+        if pos.get("status") not in {"filled", "partial", "open"}:
+            continue
+        opened = _record_opened_at(pos)
+        if opened is None or opened < shipped:
+            continue
+        family = _family_from_ticker(pos.get("ticker"))
+        cap = float(family_caps.get(family, default_cap))
+        cost = float(pos.get("cost") or 0.0)
+        if cost > cap + 0.01:
+            total += 1
+    return total
+
+
+def _new_disabled_family_entries(metrics: dict, shipped: datetime) -> int:
+    disabled = set(metrics["config"].get("vig_stack_disabled_families") or set())
+    if not disabled:
+        disabled = {"KXHIGHCHI", "KXINX"}
+    seen: set[tuple[str, str]] = set()
+    for source_name, records in (
+        ("paper", metrics.get("paper_trades", [])),
+        ("positions", metrics.get("positions", [])),
+    ):
+        for rec in records:
+            if not isinstance(rec, dict) or not _is_vig_stack_record(rec):
+                continue
+            opened = _record_opened_at(rec)
+            if opened is None or opened < shipped:
+                continue
+            ticker = str(rec.get("ticker") or "")
+            if _family_from_ticker(ticker) not in disabled:
+                continue
+            key = (ticker, str(rec.get("id") or rec.get("order_id") or source_name))
+            seen.add(key)
+    return len(seen)
+
+
+def compute_active_observations(
+    observations: list,
+    paths: Paths,
+    metrics: dict,
+    now: datetime,
+) -> list:
+    computed = deepcopy(observations)
+    for obs in computed:
+        if not isinstance(obs, dict):
+            continue
+        shipped = _parse_iso(obs.get("shipped_at"))
+        if shipped is None:
+            continue
+        decisions = list(_iter_decisions_with_archives(paths, shipped, now))
+        for m in obs.get("metrics", []) or []:
+            if not isinstance(m, dict):
+                continue
+            name = m.get("name")
+            if name == "reentry_blocked rejects in decisions.jsonl":
+                m["current_value"] = _count_reject_reason(decisions, "reentry_blocked")
+                m["computed_from"] = "decisions.jsonl"
+            elif name == "per-sport distribution of reentry_blocked rejects":
+                m["current_value"] = _reentry_sport_distribution(decisions)
+                m["computed_from"] = "decisions.jsonl"
+            elif name == "new position_over_family_cap flags after this ship":
+                m["current_value"] = _new_over_cap_positions(metrics, shipped)
+                m["computed_from"] = "positions.json"
+            elif name == "cap_exceeded_reject rejects in decisions.jsonl":
+                m["current_value"] = _count_reject_reason(decisions, "cap_exceeded_reject")
+                m["computed_from"] = "decisions.jsonl"
+            elif name == "family_disabled_reject events in decisions.jsonl":
+                m["current_value"] = _count_reject_reason(decisions, "family_disabled_reject")
+                m["computed_from"] = "decisions.jsonl"
+            elif name == "new vig_stack positions opened on KXHIGHCHI or KXINX after ship":
+                m["current_value"] = _new_disabled_family_entries(metrics, shipped)
+                m["computed_from"] = "paper_trades.json + positions.json"
+    return computed
+
+
 def render_active_observations(observations: list, now: datetime) -> str:
     out = ["## 10. Active Observations", ""]
     if not observations:
@@ -1518,7 +1684,12 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     calendar_entries = next_calendar_entries(paths, now_utc)
 
     lock_pid = _load_bot_lock_pid(paths)
-    observations = _load_active_observations(paths)
+    observations = compute_active_observations(
+        _load_active_observations(paths),
+        paths,
+        metrics,
+        now_utc,
+    )
     sections = [
         render_verdict(
             metrics,

@@ -28,20 +28,30 @@ def tmp_state(tmp_path, monkeypatch):
     positions_file = tmp_path / "positions.json"
     history_file = tmp_path / "trade_history.json"
     paper_trades_file = tmp_path / "paper_trades.json"
+    shadow_trades_file = tmp_path / "shadow_trades.jsonl"
     positions_file.write_text("[]")
     history_file.write_text("[]")
     paper_trades_file.write_text("[]")
 
     # Import after setting up paths so module-level constants are patchable
     import bot.executor as exc
+    import bot.shadow_trades as shadow
 
     # Patch the names as they exist in the executor module's namespace
     monkeypatch.setattr(exc, "POSITIONS_FILE", positions_file)
     monkeypatch.setattr(exc, "TRADE_HISTORY_FILE", history_file)
     monkeypatch.setattr(exc, "PAPER_TRADES_FILE", paper_trades_file)
     monkeypatch.setattr(exc, "PAPER_MODE", True)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_trades_file)
 
-    return {"positions": positions_file, "history": history_file, "paper_trades": paper_trades_file, "tmp": tmp_path}
+    return {
+        "positions": positions_file,
+        "history": history_file,
+        "paper_trades": paper_trades_file,
+        "shadow_trades": shadow_trades_file,
+        "tmp": tmp_path,
+    }
 
 
 def _make_opp(opp_type="weather", side="yes", price_cents=45, fair_value=0.55,
@@ -501,6 +511,18 @@ class TestSession93FamilyDisableExecutor:
         assert "KXHIGHCHI" in kwargs["extra"]["disabled_set"]
         assert "KXINX" in kwargs["extra"]["disabled_set"]
         assert kwargs["extra"]["close_ts"] == "2026-05-13T01:10:00Z"
+
+        shadow_rows = tmp_state["shadow_trades"].read_text().splitlines()
+        assert len(shadow_rows) == 1
+        shadow = json.loads(shadow_rows[0])
+        assert shadow["blocked_reason"] == "family_disabled_reject"
+        assert shadow["source"] == "executor"
+        assert shadow["would_side"] == "no"
+        assert shadow["would_entry_price"] == 0.44
+        assert shadow["would_contracts"] == 10
+        assert shadow["would_notional"] == 4.4
+        assert shadow["sizing_status"] == "available"
+        assert shadow["family"] == family
 
     def test_kxhighaus_vig_stack_passes_family_disabled_gate(self, tmp_state):
         """Session 93 control: KXHIGHAUS NOT disabled — disable gate must pass."""

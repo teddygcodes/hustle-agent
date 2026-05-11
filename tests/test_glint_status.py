@@ -803,3 +803,149 @@ def test_load_active_observations_returns_empty_when_missing(tmp_path: Path):
     paths = glint.paths_for(tmp_path)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
     assert glint._load_active_observations(paths) == []
+
+
+def _write_json(path: Path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def test_compute_active_observations_overrides_stale_manual_values(tmp_path: Path):
+    import gzip
+
+    paths = glint.paths_for(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(paths.paper_trades_file, [])
+    _write_json(paths.positions_file, [])
+    _write_json(paths.bot_state_file, {})
+    paths.config_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_py.write_text(
+        "PAPER_STARTING_BALANCE = 10500\n"
+        "VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS = 200\n"
+        "VIG_STACK_FAMILY_MAX_POSITION_DOLLARS = {'KXMLBGAME': 50}\n"
+        "VIG_STACK_DISABLED_FAMILIES: set[str] = {'KXHIGHCHI', 'KXINX'}\n"
+    )
+    current_rows = [
+        {
+            "ts": "2026-05-10T16:20:45+00:00",
+            "ticker": "KXIPLGAME-26MAY10MIRCB-RCB",
+            "opp_type": "live_momentum",
+            "decision": "reject",
+            "reason": "reentry_blocked",
+            "extra": {"sport": "ipl"},
+        },
+        {
+            "ts": "2026-05-10T19:01:10+00:00",
+            "ticker": "KXHIGHCHI-26MAY10-B65.5",
+            "opp_type": "vig_stack_series",
+            "decision": "reject",
+            "reason": "family_disabled_reject",
+            "extra": {"family": "KXHIGHCHI"},
+        },
+        {
+            "ts": "2026-05-10T20:01:10+00:00",
+            "ticker": "KXMLBGAME-26MAY10A-B",
+            "opp_type": "vig_stack_futures",
+            "decision": "reject",
+            "reason": "cap_exceeded_reject",
+            "extra": {"family": "KXMLBGAME"},
+        },
+    ]
+    paths.decisions_file.write_text("\n".join(json.dumps(r) for r in current_rows) + "\n")
+    archive = paths.state_dir / "archive" / "decisions-2026-05-10.jsonl.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive, "wt") as f:
+        f.write(json.dumps({
+            "ts": "2026-05-10T19:57:06+00:00",
+            "ticker": "KXATPMATCH-26MAY10ARNJOD-JOD",
+            "opp_type": "live_momentum",
+            "decision": "reject",
+            "reason": "reentry_blocked",
+            "extra": {"sport": "atp"},
+        }) + "\n")
+
+    metrics = glint.collect_metrics(paths, datetime(2026, 5, 11, tzinfo=timezone.utc))
+    obs = [{
+        "session": 90,
+        "shipped_at": "2026-05-09T00:00:00+00:00",
+        "metrics": [
+            {"name": "reentry_blocked rejects in decisions.jsonl", "current_value": 0},
+            {"name": "per-sport distribution of reentry_blocked rejects", "current_value": "stale"},
+            {"name": "manual metric stays manual", "current_value": "manual"},
+        ],
+    }, {
+        "session": 92,
+        "shipped_at": "2026-05-10T03:00:00+00:00",
+        "metrics": [{"name": "cap_exceeded_reject rejects in decisions.jsonl", "current_value": 0}],
+    }, {
+        "session": 93,
+        "shipped_at": "2026-05-10T12:00:00+00:00",
+        "metrics": [{"name": "family_disabled_reject events in decisions.jsonl", "current_value": 0}],
+    }]
+
+    computed = glint.compute_active_observations(
+        obs,
+        paths,
+        metrics,
+        datetime(2026, 5, 11, tzinfo=timezone.utc),
+    )
+    by_name = {
+        m["name"]: m["current_value"]
+        for o in computed
+        for m in o["metrics"]
+    }
+
+    assert by_name["reentry_blocked rejects in decisions.jsonl"] == 2
+    assert by_name["per-sport distribution of reentry_blocked rejects"] == "n=2: atp=1, ipl=1"
+    assert by_name["cap_exceeded_reject rejects in decisions.jsonl"] == 1
+    assert by_name["family_disabled_reject events in decisions.jsonl"] == 1
+    assert by_name["manual metric stays manual"] == "manual"
+
+
+def test_compute_active_observations_counts_disabled_family_entries(tmp_path: Path):
+    paths = glint.paths_for(tmp_path)
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(paths.bot_state_file, {})
+    paths.decisions_file.write_text("")
+    paths.config_py.parent.mkdir(parents=True, exist_ok=True)
+    paths.config_py.write_text(
+        "PAPER_STARTING_BALANCE = 10500\n"
+        "VIG_STACK_DEFAULT_MAX_POSITION_DOLLARS = 200\n"
+        "VIG_STACK_FAMILY_MAX_POSITION_DOLLARS = {}\n"
+        "VIG_STACK_DISABLED_FAMILIES: set[str] = {'KXHIGHCHI', 'KXINX'}\n"
+    )
+    _write_json(paths.paper_trades_file, [
+        {
+            "id": "PAPER-BAD",
+            "ticker": "KXHIGHCHI-26MAY10-B65.5",
+            "type": "vig_stack",
+            "timestamp": "2026-05-10T13:00:00+00:00",
+            "status": "open",
+        },
+        {
+            "id": "PAPER-OLD",
+            "ticker": "KXINX-26MAY10H1600-B5400.5",
+            "type": "vig_stack",
+            "timestamp": "2026-05-10T11:00:00+00:00",
+            "status": "open",
+        },
+    ])
+    _write_json(paths.positions_file, [])
+    metrics = glint.collect_metrics(paths, datetime(2026, 5, 11, tzinfo=timezone.utc))
+    obs = [{
+        "session": 93,
+        "shipped_at": "2026-05-10T12:00:00+00:00",
+        "metrics": [{
+            "name": "new vig_stack positions opened on KXHIGHCHI or KXINX after ship",
+            "current_value": 0,
+        }],
+    }]
+
+    computed = glint.compute_active_observations(
+        obs,
+        paths,
+        metrics,
+        datetime(2026, 5, 11, tzinfo=timezone.utc),
+    )
+
+    assert computed[0]["metrics"][0]["current_value"] == 1

@@ -5069,3 +5069,49 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 **Next session prompt.** First coder session should be: "Session 95 - blocked-trade shadow ledger + active observation auto-compute." It should start from the Canonical Data Schema Reference, implement the narrow blocked-gate shadow path, compute §10 active observation values from decisions/shadow evidence, add tests, and avoid broad shadow mode.
 
 **README sync.** Add a Session 94 recap one-liner noting this is a planner doc-only backlog, not production code, and naming Session 95 as the first recommended implementation slice.
+
+---
+
+### ☑ Session 95 — Blocked-trade shadow ledger + active observation auto-compute (May 10, data-substrate code+tests ship)
+
+**Trigger.** Session 94 identified the first substrate gap: recent protective gates (`reentry_blocked`, `family_disabled_reject`, disabled sports) were already firing in `decisions.jsonl`, but §10 Active Observations still showed stale manual zeroes. Session 93 also needed a durable forward-only way to answer whether disabled KXHIGHCHI/KXINX opportunities would have recovered without changing strategy or placing new trades.
+
+**Implementation.**
+- Added `bot/shadow_trades.py`, an append-only JSONL writer for `bot/state/shadow_trades.jsonl`. It only accepts `family_disabled_reject`, `sport_disabled`, and `reentry_blocked`; all other rejects are ignored by construction.
+- Wired executor `family_disabled_reject` to write a shadow row with available sizing (`would_side`, decimal `would_entry_price`, `would_contracts`, `would_notional`, `family`, `close_ts`, `extra`, `regime`) before returning the existing reject. No execution branch changes.
+- Wired `LiveGameWatcher._log_decision_dampened` to write shadow rows for `sport_disabled` and `reentry_blocked` transitions only. Live-watcher rows use `would_side="yes"`, known Kalshi price when present, nullable contracts/notional, and `sizing_status="unavailable"`.
+- Extended `tools/glint_status.py` with `compute_active_observations(...)`: the JSON registry remains manual, but render-time values now override stale `current_value` for known machine-readable metrics from current + archived decisions, `positions.json`, and `paper_trades.json`.
+- Computed §10 metrics now cover Session 90 `reentry_blocked` count + sport distribution, Session 92 cap reject / new over-cap position checks, and Session 93 `family_disabled_reject` count + disabled-family entry scan. Manual-only metrics remain manual.
+
+**Verification-discovered evidence.**
+- First post-change `tools/glint_status.py` showed §10 nonzero live counts: `reentry_blocked=4`, `family_disabled_reject=5`.
+- The new Session 93 disabled-family entry scan surfaced **1 real post-ship KXHIGHCHI vig_stack entry**: `PAPER-8DC88902` / `KXHIGHCHI-26MAY10-T66`, opened `2026-05-10T16:24:20Z`. This is consistent with Session 93's restart still being pending; it is not a Session 95 strategy behavior change. The bot was restarted this session so the hot process now has the disable + shadow code loaded.
+- `bot/state/shadow_trades.jsonl` does not exist yet after restart, expected because this ship is forward-only and no post-restart blocked event has hit the new writer yet.
+
+**Tests.**
+- Added `tests/test_shadow_trades.py`: executor-style available sizing row and live-watcher unavailable sizing row.
+- Extended executor tests so disabled-family rejects still write no paper trade and now write exactly one executor shadow row.
+- Extended live-watcher tests for `sport_disabled`, `reentry_blocked`, and dampener dedupe preventing duplicate shadow rows.
+- Extended glint-status tests proving computed values override stale manual values, include archived decisions, count disabled-family entries, and leave manual-only metrics unchanged.
+
+**Verification.**
+- ☑ Targeted suite: `python3 -m pytest tests/test_shadow_trades.py tests/test_bot_executor.py tests/test_live_watcher.py tests/test_glint_status.py -v --tb=short` → **148 passed**.
+- ☑ Full pytest: `python3 -m pytest tests/ -v --tb=short` → **1567 passed** (Session 93 baseline 1561 + 6 net tests).
+- ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
+- ☑ `python3 tools/glint_status.py` pre-restart rendered §10 computed values correctly.
+- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: launchd wrapper PID `8217`, bot.lock child PID `8252`, `lsof -p 8252` cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- ☑ Restart left old child PID `79311` orphaned under launchd; confirmed cwd was the same Glint repo, killed only that orphan, and verified `lsof -p 79311` no longer returns open files.
+- ☑ Post-restart `python3 tools/glint_status.py`: bot PID `8252`, uptime 1m, heartbeat 22s, last scan 59s ago, §10 still reports `reentry_blocked=4`, `family_disabled_reject=5`, disabled-family post-ship entries `1`.
+
+**What did NOT change.**
+- No thresholds, caps, disabled-family sets, disabled sports, sizing math, entry logic, or exit logic.
+- No backfill of historical shadow rows.
+- No scheduler rotation for `shadow_trades.jsonl` yet; keep v1 current-file-only until volume justifies rotation.
+- No broad shadow mode for arbitrary rejected gates.
+- No `agent/engine.py` work.
+
+**Docs.**
+- `CLAUDE.md` State Files table and Canonical Data Schema Reference now document `bot/state/shadow_trades.jsonl`.
+- README Session 95 recap added.
+
+**Watch-list trigger.** If `bot/state/shadow_trades.jsonl` stays absent while new `family_disabled_reject`, `sport_disabled`, or `reentry_blocked` decisions appear after this restart, the shadow writer path is miswired. If Session 93's disabled-family entry count rises above the current 1, the disable guard is still not protecting every hot path and needs immediate investigation.

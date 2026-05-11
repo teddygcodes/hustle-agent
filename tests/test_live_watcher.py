@@ -232,11 +232,15 @@ def test_log_decision_dampened_writes_wp_edge_and_mom_ctx(tmp_path, monkeypatch)
     wp, kalshi_price, dip_cents, dqs."""
     import json
     from bot import decisions
+    import bot.shadow_trades as shadow
     from bot.live_watcher import LiveGameWatcher
 
     f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
     monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
     monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
 
     w = LiveGameWatcher.__new__(LiveGameWatcher)
     w.ticker = "KXTEST-T1"
@@ -263,11 +267,15 @@ def test_log_decision_dampened_handles_missing_wp(tmp_path, monkeypatch):
     """Pre-GameContext ticks log wp=None / edge=None — no crash, valid JSON."""
     import json
     from bot import decisions
+    import bot.shadow_trades as shadow
     from bot.live_watcher import LiveGameWatcher
 
     f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
     monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
     monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
 
     w = LiveGameWatcher.__new__(LiveGameWatcher)
     w.ticker = "KXTEST-T2"
@@ -285,6 +293,79 @@ def test_log_decision_dampened_handles_missing_wp(tmp_path, monkeypatch):
     assert rec["edge"] is None
     assert rec["extra"]["wp"] is None
     assert rec["extra"]["sport"] == "atp_challenger"
+
+
+def test_log_decision_dampened_sport_disabled_writes_shadow(tmp_path, monkeypatch):
+    import json
+    from bot import decisions
+    import bot.shadow_trades as shadow
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXWTAMATCH-26MAY10SIEPLI-PLI"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject",
+        reason="sport_disabled",
+        gates={"can_enter": False, "sport_enabled": False},
+        edge=None,
+        extra={"sport": "wta", "kalshi_price": 92, "losses_seen": 0},
+        close_ts="2026-05-24T08:00:00Z",
+    )
+
+    rec = json.loads(shadow_f.read_text().splitlines()[0])
+    assert rec["blocked_reason"] == "sport_disabled"
+    assert rec["source"] == "live_watcher"
+    assert rec["would_side"] == "yes"
+    assert rec["would_entry_price"] == 0.92
+    assert rec["would_contracts"] is None
+    assert rec["sizing_status"] == "unavailable"
+    assert rec["sport"] == "wta"
+    assert rec["close_ts"] == "2026-05-24T08:00:00Z"
+
+
+def test_log_decision_dampened_reentry_blocked_shadow_and_dedupe(tmp_path, monkeypatch):
+    import json
+    from bot import decisions
+    import bot.shadow_trades as shadow
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXATPMATCH-26MAY10ARNJOD-JOD"
+    w._last_decision = (None, None)
+    kwargs = dict(
+        decision="reject",
+        reason="reentry_blocked",
+        gates={"can_enter": False, "sport_enabled": True, "reentry_blocked": False},
+        edge=-0.36,
+        extra={"sport": "atp", "kalshi_price": 86, "losses_seen": 1},
+        close_ts="2026-05-24T09:00:00Z",
+    )
+
+    w._log_decision_dampened(**kwargs)
+    w._log_decision_dampened(**kwargs)
+
+    rows = shadow_f.read_text().splitlines()
+    assert len(rows) == 1
+    rec = json.loads(rows[0])
+    assert rec["blocked_reason"] == "reentry_blocked"
+    assert rec["extra"]["losses_seen"] == 1
+    assert rec["sport"] == "atp"
 
 
 # ---------------------------------------------------------------------------

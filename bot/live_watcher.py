@@ -531,6 +531,24 @@ class LiveGameWatcher:
                 reason=reason,
                 extra=merged,
             )
+            if decision == "reject" and reason in {"sport_disabled", "reentry_blocked"}:
+                try:
+                    from bot.shadow_trades import record_blocked_trade
+                    record_blocked_trade(
+                        ticker=self.ticker or "",
+                        opp_type="live_momentum",
+                        blocked_reason=reason,
+                        source="live_watcher",
+                        source_decision_reason=reason,
+                        would_side="yes",
+                        would_entry_price_cents=(merged or {}).get("kalshi_price"),
+                        would_contracts=None,
+                        sport=(merged or {}).get("sport"),
+                        close_ts=(merged or {}).get("close_ts"),
+                        extra=merged,
+                    )
+                except Exception:
+                    pass
         except Exception:
             pass
 

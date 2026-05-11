@@ -225,6 +225,7 @@ def _check_position_limits(
     close_ts: str | None = None,
     contracts: int | None = None,
     price_cents: int | None = None,
+    side: str | None = None,
 ) -> tuple[bool, str]:
     """Check position limits: per-position cap, dedupe, cooldown, daily loss,
     per-strategy budget (Tier 2.1), and global exposure.
@@ -262,17 +263,38 @@ def _check_position_limits(
         # disabled family rejects with `family_disabled_reject` instead of the
         # misleading `cap_exceeded_reject` that a cap=$0 proxy would produce.
         if is_vig_stack_family_disabled(family):
+            disabled_extra = {
+                "family": family,
+                "disabled_set": sorted(VIG_STACK_DISABLED_FAMILIES),
+                "incoming_cost": round(cost_dollars, 2),
+                "contracts": contracts,
+                "price_cents": price_cents,
+            }
             _log_position_reject(
                 ticker, opp_type, "family_disabled_reject",
-                extra={
-                    "family": family,
-                    "disabled_set": sorted(VIG_STACK_DISABLED_FAMILIES),
-                    "incoming_cost": round(cost_dollars, 2),
-                    "contracts": contracts,
-                    "price_cents": price_cents,
-                },
+                extra=disabled_extra,
                 close_ts=close_ts,
             )
+            try:
+                from bot.shadow_trades import record_blocked_trade
+                shadow_extra = dict(disabled_extra)
+                if close_ts:
+                    shadow_extra["close_ts"] = close_ts
+                record_blocked_trade(
+                    ticker=ticker,
+                    opp_type=opp_type or "unknown",
+                    blocked_reason="family_disabled_reject",
+                    source="executor",
+                    source_decision_reason="family_disabled_reject",
+                    would_side=(side or "no"),
+                    would_entry_price_cents=price_cents,
+                    would_contracts=contracts,
+                    family=family,
+                    close_ts=close_ts,
+                    extra=shadow_extra,
+                )
+            except Exception:
+                pass
             return False, (
                 f"family_disabled_reject: {family} vig_stack disabled at config"
             )
@@ -915,7 +937,7 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
     )
     pos_ok, pos_msg = _check_position_limits(
         balance, total_cost, ticker, opp_type=opp_type, close_ts=_close_ts,
-        contracts=contracts, price_cents=price_cents,
+        contracts=contracts, price_cents=price_cents, side=side,
     )
     checks.append({"name": "position_limits", "passed": pos_ok, "detail": pos_msg})
 

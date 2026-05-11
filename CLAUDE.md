@@ -296,6 +296,7 @@ All runtime persistence lives here. Written atomically via `bot/state_io.py` (on
 | `archive/live_ticks-YYYY-MM-DD.jsonl.gz` | Daily gzipped tick archives. Created by `scheduler._rotate_live_ticks()` at midnight ET (Apr 23, Session 5). |
 | `decisions.jsonl` | **Per-decision audit log (Apr 24, Session 6).** Every scan-time accept/reject from scanner + executor + live_watcher with a gate fingerprint. Read by `tools/cohort_report.py`. Daily rotation to `archive/`. |
 | `archive/decisions-YYYY-MM-DD.jsonl.gz` | Daily gzipped decision archives. Created by `scheduler._rotate_decisions_log()` at midnight ET (Apr 24, Session 6). |
+| `shadow_trades.jsonl` | **Blocked-trade shadow evidence ledger (May 11, Session 95).** Append-only rows for blocked-but-measurable opportunities only: `family_disabled_reject`, `sport_disabled`, `reentry_blocked`. Forward-only; no backfill; no scheduler rotation yet. Read by analysis/status tooling, not execution. |
 | `predictions.jsonl` | **Per-prediction fair-value vs. actual log (Apr 25, Session 11).** One row per opp evaluated (acted-on or counterfactual). Settlement poller fills `closing_yes_price`. Read by `tools/calibration_report.py`. Daily rotation to `archive/`. |
 | `archive/predictions-YYYY-MM-DD.jsonl.gz` | Daily gzipped prediction archives. Created by `scheduler._rotate_predictions_log()` at midnight ET (Apr 25, Session 11). |
 | `order_microstructure.jsonl` | **Per-live-order microstructure log (Apr 25, Session 15).** One row per live Kalshi order at terminal status (filled / canceled / rejected). Schema: `{ts_placed, ts_filled, ts_canceled, requested/filled price+qty, slippage_cents, slippage_source, latency_ms, queue_depth_at_place, partial_fill_count, strategy_name, opp_type, ticker, side, terminal_status, kalshi_order_id, regime}`. Read by `tools/microstructure_report.py`. **Empty until PAPER_MODE=False.** Paper trades do NOT write here — paper write path is unchanged. Daily rotation to `archive/`. |
@@ -667,6 +668,43 @@ NOT `'no_won'`. The Session 45 verification used the wrong value and produced n_
   "regime": dict,                      # 5-axis tag
 }
 ```
+
+### `bot/state/shadow_trades.jsonl` records
+
+Forward-only append-only ledger for blocked/disallowed opportunities. Session 95
+emits these rows only for `family_disabled_reject`, `sport_disabled`, and
+`reentry_blocked`; do not broaden this to every rejected gate without a separate
+session.
+
+```python
+{
+  "id": str,                           # 'SHADOW-...'
+  "ts": str,                           # ISO 8601 UTC
+  "ticker": str,
+  "opp_type": str,
+  "blocked_reason": "family_disabled_reject" | "sport_disabled" | "reentry_blocked",
+  "would_side": "yes" | "no" | None,
+  "would_entry_price": float | None,   # decimal dollars, matching paper_trades.entry_price
+  "would_contracts": int | None,
+  "would_notional": float | None,
+  "sizing_status": "available" | "unavailable",
+  "family": str | None,
+  "sport": str | None,
+  "close_ts": str | None,
+  "status": "open",
+  "settled_at": None,
+  "market_result": None,
+  "would_pnl": None,
+  "source": "executor" | "live_watcher",
+  "source_decision_reason": str,
+  "extra": dict,
+  "regime": dict,
+}
+```
+
+Sizing rule: mark `sizing_status="available"` only when both contracts and
+price are known. If a blocked live-watcher path lacks contracts, keep
+`would_contracts`/`would_notional` null and use `sizing_status="unavailable"`.
 
 ### `bot/state/paper_trades.json` records
 
