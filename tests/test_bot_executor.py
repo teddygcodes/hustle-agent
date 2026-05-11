@@ -771,6 +771,138 @@ class TestSession99PaperTradeProxyFields:
 
 
 # ---------------------------------------------------------------------------
+# Session 100 — paper_trades.json ladder context fields for vig_stack
+# (family / rung_count / selected_rung_rank_asc / forecast_bucket_distance /
+# time_to_close_hr / source_city / etc.)
+# ---------------------------------------------------------------------------
+
+class TestSession100LadderContextFields:
+    """Forward-only persistence of the ladder-context paper_* keys on
+    vig_stack paper_trades records. When the opp dict carries paper_family
+    + the rest of the LADDER_CONTEXT_KEYS, the inline loop at executor.py
+    after the Session 99 block renames each `paper_X` to `X` on the record.
+    When absent (mimicking live_momentum), the record stays free of ladder
+    keys — spillover regression-lock."""
+
+    def _run_paper_trade(self, opp, sizing):
+        with patch("bot.executor.verify_contract_direction") as mock_dir, \
+             patch("bot.executor.get_balance") as mock_bal, \
+             patch("bot.executor._check_position_limits") as mock_pos, \
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
+            mock_dir.return_value = {
+                "direction_correct": True, "confidence": "high",
+                "explanation": "ok", "warnings": [],
+            }
+            mock_bal.return_value = {"balance_dollars": 100.0}
+            mock_pos.return_value = (True, "ok")
+            mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
+
+            from bot.executor import execute_trade
+            return execute_trade(opp, sizing)
+
+    def test_paper_trade_persists_ladder_context_for_vig_stack(self, tmp_state):
+        """When opp carries the full Session 100 paper_* ladder-context set,
+        each renames to its on-disk field on the paper_trades record."""
+        opp = _make_opp(opp_type="vig_stack_series")
+        opp["paper_family"] = "KXHIGHAUS"
+        opp["paper_ladder_total_yes_sum_cents"] = 135
+        opp["paper_rung_count"] = 3
+        opp["paper_selected_rung_rank_asc"] = 3
+        opp["paper_selected_rung_rank_desc"] = 1
+        opp["paper_rung_strike"] = 89.0
+        opp["paper_rung_kind"] = "B"
+        opp["paper_no_price_cents"] = 80
+        opp["paper_forecast_bucket_distance"] = -0.3
+        opp["paper_source_forecast_temp"] = 89.7
+        opp["paper_source_city"] = "Austin"
+        opp["paper_time_to_close_hr"] = 4.0
+        opp["paper_ladder_context_source"] = "vig_stack_ladder_context_v1"
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["family"] == "KXHIGHAUS"
+        assert rec["ladder_total_yes_sum_cents"] == 135
+        assert rec["rung_count"] == 3
+        assert rec["selected_rung_rank_asc"] == 3
+        assert rec["selected_rung_rank_desc"] == 1
+        assert rec["rung_strike"] == 89.0
+        assert rec["rung_kind"] == "B"
+        assert rec["no_price_cents"] == 80
+        assert rec["forecast_bucket_distance"] == -0.3
+        assert rec["source_forecast_temp"] == 89.7
+        assert rec["source_city"] == "Austin"
+        assert rec["time_to_close_hr"] == 4.0
+        assert rec["ladder_context_source"] == "vig_stack_ladder_context_v1"
+
+    def test_paper_trade_omits_ladder_context_for_live_momentum(self, tmp_state):
+        """Spillover regression-lock: a live_momentum opp without the
+        Session 100 paper_* keys produces a record with NONE of the
+        ladder-context fields (family/rung_count/rank/etc). Mirrors Session
+        99's vig_stack spillover guard."""
+        opp = _make_opp(opp_type="live_momentum")
+        # Carry some Session 50/99 keys but NO Session 100 keys.
+        opp["paper_confidence"] = 0.85
+        opp["paper_sport"] = "NBA"
+        opp["paper_estimated_win_prob"] = 0.65
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        # No ladder-context fields land on a live_momentum row.
+        for k in ("family", "ladder_total_yes_sum_cents", "rung_count",
+                  "selected_rung_rank_asc", "selected_rung_rank_desc",
+                  "rung_strike", "rung_kind", "no_price_cents",
+                  "forecast_bucket_distance", "source_forecast_temp",
+                  "source_city", "time_to_close_hr", "ladder_context_source"):
+            assert k not in rec, f"unexpected ladder field {k}={rec[k]} on live_momentum row"
+        # Session 50 + 99 fields still land.
+        assert rec["confidence"] == 0.85
+        assert rec["sport"] == "nba"
+        assert rec["estimated_win_prob"] == 0.65
+
+    def test_paper_trade_partial_ladder_fields_for_vig_stack(self, tmp_state):
+        """Partial ladder context (e.g. futures opp with no rank/forecast)
+        lands only the keys that are present. Mirrors the Session 50/99
+        partial-fields behavior — `if v is not None` skips absent keys."""
+        opp = _make_opp(opp_type="vig_stack_futures")
+        opp["paper_family"] = "KXNBA"
+        opp["paper_ladder_total_yes_sum_cents"] = 125
+        opp["paper_rung_count"] = 3
+        opp["paper_no_price_cents"] = 75
+        opp["paper_time_to_close_hr"] = 720.0
+        opp["paper_ladder_context_source"] = "vig_stack_ladder_context_v1"
+        # NOT setting rank/strike/kind/forecast/source_city (futures opp).
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["family"] == "KXNBA"
+        assert rec["rung_count"] == 3
+        assert rec["time_to_close_hr"] == 720.0
+        # Absent fields stay absent.
+        for k in ("selected_rung_rank_asc", "selected_rung_rank_desc",
+                  "rung_strike", "rung_kind",
+                  "forecast_bucket_distance", "source_forecast_temp",
+                  "source_city"):
+            assert k not in rec
+
+
+# ---------------------------------------------------------------------------
 # execute_double — Fix 1 regression
 # ---------------------------------------------------------------------------
 

@@ -399,3 +399,79 @@ def test_every_decision_extra_carries_close_ts(scenario_name: str) -> None:
         + "\n".join(f"  ticker={c['ticker']} reason={c['reason']} extra={c['extra']}"
                     for c in missing)
     )
+
+
+# ---------------------------------------------------------------------------
+# Session 100 — ladder context (family, rung_count, rank, etc.) on accepted
+# opp dicts AND on accept-decision extras. Pure instrumentation, no
+# behavior change vs. golden fixtures.
+# ---------------------------------------------------------------------------
+
+def test_accepted_opp_carries_ladder_context_paper_keys() -> None:
+    """Session 100: opp dict for an accepted vig_stack rung carries the
+    paper_* ladder keys (family, rung_count, rank, no_price, source_city,
+    ladder_context_source). Pre-Session-100 callers/readers ignore them;
+    post-Session-100 the executor renames paper_X -> X on paper_trades.json."""
+    market_dicts, _, _ = _load_legacy_fixture("stable_with_edge")
+    opps, _ = _new_run(market_dicts)
+    assert opps, "stable_with_edge fixture produced no accepts"
+
+    # yes_asks sum across the 5 rungs of the KXHIGHMIA fixture = 135.
+    expected_yes_sum = sum(m["yes_ask"] for m in market_dicts)
+
+    for opp in opps:
+        assert opp["paper_family"] == "KXHIGHMIA"
+        assert opp["paper_ladder_total_yes_sum_cents"] == expected_yes_sum
+        assert opp["paper_rung_count"] == len(market_dicts)
+        assert opp["paper_no_price_cents"] == opp["no_ask_cents"]
+        assert opp["paper_source_city"] == "Miami"
+        assert opp["paper_ladder_context_source"] == "vig_stack_ladder_context_v1"
+        # rank_asc must be 1..rung_count (1-indexed by ascending strike).
+        assert 1 <= opp["paper_selected_rung_rank_asc"] <= len(market_dicts)
+        assert 1 <= opp["paper_selected_rung_rank_desc"] <= len(market_dicts)
+        # Forecast was mocked to {} (no NWS hit), so distance/temp must
+        # be ABSENT (None values are dropped before merging into opp).
+        assert "paper_forecast_bucket_distance" not in opp
+        assert "paper_source_forecast_temp" not in opp
+
+
+def test_accept_decision_extra_carries_unprefixed_ladder_context() -> None:
+    """Session 100: decisions.jsonl extra for an accepted vig_stack
+    decision carries the un-prefixed ladder context keys (family,
+    rung_count, selected_rung_rank_asc, ...). The opp dict gets paper_X;
+    decisions.jsonl extra gets X — single source helper, two surfaces."""
+    market_dicts, _, _ = _load_legacy_fixture("stable_with_edge")
+    captured = _run_capturing_extras(market_dicts)
+    accepts = [c for c in captured if c["decision"] == "accept"]
+    assert accepts, "stable_with_edge should produce at least one accept decision"
+
+    for c in accepts:
+        extra = c["extra"] or {}
+        assert extra.get("family") == "KXHIGHMIA"
+        assert extra.get("rung_count") == len(market_dicts)
+        assert extra.get("source_city") == "Miami"
+        assert extra.get("ladder_context_source") == "vig_stack_ladder_context_v1"
+        # Forecast-mocked-to-{} → omitted from extra (not None).
+        assert "forecast_bucket_distance" not in extra
+
+
+def test_reject_decision_extras_unchanged_by_session_100() -> None:
+    """Session 100 enriches ACCEPT decisions only. Reject decisions keep
+    their existing gate-specific extras (close_ts, no_ask, distance, etc.)
+    and do NOT get the full ladder context — that would bloat decisions.jsonl
+    for limited analytical value. Regression-lock."""
+    # The no_vig scenario emits exactly one REJECT with reason=no_vig.
+    market_dicts, _, _ = _load_legacy_fixture("no_vig")
+    captured = _run_capturing_extras(market_dicts)
+    rejects = [c for c in captured if c["decision"] == "reject"]
+    assert rejects, "no_vig scenario should produce at least one reject"
+
+    for c in rejects:
+        extra = c["extra"] or {}
+        # Reject extras must NOT carry the Session 100 keys.
+        for k in ("family", "rung_count", "selected_rung_rank_asc",
+                  "ladder_context_source", "source_city"):
+            assert k not in extra, (
+                f"reject {c['reason']} for {c['ticker']} unexpectedly "
+                f"carries Session 100 key {k}={extra[k]}"
+            )

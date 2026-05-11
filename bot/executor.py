@@ -33,6 +33,7 @@ from bot.config import (
     VIG_STACK_DISABLED_FAMILIES,
     is_vig_stack_family_disabled,
 )
+from bot.vig_stack_ladder_context import LADDER_CONTEXT_KEYS
 
 
 # ---------------------------------------------------------------------------
@@ -1201,6 +1202,16 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         paper_cc = opportunity.get("paper_confidence_components")
         if paper_cc is not None:
             record["confidence_components"] = paper_cc
+        # Session 100 — forward-only ladder context for vig_stack accepts.
+        # Vig_stack opp dicts now carry `paper_*` ladder keys (Session 99's
+        # "live_watcher is the only writer" note above no longer applies for
+        # this key set). Live_momentum opp dicts don't carry these; the
+        # `if v is not None` skip keeps live_momentum records clean.
+        # Schema in CLAUDE.md "Canonical Data Schema Reference → paper_trades.json".
+        for _k in LADDER_CONTEXT_KEYS:
+            _v = opportunity.get(f"paper_{_k}")
+            if _v is not None:
+                record[_k] = _v
         paper_trades.append(record)
         _save_json(PAPER_TRADES_FILE, paper_trades)
 

@@ -24,6 +24,7 @@ import argparse
 import gzip
 import json
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -254,6 +255,170 @@ def report_live_momentum_calibration(days: int = 7) -> str:
     return "\n".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Session 100 — vig_stack ladder shapes report (Data Collection Backlog
+# Priority 5). Two sections: per-family × rung_rank (all families) and
+# per-weather-family × forecast_bucket_distance bucket (KXHIGHAUS B-bucket
+# hypothesis from the Session 100 brief). Reads paper_trades.json directly
+# (forward-only since Session 100 ship).
+# ---------------------------------------------------------------------------
+
+_FORECAST_DISTANCE_BUCKETS = (
+    ("<-1.5 (deep in)",   None,  -1.5),
+    ("[-1.5,-0.5) (in)",  -1.5,  -0.5),
+    ("[-0.5,0.5) (edge)", -0.5,   0.5),
+    ("[0.5,1.5) (out)",    0.5,   1.5),
+    (">=1.5 (far out)",    1.5,   None),
+)
+
+
+def _forecast_distance_bucket_label(d: float) -> str:
+    for label, lo, hi in _FORECAST_DISTANCE_BUCKETS:
+        if lo is None and d < hi:
+            return label
+        if hi is None and d >= lo:
+            return label
+        if lo is not None and hi is not None and lo <= d < hi:
+            return label
+    return _FORECAST_DISTANCE_BUCKETS[-1][0]
+
+
+def report_vig_stack_ladder_shapes(days: int = 7) -> str:
+    """Session 100: per-family ladder-shape outcome tables for vig_stack.
+
+    Reads paper_trades.json (forward-only since Session 100 — pre-ship
+    trades won't carry the family/rank/distance fields). Two sections:
+
+      Section A — per-family × selected_rung_rank_asc (all families;
+                  identifies which rungs within a ladder lose)
+      Section B — per-weather-family × forecast_bucket_distance bucket
+                  (KXHIGH*/KXLOW* only — KXHIGHAUS B-bucket hypothesis)
+
+    The `days` arg is accepted for parity with `report()` but currently
+    unused because paper_trades.json is the live (un-rotated) state file.
+    """
+    out = ["", "## vig_stack ladder shapes"]
+    if not PAPER_TRADES_FILE.exists():
+        out.append("\n_paper_trades.json missing._")
+        return "\n".join(out)
+    try:
+        trades = json.loads(PAPER_TRADES_FILE.read_text())
+    except Exception:
+        out.append("\n_paper_trades.json unreadable._")
+        return "\n".join(out)
+    if not isinstance(trades, list):
+        out.append("\n_paper_trades.json schema unexpected._")
+        return "\n".join(out)
+
+    rows = [
+        t for t in trades
+        if isinstance(t, dict)
+        and t.get("type") == "vig_stack"
+        and t.get("family") is not None
+        and t.get("status") in ("won", "lost")
+    ]
+    out[-1] = f"## vig_stack ladder shapes (n={len(rows)} resolved)"
+    if not rows:
+        out.append(
+            "\n_No resolved vig_stack trades carrying ladder context yet — "
+            "ships forward-only; expect first meaningful report after ~14d._"
+        )
+        return "\n".join(out)
+
+    # === Section A — per-family × selected_rung_rank_asc ===
+    out.append("")
+    out.append("### A: per-family × rung_rank (ascending; rank 1 = lowest strike)")
+    out.append("")
+    rank_rows = [r for r in rows if r.get("selected_rung_rank_asc") is not None]
+    if not rank_rows:
+        out.append("_No resolved rows with selected_rung_rank_asc yet._")
+    else:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        agg: dict[tuple, dict] = defaultdict(
+            lambda: {"n": 0, "won": 0, "lost": 0, "pnl": 0.0,
+                     "n_lost_7d": 0, "rank_count": 0}
+        )
+        for r in rank_rows:
+            key = (r["family"], int(r["selected_rung_rank_asc"]))
+            a = agg[key]
+            a["n"] += 1
+            try:
+                a["rank_count"] = max(a["rank_count"], int(r.get("rung_count") or 0))
+            except (TypeError, ValueError):
+                pass
+            if r["status"] == "won":
+                a["won"] += 1
+            else:
+                a["lost"] += 1
+                if (r.get("resolved_at") or "") >= cutoff:
+                    a["n_lost_7d"] += 1
+            try:
+                a["pnl"] += float(r.get("pnl") or 0)
+            except (TypeError, ValueError):
+                pass
+        out.append("| family | rank | of | n | W | L | WR | total_pnl | n_lost_7d |")
+        out.append("|---|---|---|---|---|---|---|---|---|")
+        for (fam, rank), a in sorted(agg.items()):
+            wr = (a["won"] / a["n"]) if a["n"] else 0
+            out.append(
+                f"| {fam} | {rank} | {a['rank_count']} | {a['n']} | "
+                f"{a['won']} | {a['lost']} | {wr:.1%} | "
+                f"${a['pnl']:+.2f} | {a['n_lost_7d']} |"
+            )
+
+    # === Section B — per-weather-family × forecast_bucket_distance bucket ===
+    out.append("")
+    out.append("### B: per-weather-family × forecast_bucket_distance bucket")
+    out.append("(negative = forecast inside bucket; positive = outside)")
+    out.append("")
+    weather_rows = [
+        r for r in rows
+        if r.get("forecast_bucket_distance") is not None
+        and isinstance(r.get("family"), str)
+        and (r["family"].startswith("KXHIGH") or r["family"].startswith("KXLOW"))
+    ]
+    if not weather_rows:
+        out.append("_No resolved weather rows with forecast_bucket_distance yet._")
+        return "\n".join(out)
+
+    bagg: dict[tuple, dict] = defaultdict(
+        lambda: {"n": 0, "won": 0, "lost": 0, "pnl": 0.0}
+    )
+    for r in weather_rows:
+        try:
+            d = float(r["forecast_bucket_distance"])
+        except (TypeError, ValueError):
+            continue
+        key = (r["family"], _forecast_distance_bucket_label(d))
+        b = bagg[key]
+        b["n"] += 1
+        if r["status"] == "won":
+            b["won"] += 1
+        else:
+            b["lost"] += 1
+        try:
+            b["pnl"] += float(r.get("pnl") or 0)
+        except (TypeError, ValueError):
+            pass
+
+    out.append("| family | distance_bucket | n | W | L | WR | total_pnl |")
+    out.append("|---|---|---|---|---|---|---|")
+    _bucket_order = [label for label, _, _ in _FORECAST_DISTANCE_BUCKETS]
+    for fam in sorted({k[0] for k in bagg}):
+        for bucket in _bucket_order:
+            key = (fam, bucket)
+            if key not in bagg:
+                continue
+            b = bagg[key]
+            wr = (b["won"] / b["n"]) if b["n"] else 0
+            out.append(
+                f"| {fam} | {bucket} | {b['n']} | {b['won']} | {b['lost']} | "
+                f"{wr:.1%} | ${b['pnl']:+.2f} |"
+            )
+
+    return "\n".join(out)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--days", type=int, default=7,
@@ -270,3 +435,6 @@ if __name__ == "__main__":
     # Session 99: live_momentum proxy calibration as a separate section so it
     # cannot be conflated with vig_stack fair-value calibration.
     print(report_live_momentum_calibration(days=args.days))
+    # Session 100: vig_stack ladder shapes (per-family × rank, per-weather-family
+    # × forecast_bucket_distance) — Data Collection Backlog Priority 5.
+    print(report_vig_stack_ladder_shapes(days=args.days))

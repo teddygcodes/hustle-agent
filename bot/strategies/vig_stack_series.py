@@ -29,6 +29,7 @@ from bot.config import (
 )
 from bot.math_engine import _self_check_edge
 from bot.strategies import Market, Opportunity
+from bot.vig_stack_ladder_context import compute_ladder_context
 
 logger = logging.getLogger(__name__)
 
@@ -706,6 +707,26 @@ class VigStackSeries:
         confidence = 0.85 if is_futures else 0.90
         opp_type_full = "vig_stack_futures" if is_futures else "vig_stack_series"
 
+        # Session 100 — forward-only ladder context (family, rung_count,
+        # rank, forecast distance, time to close, source metadata). Computed
+        # once; merged un-prefixed into decisions.jsonl extra AND prefixed
+        # `paper_` into the opp dict for executor pickup. None values are
+        # dropped so non-applicable fields don't bloat disk surfaces.
+        ladder_ctx_present = {
+            k: v for k, v in compute_ladder_context(
+                ticker=ticker,
+                valid_tickers=ladder["valid_tickers"],
+                yes_sum_cents=yes_sum,
+                valid_count=valid_count,
+                no_ask_cents=no_ask,
+                forecast_temp=self._nws_forecasts.get(series_ticker),
+                source_city=_SERIES_TO_NWS.get(series_ticker),
+                is_weather=is_weather,
+                close_ts=market.close_ts,
+                now_utc=self._now_utc,
+            ).items() if v is not None
+        }
+
         self._telem[sub]["surfaced"] += 1
         decisions.log_decision(
             ticker=ticker, opp_type=opp_type_full,
@@ -713,7 +734,8 @@ class VigStackSeries:
             gates={g: True for g in _VIG_STACK_GATES},
             decision="accept", reason="all_gates_passed",
             extra={"no_ask": no_ask, "no_fair_cents": round(no_fair_cents, 2),
-                   "close_ts": market.close_ts},
+                   "close_ts": market.close_ts,
+                   **ladder_ctx_present},
         )
 
         return {
@@ -740,6 +762,7 @@ class VigStackSeries:
                 "math_chain": math_chain,
                 "warnings": [],
             },
+            **{f"paper_{k}": v for k, v in ladder_ctx_present.items()},
         }
 
     def finalize(self, scan_id: str) -> None:
