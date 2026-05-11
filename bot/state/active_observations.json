@@ -166,5 +166,49 @@
         "last_updated": "2026-05-11T16:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 100,
+    "shipped_at": "2026-05-11T18:00:00+00:00",
+    "description": "vig_stack ladder context instrumentation (Data Collection Backlog Priority 5) — family, ladder_total_yes_sum_cents, rung_count, selected_rung_rank_asc+desc, rung_strike, rung_kind, no_price_cents, forecast_bucket_distance, time_to_close_hr, source_forecast_temp, source_city, ladder_context_source. No behavior changes; forward-only.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "vig_stack paper_trades records carrying family + rung_count + selected_rung_rank_asc",
+        "expectation": "rising forward on accepted vig_stack trades. Filter: type=='vig_stack' AND 'family' in row. Pre-Session-100 records won't carry the fields (forward-only).",
+        "current_value": 0,
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      },
+      {
+        "name": "weather vig_stack records carrying forecast_bucket_distance",
+        "expectation": "rising forward when NWS forecast is cached at scan time; omitted otherwise. Filter: type=='vig_stack' AND family startswith 'KXHIGH' AND 'forecast_bucket_distance' in row.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      },
+      {
+        "name": "vig_stack accept decisions in decisions.jsonl carrying ladder context in extra",
+        "expectation": "non-zero from first post-restart scan; family/rung_count/selected_rung_rank_asc present on accept decisions (decision=='accept'); reject decisions unchanged (gate-specific extras only).",
+        "current_value": 0,
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      },
+      {
+        "name": "tools/calibration_report.py renders vig_stack ladder shapes section",
+        "expectation": "yes; pre-trades shows 'No resolved vig_stack trades carrying ladder context yet' forward-only caveat; post-trades renders Section A (per-family × rank) and Section B (per-weather-family × forecast_distance bucket).",
+        "current_value": "renders, n=0 caveat (verified pre-restart)",
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      },
+      {
+        "name": "live_momentum records spillover of family/rung_count (regression-lock)",
+        "expectation": "0; any live_momentum paper_trades row carrying 'family' (or any other LADDER_CONTEXT_KEYS field) means a non-vig_stack writer started populating paper_family. Mirrors Session 99's vig_stack spillover guard.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      },
+      {
+        "name": "KXHIGHAUS forecast-edge loss concentration (watch-list trigger)",
+        "expectation": "re-evaluate after 14d (target 2026-05-25). If post-Session-100 KXHIGHAUS rows show N>=10 in the [-0.5, 0.5) forecast_distance bucket AND win_rate < 60%, surface as a candidate for Session 101 forecast-edge-aware floor/sizing decision. Pure observation; no action this session. Motivating evidence: two -$199 KXHIGHAUS B-bucket losses (B80.5, B89.5) on 2026-05-09/10 where the day's high landed inside the bucket.",
+        "current_value": "n/a (no resolved trades yet)",
+        "last_updated": "2026-05-11T18:00:00+00:00"
+      }
+    ]
   }
 ]

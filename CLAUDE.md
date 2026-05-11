@@ -520,7 +520,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 98 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 100 (2026-05-11).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 
@@ -804,9 +804,30 @@ price are known. If a blocked live-watcher path lacks contracts, keep
   "estimated_win_prob": float | None,  # Scalar fair-value proxy clamped [0.05, 0.95]. live_momentum ONLY, forward-only since Session 99 (2026-05-11). Mathematically: wp_edge + leader_price/100 ≡ game_context.win_probability at entry tick. Absent on vig_stack records. Calibrated via tools/calibration_report.py → report_live_momentum_calibration().
   "model_source": str | None,          # Identifier for the proxy model that produced estimated_win_prob. live_momentum ONLY, forward-only since Session 99. Currently "game_context_win_probability_v1"; bump to _v2 for any future variant that incorporates DQS, momentum tilts, or additional signals.
   "confidence_components": dict | None,# Diagnostic dict for the proxy. live_momentum ONLY, forward-only since Session 99. Shape is model-version-dependent. v1 carries {wp_edge, market_implied, pre_clamp_raw, clamped}; downstream readers must handle absent keys gracefully across versions.
+  # Session 100 — vig_stack ladder context (Data Collection Backlog Priority 5).
+  # vig_stack ONLY, forward-only since Session 100 (2026-05-11). Absent on
+  # live_momentum records (spillover regression-locked at
+  # tests/test_bot_executor.py::TestSession100LadderContextFields). Source:
+  # bot/vig_stack_ladder_context.compute_ladder_context() called from
+  # bot/strategies/vig_stack_series.py:710-743 accept path; persisted by
+  # bot/executor.py via the LADDER_CONTEXT_KEYS rename loop. Each field is
+  # omitted (not None) when not applicable to the opp's classification.
+  "family": str | None,                # Ticker prefix (KXHIGHAUS / KXNBA / KXINX / ...). Always present on Session-100+ vig_stack rows.
+  "ladder_total_yes_sum_cents": int | None,  # Sum of YES prices across all rungs in the ladder at decision time (cents). Always present.
+  "rung_count": int | None,            # Number of valid rungs in the ladder. Always present.
+  "selected_rung_rank_asc": int | None,  # 1-indexed rank by ascending strike (1 = lowest strike). Omitted on futures opps where strikes are unparseable.
+  "selected_rung_rank_desc": int | None, # 1-indexed rank by descending strike (1 = highest strike). Same omission rule as asc.
+  "rung_strike": float | None,         # Parsed lower edge of this rung's bucket (e.g. B89.5 → 89.0). Omitted on futures opps.
+  "rung_kind": str | None,             # "B" (1°F bucket) or "T" (threshold). Omitted on futures opps.
+  "no_price_cents": int | None,        # NO entry price in cents (denormalized — same value as entry_price * 100, kept as int for cents-domain grouping in reports).
+  "forecast_bucket_distance": float | None,  # Weather ONLY. Signed distance from forecast to this rung's bucket; negative = inside the bucket (depth from nearest edge), positive = outside (gap from nearest edge). Mirrors bot/strategies/vig_stack_series._forecast_distance_from_bucket convention.
+  "source_forecast_temp": float | None,  # Weather ONLY. The cached NWS forecast temperature for this series at scan time (°F).
+  "source_city": str | None,           # Weather ONLY. NWS city name for this series (e.g. "Austin" for KXHIGHAUS). From bot/strategies/vig_stack_series._SERIES_TO_NWS.
+  "time_to_close_hr": float | None,    # Hours until market close at decision time. Omitted when close_ts is missing or unparseable.
+  "ladder_context_source": str | None, # Version identifier for the helper. Currently "vig_stack_ladder_context_v1"; bump to _v2 for any future variant that adds fields (e.g. intra_ladder_correlation, ladder_age, recent_family_pnl).
   "timestamp": str,                    # ISO 8601 UTC, entry time. Canonical for paper_trades (NOT 'ts' which decisions.jsonl uses)
   "resolved_at": str | None,           # settlement time
-  # Note: paper_trades.json had NO 'sport' field pre-Session 50; for older records, derive from ticker prefix via the per-game/futures map below. Same for `dqs` (live_momentum only) and the meaningful-confidence value on live_momentum trades. Pre-Session-99 live_momentum trades won't carry `estimated_win_prob`/`model_source`/`confidence_components` — readers must treat absence as None.
+  # Note: paper_trades.json had NO 'sport' field pre-Session 50; for older records, derive from ticker prefix via the per-game/futures map below. Same for `dqs` (live_momentum only) and the meaningful-confidence value on live_momentum trades. Pre-Session-99 live_momentum trades won't carry `estimated_win_prob`/`model_source`/`confidence_components` — readers must treat absence as None. Pre-Session-100 vig_stack trades won't carry the 13 ladder-context fields above — same forward-only rule.
 }
 ```
 
@@ -966,16 +987,17 @@ Bundle only when the data path, owner files, and verification story are shared. 
 
 **Do not include yet.** Runtime exit changes.
 
-### Priority 5: Vig_stack ladder context
+### Priority 5: Vig_stack ladder context — shipped Session 100
 
 **Gap.** We know which families win, but not enough about which ladder shapes within a family are fragile.
 
-**Manageable session shape.** One vig_stack instrumentation session:
+**Shipped shape (Session 100, 2026-05-11).** One vig_stack instrumentation session:
 
-- Persist on each vig_stack opportunity/trade: `family`, `ladder_total_yes_sum`, `rung_count`, `selected_rung_rank`, `no_price`, `forecast_bucket_distance`, `time_to_close`, and relevant source/forecast metadata if already available.
-- Add a family x ladder-shape report to identify tail-loss patterns beyond family prefix.
+- 13 forward-only fields persisted on every accepted vig_stack decision in both `decisions.jsonl.extra` (un-prefixed) and `paper_trades.json` (renamed from `paper_*` by the executor): `family`, `ladder_total_yes_sum_cents`, `rung_count`, `selected_rung_rank_asc`, `selected_rung_rank_desc`, `rung_strike`, `rung_kind`, `no_price_cents`, `forecast_bucket_distance`, `source_forecast_temp`, `source_city`, `time_to_close_hr`, `ladder_context_source`. Helper module: `bot/vig_stack_ladder_context.py` (mirrors Session 99's `bot/live_momentum_proxy.py` shape).
+- `tools/calibration_report.py` extended with `report_vig_stack_ladder_shapes()` rendering two sections: per-family × `selected_rung_rank_asc` (all families) and per-weather-family × `forecast_bucket_distance` bucket (`KXHIGH*` / `KXLOW*` only — testing the KXHIGHAUS B-bucket hypothesis).
+- Phase 0 evidence: 7 of 8 wished-for fields were already computed at decision time and just discarded. Only `selected_rung_rank` needed new code (~10 lines: sort by parsed strike, find this opp's index). Motivating losses: two -$199 KXHIGHAUS B-bucket NO bets (B80.5, B89.5) on 2026-05-09/10 where the day's high landed inside the bucket.
 
-**Do not include yet.** Family cap/floor changes. Instrument first, then tune.
+**What did not change.** No behavior anywhere — no family cap/floor changes, no family disable/enable, no sizing. Accept-only scope on `decisions.jsonl` (reject rows keep their gate-specific extras). KXHIGHAUS B-bucket action explicitly waits for ≥14d of post-Session-100 evidence (watch-list trigger in `bot/state/active_observations.json` Session 100 entry, re-eval 2026-05-25).
 
 ### Priority 6: Paper liquidity and fill-quality realism
 
