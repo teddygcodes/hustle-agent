@@ -520,7 +520,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 102 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 105 (2026-05-11).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 
@@ -1017,6 +1017,43 @@ Bundle only when the data path, owner files, and verification story are shared. 
 **Manageable session shape.** This can ship together with Priority 1 because both read the same blocked-trade evidence. If Priority 1 is deferred, ship a smaller status-only session that computes known metrics from decisions/paper_trades without introducing new shadow rows.
 
 **Rule.** `active_observations.json` may remain the registry of expectations, but `current_value` should be computed by `glint_status.py` when the data source is machine-readable. Manual values are acceptable only for metrics without a data path yet.
+
+---
+
+## Open Loops: Deferred Items to Revisit
+
+Centralized backlog of items that have been investigated but deferred without a calendar trigger or auto-firing condition. **Items here will sit indefinitely without active work.** Items with calendar/threshold auto-triggers (S87 NHL convergence at 2026-06-08, S97 UFC at N≥15, S99 Brier at 2026-05-25, S100 KXHIGHAUS at N≥10 in bucket, S101 Layer 2 fires on counter event, S104 regime tagger when more daily buckets accumulate) are NOT here — they live in their session's watch-list trigger and surface in `glint_status §10 Active Observations` as data accumulates passively.
+
+When a new session ships an Outcome B (design doc) or Outcome C with deferred work that won't auto-resolve, **add an entry to this section** rather than burying it in the session ☑ block. Remove entries when the deferred work ships.
+
+### Blocked: needs dedicated session to unblock data collection
+
+Items where Outcome B was filed but no data accumulates passively.
+
+- **S96 — live_momentum context architectural gap.** Per-tick context emission only fires when `game_ctx` is available; many decision paths emit empty context. Surfaced concretely in S102 cohort analysis (matched N=2 instead of expected ~30). **Unblocks:** extend `_build_live_momentum_decision_context()` (`bot/live_watcher.py`) to populate context on broader decision paths. **Why it matters:** until this ships, every cohort analysis on live_momentum is N-thin and biased toward per-tick paths.
+
+- **S90 — Re-entry breaker counterfactual computation.** Shadow rows for `reentry_blocked` carry `sizing_status=unavailable`, making counterfactual P&L uncomputable. Surfaced concretely in S102 (couldn't validate whether the breaker is saving or costing money). **Unblocks:** add sizing computation to `bot/shadow_trades.py` writer for the `reentry_blocked` path so each shadow row has `would_contracts` + `would_notional`. **Why it matters:** without this we can't measure whether S90's threshold (N=1) is correct vs N=2.
+
+- **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **Unblocks:** build a manual labeled Kalshi↔Polymarket pair corpus (~50-100 pairs) by hand-labeling against historical settled markets, OR locate an emerging public dataset. **Why it matters:** without a validation corpus, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
+
+### Operational hygiene not yet shipped
+
+Items observed during operation but not prioritized for a session. No calendar trigger.
+
+- **Telegram `edit_message_text` "Message is not modified" dedup spam.** Error rate has been ~236/hour and escalating since 2026-05-10. Not bot-killing but heading toward 429 throttle territory (Battle Scar #15 lineage but different shape — not throttled yet). **Unblocks:** investigate per-message dedup hash logic in `bot/notifier.py`; likely missing duplicate-content detection on identical-state edits (live game cards re-rendered with no actual data change still trigger Telegram edit attempts).
+
+- **MOMENTUM_LEADER_MIN dead-zone filter (Session 2 historical).** Currently `MOMENTUM_LEADER_MIN = 0.70` admits the negative-EV `[75-80¢)` zone. **Unblocks:** explicit `[75-80¢)` exclusion in `is_leader()` rather than tightening the MIN floor (which would surrender the positive `[70-75¢)` bucket). Original mention narrative in this file's "Money" section (~line 513).
+
+### S101 Layer 2 — borderline (in this section but with auto-trigger)
+
+- **S101 Layer 2 — outer `wait_for` binding fix on Python 3.14.** S98's outer 600s `asyncio.wait_for` failed silently — likely an `asyncio.get_event_loop()` vs `get_running_loop()` binding issue. S101 Layer 1 (per-request 30s daemon-thread guard) is verified working and bounds the actual cadence problem. Layer 2 is now belt-and-suspenders rather than urgent. **Auto-trigger:** if `snapshot_outer_timeout_count_24h` remains absent for ≥7 days while Layer 1's `_kalshi_get total wall-clock timeout` log line fires non-zero times during the same window, ship Layer 2. Otherwise demote to operational hygiene above when convenient.
+
+### Cross-references (do NOT duplicate here)
+
+- **Net-new instrumentation needs** → "Data Collection Backlog" above (P4 counterfactual exit paths, P6 paper liquidity realism — both still open as of Session 105).
+- **Lifecycle / smart-bot vision** → "Future Direction" section above (north star, NOT BUILDING YET, readiness gate).
+- **Auto-firing watch-list triggers** → individual session ☑ blocks in `CLAUDE-sessions.md` + `bot/state/active_observations.json` registry; surface in `glint_status §10 Active Observations`.
+- **Battle Scars** (operational gotchas already known) → "Critical Gotchas (Battle Scars)" section above.
 
 ---
 
