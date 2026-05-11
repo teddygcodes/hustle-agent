@@ -242,5 +242,43 @@
         "last_updated": "2026-05-11T21:40:23+00:00"
       }
     ]
+  },
+  {
+    "session": 102,
+    "shipped_at": "2026-05-11T23:30:00+00:00",
+    "description": "live_momentum cohort + breakeven deep dive — Outcome C (documentation-only ship). Phase 0 evaluated still-enabled live_momentum sports (NHL, IPL, UFC), the S90 re-entry breaker counterfactual, and S96 context cohort slicing. No single highest-confidence intervention surfaced: UFC at n=11 is below S97's stated N>=15 re-eval threshold; S90 counterfactual is uncomputable due to sizing-unavailable on shadow rows (substrate gap); S96 cohort matched N=2 (too thin). S97 enforcement verified working (post-S97-ship ATP attempts all reject with sport_disabled). No code changes; comprehensive documentation in CLAUDE-sessions.md Session 102 block.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "UFC settled live_momentum trade count (S97 watch-list carryover)",
+        "expectation": "re-run breakeven analysis when N >= 15; currently n=11 with -23.9pp lifetime gap vs BE. If at N=15 the lifetime WR is still below BE by >=5pp AND the post-S97-ship sub-cohort isn't clearly profitable, ship a follow-on UFC disable session.",
+        "current_value": 11,
+        "last_updated": "2026-05-11T23:30:00+00:00"
+      },
+      {
+        "name": "post-Apr-23 settled live_momentum cohort size (S41 watch-list trigger)",
+        "expectation": "S41's N>=60 threshold met at N=66 on 2026-05-11; queue a Session 103+ candidate to re-run S41's TP/SL training sweep on the expanded cohort and check whether the SL-axis-flat finding still holds. If a new TP winner emerges that's an actionable Outcome A.",
+        "current_value": 66,
+        "last_updated": "2026-05-11T23:30:00+00:00"
+      },
+      {
+        "name": "settled live_momentum trades with S96 context matched in decisions.jsonl",
+        "expectation": "expected >=20 by 2026-05-14 (~3 days post-S96 ship); re-run S102 0.3 cohort-slicing on leader_price / dip_cents / spread_cents / volume_24h / completion buckets at that point. Today's matched count was N=2 (architectural gap: S96 emits context only on per-tick path with game_ctx available, not all 6 scan-time sites).",
+        "current_value": 2,
+        "last_updated": "2026-05-11T23:30:00+00:00"
+      },
+      {
+        "name": "shadow_trades.jsonl reentry_blocked rows with sizing_status=available (S90 substrate gap)",
+        "expectation": "0 today; remains 0 until a future session wires pre-block sizing into bot/live_watcher.py's reentry-reject path. Without computable counterfactual P&L (would_contracts / would_notional are null on all reentry_blocked shadow rows today), S90's N=1 threshold cannot be data-validated. Watch-list trigger: if S90 fires >=10 times across 14d without sizing wiring, prioritize the substrate fix.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T23:30:00+00:00"
+      },
+      {
+        "name": "S97 enforcement on atp + nba_game (Session 102 0.4 verification carry-forward)",
+        "expectation": "0 new live_momentum accepts on atp or nba_game post-S97-ship. Verified working on 2026-05-11: 4 ATP attempts on 2026-05-11 all rejected with reason=sport_disabled. Regression check if any new accepts appear.",
+        "current_value": "verified 0 new accepts post-2026-05-11 morning",
+        "last_updated": "2026-05-11T23:30:00+00:00"
+      }
+    ]
   }
 ]

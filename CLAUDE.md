@@ -520,7 +520,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 100 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 102 (2026-05-11).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 

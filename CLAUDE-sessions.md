@@ -5420,3 +5420,99 @@ This ship reverses Session 38a's atp re-enable. Session 38a was based on CF data
 - **Inner-deadline overshoot recurrence.** If `bot.log` shows another SCAN CYCLE gap > 60 min during awake hours within 14 days of this ship, the Layer 1 daemon-thread guard did not bound the leak as expected. Investigate whether the `t.join(timeout=30)` is itself hitting a Python GIL issue or whether a second un-instrumented HTTP path is being exercised (e.g. `kalshi-python` SDK calls in `_get_public_client` / `_get_auth_client` paths, not `_kalshi_get`).
 - **Thread leak monitoring.** If `ps -o nlwp` on the bot process shows > 200 threads within 7 days, leaked workers are accumulating faster than they're being cleaned up. Investigate whether the daemon threads are actually self-terminating after the underlying drip completes (some sockets may stay open indefinitely if Kalshi never closes them and the OS doesn't time out the TCP connection). Mitigation if needed: switch to `concurrent.futures.ThreadPoolExecutor(max_workers=N)` and explicitly cancel pending Futures on timeout.
 - **Layer 2 + Layer 1 interaction.** When Layer 2 is eventually fixed, verify it interacts cleanly with Layer 1: a single hung urlopen would be caught by Layer 1's 30s daemon-thread guard before Layer 2's 600s outer `wait_for` would have had reason to fire. Layer 2's reason for existing post-Session-101 is to catch unbounded loops in other downstream code (e.g. if a future Kalshi client method bypasses `_kalshi_get`), not to redundantly bound `_kalshi_get` itself.
+
+### ☑ Session 102 — live_momentum cohort + breakeven deep dive (2026-05-11, Outcome C documentation-only ship)
+
+**Trigger.** Tyler queued this deep dive 5 days ago ("deep dive before completely giving up on it") — a comprehensive look at whether the still-enabled live_momentum sports (NHL, IPL, UFC) carry their own per-sport edge, whether S90's re-entry breaker is correctly calibrated, and what S96's per-decision context fields reveal once we slice settled trades by leader_price / dip_cents / etc. The substrate ships (S95 shadow ledger, S96 context, S97 partial-disable, S99 fair-value proxy) made the analysis possible. The −$49.16 cumulative bleed across 108 settled trades is the remaining research-arm cost; the brief explicitly authorized Outcome C if no single high-confidence intervention surfaces. **S101 had named a Layer 2 outer-`wait_for`-binding investigation as the next Session 102 candidate — Tyler re-prioritized to this live_momentum deep dive, with the Layer 2 work queued forward.**
+
+**Phase 0 — verify the premise before scoping.** Five measurements, dispatched as three parallel Explore agents per the S84/S89 precedent; corrections applied inline after agent results revealed unit errors and mislabeled cohorts.
+
+- **0.1 Per-sport breakeven on still-enabled live_momentum sports** (NHL, IPL, UFC). Source: `bot/state/paper_trades.json` filtered to `type=="live_momentum"` AND `resolved_at` present. Lifetime cohort verification: N=108, cumulative P&L = **−$49.16**, WR = **52.8%** (matches brief). Lifetime per-sport table for the three still-enabled sports:
+
+  | Sport | N | WR | Avg Win | Avg Loss | BE WR | P&L | Status |
+  |-------|---|----|---------|----------|-------|-----|--------|
+  | NHL (combined `nhl_game` + legacy `nhl` sport tag) | 12 | 83.3% | $2.78 | $8.10 | 74.4% | +$11.60 | PROFITABLE (+8.9pp above BE) |
+  | IPL | 13 | 53.8% | $13.43 | $6.71 | 33.3% | +$53.71 | PROFITABLE (+20.5pp above BE) |
+  | UFC | 11 | 36.4% | $1.38 | $2.09 | 60.3% | −$9.10 | STRUCTURALLY LOSING (−23.9pp below BE) |
+
+  For reference (S97-disabled cohorts that drive the lifetime negative): ATP n=22 / WR 40.9% / BE 68.2% / −$45.60 (gap −27.2pp); nba_game combined n=26 / WR 53.8% / BE 70.7% / −$44.97 (gap −16.9pp). These match S97's own Phase 0.1 evidence exactly.
+
+  **Pre-/post-S97 cohort split was NOT meaningful for this analysis** — S97 shipped earlier today (2026-05-11), so there has not been enough wall-clock time for a meaningful post-S97 entry cohort. Phase 0.1 Explore agent (Agent 1) reported a "post-S97" table that actually used the **Session 54 paper-balance fix date (2026-05-05T05:45:53Z)** as its cutoff because that's the boundary S97's own Phase 0.2 used internally for its post-Session-54 cohort split. Agent 1's "16 post-S97 ATP trades" were trades **entered** when ATP was enabled (post-Session-38a re-enable through pre-S97-ship today) and **resolved** between 2026-05-05 and 2026-05-11 — they are the evidence S97 was built to disable, not S97 enforcement failures. Inline verification of `decisions.jsonl` confirms S97 IS enforcing (see 0.4 below).
+
+  **UFC critical sample-size discipline.** UFC's n=11 is below S97's stated re-evaluation threshold of N≥15. The brief explicitly cites this: "n<10 is too thin to act on (S97 precedent: UFC at n=11 was held back specifically for N borderline)." Holding off matches the S97 discipline; UFC stays in monitoring.
+
+- **0.2 S90 re-entry breaker counterfactual.** Source: `bot/state/shadow_trades.jsonl` (canonical per CLAUDE.md schema) + `bot/state/decisions.jsonl`. Recount versus brief and Agent 2's report:
+
+  - `reentry_blocked` rows in **decisions.jsonl**: **4** (2026-05-10 16:20 IPL MIRCB, 2026-05-10 19:57 ATP ARNJOD, 2026-05-11 14:54 IPL DCPBKS, 2026-05-11 15:54 IPL DCPBKS — last two are repeat blocks on the same market 1h apart).
+  - `reentry_blocked` rows in **shadow_trades.jsonl**: **2** (both 2026-05-11 IPL DCPBKS). The 5/10 fires predate the shadow-ledger wiring and don't have shadow rows. Brief said "6 in 2.9 days" — that count appears to have been an approximate tally; canonical evidence shows 4 fires across ~36h.
+
+  **Counterfactual P&L is STRUCTURALLY UNCOMPUTABLE for this session.** Both shadow rows carry `would_contracts=None` / `would_notional=None` with `sizing_status="unavailable"` — exactly the shape CLAUDE.md's Canonical Data Schema documents for live-watcher blocked paths that lack pre-block sizing: *"If a blocked live-watcher path lacks contracts, keep `would_contracts`/`would_notional` null and use `sizing_status='unavailable'`."* The pre-block sizing computation isn't wired into the live_watcher reentry-reject path. **Agent 2's reported counterfactual aggregate (+$10,393 in prevented wins → "S90 too tight") was based on fabricated contract counts (337 / 289)** that are not present in `shadow_trades.jsonl`, plus a units error multiplying decimal-dollar P&L by 100× on the win row (337 × $0.32 = $107.84, not $10,784). Both errors compounded into a verdict that flipped the right answer. With sizing-unavailable on both shadow rows, no honest counterfactual P&L can be computed today.
+
+  **Verdict (mechanism, not counterfactual):** S90 working as designed at the breaker level — correctly blocking the second loss-bearing IPL DCPBKS entry attempt after the first lost. **No threshold change recommended.** The S90 N=1 calibration cannot be re-evaluated until pre-block sizing is wired into the live_watcher reentry path; that's a substrate gap queued forward (see watch-list triggers).
+
+- **0.3 Cohort slicing on Session 96 context fields.** Source: `bot/state/decisions.jsonl` (S96 context, forward-only since 2026-05-10) ↔ `bot/state/paper_trades.json` (settled live_momentum trades). Phase 0.3 Explore agent.
+
+  **N matched = 2** — both are the same KXIPLGAME-26MAY11DCPBKS-PBKS trade (entry + exit decision rows), both losing. S96 schema verification: all six brief-listed fields (`leader_price`, `dip_cents`, `spread_cents`, `volume_24h`, `completion`, `match_phase`) plus three additional fields (`dqs`, `momentum`, `wp_edge`) are present in post-S96 decisions.jsonl entries. The bottleneck is not schema — it's that S96 emits context only on the per-tick path at [bot/live_watcher.py:1422-1453](bot/live_watcher.py:1422) where `game_ctx` is available; the 6 scan-time call sites operate with `game_ctx=None` so the proxy returns None and context drops out. ~36h of S96 instrumentation has produced 9 settled live_momentum trades total / 2 with matched context. Brief estimated 30-50; the architectural gap explains the shortfall.
+
+  **Verdict: NO actionable signal.** N=2 is far below the brief's N≥5 bucket threshold for surfacing fragile/strong cohorts. **Re-investigation deferred until ~2026-05-14** when ≥3-4 days of post-S96 settlements have accumulated. Brief discipline explicitly anticipates this: *"S96's context instrumentation has been collecting per-decision data forward-only since 2026-05-10 (~36h) — calibration caveat: N may be too small per bucket to be definitive."*
+
+- **0.4 Session 41 watch-list trigger investigation.** Source: CLAUDE-sessions.md Session 41 entry + current cohort.
+
+  **S41's watch-list trigger fired ✓.** S41 was watching: *"Re-investigate when EITHER (a) post-Apr-23 settled live_momentum cohort grows to ≥ 60 trades, AND/OR (b) the SL-axis-flat finding ceases to hold (any future SL value within [20, 35] produces a per-row Σ P&L delta ≥ +50¢ on training)."* Current state: post-Apr-23 settled live_momentum N = **66** ✓ (clause (a) met). The SL-axis-flatness re-check on the expanded 66-trade cohort requires re-running S41's training sweep — that's a research session, not a one-line ship. **Queued as a Session 103+ candidate** (see watch-list triggers).
+
+  **S97 enforcement verification (surfaced incidentally during 0.4 cross-check).** `bot/state/decisions.jsonl` shows live_momentum activity on ATP by date:
+
+  - 2026-05-10 (pre-S97-ship): 8 decisions, **4 accepts** on `dip_buy` / `all_gates_passed`.
+  - 2026-05-11 (post-S97-ship): 4 decisions, **all 4 reject with `reason=sport_disabled`** ✓.
+
+  S97's `MOMENTUM_DISABLED_SPORTS = {atp, atp_challenger, nba_game, wta, wta_challenger}` set-membership extension is enforcing correctly at the live_watcher entry gate. This was the load-bearing finding that ruled out an "S97-enforcement-broken" Outcome A intervention candidate.
+
+- **0.5 Sizing snapshot.** Data-gathering only per brief (S99's `estimated_win_prob` proxy too fresh — 0 resolved trades carry the field at session start; re-eval ~2026-05-25 per S99 watch-list).
+
+  | Sport | Median cost/trade | Lifetime ROI | Notes |
+  |-------|-------------------|--------------|-------|
+  | NHL (combined) | ~$17/trade | +6.7% | Steady; small per-trade size. |
+  | IPL | ~$200/trade | +2.1% | Variance-dominated by 1-2 outsized wins; cost basis 10× others because of `_compute_max_contracts` artifact (lower entry price → more contracts at same Kelly fraction). |
+  | UFC | ~$8/trade | −9.9% | Cap-protected; small absolute losses. |
+
+  No sizing override recommended. Documented for the Session 103+ confidence-weighted-sizing session when S99 proxy is mature.
+
+**Decision: Outcome C.** Highest-confidence-single-intervention candidates evaluated:
+
+| Candidate intervention | Highest-confidence? | Blocker |
+|------------------------|---------------------|---------|
+| Disable UFC | NO | n=11 below S97's stated N≥15 threshold; brief's own discipline rules this out ("UFC at n=11 was held back specifically for N borderline"). |
+| Adjust S90 to N=2 | NO | Counterfactual P&L is uncomputable due to sizing-unavailable shape on both shadow rows; no evidence base for a calibration change. |
+| Tighten an entry gate from §0.3 | NO | N=2 matched — far below the N≥5 bucket threshold. |
+| Add sport-specific sizing override | NO | S99 proxy too fresh (0 resolved trades; re-eval ~2026-05-25). |
+| Re-investigate S41's SL-axis flatness on N=66 | Research session, not a one-line ship — queue as follow-on. |
+
+Outcome B (design doc) is overkill — nothing structurally new surfaced. The substrate ships (S95 + S96 + S97 + S99) already addressed the addressable structural concerns; the −$49 bleed is concentrated in the now-disabled ATP + nba_game cohorts. Brief explicitly authorizes Outcome C: *"If Phase 0 surfaces NO actionable findings (everything within expected variance), default to Outcome C. A clean 'no action needed, here's what the data shows' outcome is honest and saves future sessions from re-doing the analysis."* **Pattern C count after this ship: 16.**
+
+**What did NOT change.**
+- No code changes anywhere. No `bot/config.py` disable-set extension. No `bot/live_watcher.py` gate tightening. No `bot/sizing.py` per-sport override. No new helper modules.
+- No tests added/modified.
+- No bot restart. Bot PID 90247 (S101 restart) continues running with the same configuration. S97's `MOMENTUM_DISABLED_SPORTS` is already in force; nothing this session adds requires a hot reload.
+- No `tools/journal_analysis.py` or `tools/calibration_report.py` extension — both were used read-only during analysis.
+- No CLAUDE.md operator-manual rewrites — only a one-line "Most recent ship" pointer bump (and incidental Session 100 → Session 102 bump catching a stale pointer S101 didn't update).
+- No re-enable of ATP, nba_game, or any other disabled sport. S97 just shipped today; ≥14d shadow ledger data minimum before reconsidering (per S97 watch-list).
+
+**Verification.**
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1625 passed** (baseline unchanged from S101's 1625; no code changes). Run from `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cwd discipline).
+- ☑ Bot left running (PID 90247 from S101 restart). No functional changes to verify in-process.
+- ☑ Operating Posture compliance (CLAUDE.md "Always Search for New Possibilities"): §0.3 cohort slicing was framed to find tightening opportunities, not to "lock in" current behavior — N too thin, queued re-investigation rather than codifying. Agent 1's "post-S97 ATP" finding initially looked like a S97 enforcement bug; inline verification surfaced it as a misleading cohort label, not a bug.
+
+**Docs.**
+- This file (CLAUDE-sessions.md) — Session 102 ☑ block added.
+- `CLAUDE.md` — "Most recent ship" pointer bumped from "Session 100" (stale — S101 didn't update) to "Session 102."
+- `bot/state/active_observations.json` — Session 102 entry added with five metrics (UFC settled count, post-Apr-23 cohort size, S96 matched-context trade count, S90 sizing-unavailable substrate gap, S99 proxy resolved-trade count).
+- README Session 102 recap added.
+
+**Watch-list triggers.**
+- **UFC re-evaluation at N≥15** (carryover from S97). When the next 4 UFC settled live_momentum trades land, re-run §0.1 breakeven on the n=15 UFC cohort. If WR still below BE by ≥5pp on the lifetime cohort AND the post-S97-ship-date sub-cohort isn't clearly profitable, ship a follow-on disable session.
+- **S96 cohort re-investigation at 2026-05-14.** When ≥20 settled live_momentum trades carry S96 context (forward-only), re-run §0.3 bucket analysis. If any bucket N≥5 shows WR<40% or WR>70%, queue a gate-tightening or play-strengthening session. Brief's framing: "Don't pre-write Session 103. One ship at a time." This watch-list trigger respects that.
+- **S41 TP/SL sweep on N=66 cohort.** Queued as Session 103+ candidate. Re-run S41's training sweep with the current 66-trade post-Apr-23 cohort and check whether the SL-axis flatness still holds. If a new TP winner emerges, that's the actionable Outcome A.
+- **S99 confidence-weighted sizing re-eval at 2026-05-25** (carryover from S99 14d Brier window). If `paper_trades.json` shows ≥30 resolved live_momentum trades carrying `estimated_win_prob` with Brier ≤ 0.20, queue a sizing session.
+- **S90 sizing-unavailable substrate gap.** Queued as a substrate ship. Wire pre-block sizing computation into the [bot/live_watcher.py](bot/live_watcher.py) reentry-reject path (likely near the existing reentry gate check) so shadow rows can carry `would_contracts` / `would_notional` and `sizing_status="available"`. Without this, S90 calibration remains permanently inferential. Mirrors the substrate-investment shape of S95 / S96 / S99 (data first, then act).
+- **NHL vigilance** (carryover from S97). If 14d rolling NHL WR drops below 78%, escalate — BE is high (74.4%) and small drift could flip it.
+- **Layer 2 outer-`wait_for` binding fix** (carryover from S101). Independent of this session's findings; Tyler re-prioritized S102 to the live_momentum deep dive but the S101-queued Layer 2 investigation remains valid as a Session 103+ candidate per the S101 watch-list trigger language ("Open Session 102 to investigate the `asyncio.get_event_loop()` → `asyncio.get_running_loop()` migration").
