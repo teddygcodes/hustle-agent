@@ -337,6 +337,93 @@ def test_main_loop_runs_snapshot_universe_via_executor(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 98 — snapshot_universe outer wall-clock timeout
+# ---------------------------------------------------------------------------
+
+
+def test_main_loop_aborts_long_snapshot_after_outer_timeout(tmp_path, monkeypatch):
+    """Session 98: _main_loop must abandon a stuck snapshot_universe after the
+    outer asyncio.wait_for timeout, log an ERROR, increment the daily counter,
+    and continue to the next iteration.
+
+    Without this guard, snapshot_universe overruns its internal 300s deadline
+    by hours when Kalshi is flaky (Phase 0.1 evidence: May 10 03:08-11:07 UTC
+    = 479-min gap). The Session 39 run_in_executor wrap keeps heartbeat and
+    live_watcher responsive but doesn't bound _main_loop's own commitment;
+    this test pins the outer cap so cadence recovers across flaky windows.
+    """
+    import time as _time
+    from bot import main as botmain
+
+    class _PausableNotifier:
+        paused = False
+
+        async def send_message(self, *_, **__):
+            pass
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+    bot.notifier = _PausableNotifier()
+
+    # Shrink the outer timeout so the test is fast.
+    monkeypatch.setattr(botmain, "_SNAPSHOT_OUTER_TIMEOUT_SEC", 0.1)
+
+    # snapshot_universe sleeps long enough to trigger the outer timeout.
+    def slow_snapshot(_scan_id):
+        _time.sleep(0.5)
+        return 0
+
+    monkeypatch.setattr(botmain._universe, "snapshot_universe", slow_snapshot)
+    monkeypatch.setattr(botmain._universe, "get_buffered_markets", lambda _: [])
+    monkeypatch.setattr(botmain._universe, "flush_universe", lambda _: 0)
+    monkeypatch.setattr(botmain._universe, "on_market_seen", lambda *a, **kw: None)
+
+    # Capture state writes — the counter increment is the contract under test.
+    saved_states: list[dict] = []
+    monkeypatch.setattr(botmain, "_load_bot_state", lambda: {})
+    monkeypatch.setattr(
+        botmain, "_save_bot_state", lambda state: saved_states.append(dict(state))
+    )
+
+    class _NoopLock:
+        def touch(self):
+            pass
+
+    monkeypatch.setattr(botmain, "LOCK_FILE", _NoopLock())
+
+    async def fake_scheduled(_self):
+        return None
+
+    monkeypatch.setattr(botmain, "check_scheduled_events", fake_scheduled)
+
+    # The 60s post-timeout recovery sleep is the exit hook; flip _running
+    # so the next loop iteration bails at the `while self._running` gate.
+    sleeps: list[float] = []
+
+    async def fake_sleep(secs):
+        sleeps.append(secs)
+        bot._running = False
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(bot._main_loop())
+
+    counter_values = [
+        s.get("snapshot_outer_timeout_count_24h") for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "snapshot_outer_timeout_count_24h was not incremented after the outer "
+        f"asyncio.wait_for fired; saved counter values: {counter_values}"
+    )
+
+    assert 60 in sleeps, (
+        "expected a 60s recovery sleep after the timeout; got sleeps="
+        f"{sleeps}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------
 

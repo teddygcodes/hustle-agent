@@ -76,6 +76,20 @@ _VIG_STACK_OPP_TYPES = ("vig_stack_no", "vig_stack_series")
 # though exit exemptions intentionally remain limited to _VIG_STACK_OPP_TYPES.
 _VIG_STACK_SIZING_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_futures")
 
+# Session 98 (2026-05-11): outer wall-clock cap on snapshot_universe.
+# bot/universe.py:_SNAPSHOT_DEADLINE_SEC=300 is checked per-page, so layered
+# Kalshi-client + urllib3 retries can blow past it by hours (Phase 0.1
+# evidence: May 10 03:08-11:07 UTC = 479-min gap where the internal deadline
+# fired only after 666 pages × ~38s/page = 7+ hours). 600s is 1.5x the
+# worst-case non-pathological runtime (300s + ~100s overshoot) and well above
+# normal-conditions max (~30s) and moderate-flake max (~120s). The Session 39
+# run_in_executor wrap keeps OTHER coroutines responsive; this outer wait_for
+# bounds _main_loop's own commitment so cadence recovers from Kalshi flakes.
+# On timeout: log, increment bot_state.snapshot_outer_timeout_count_24h,
+# sleep 60s, continue. The leaked executor thread runs to completion in the
+# background — acceptable for rare 1-2x/day timeouts.
+_SNAPSHOT_OUTER_TIMEOUT_SEC = 600
+
 
 # ---------------------------------------------------------------------------
 # Persistent pending queue helpers
@@ -1247,6 +1261,7 @@ class GlintBot:
                 state["scans_today"] = 0
                 state["crypto_trades_today"] = 0
                 state["telegram_throttled_count_24h"] = 0
+                state["snapshot_outer_timeout_count_24h"] = 0  # Session 98
                 state["current_date"] = today
             state["scans_today"] = state.get("scans_today", 0) + 1
             _save_bot_state(state)
@@ -1266,8 +1281,38 @@ class GlintBot:
             # _live_scan_loop / _heartbeat_loop / _position_check_loop /
             # Telegram polling. Run it on the default executor so the loop
             # stays responsive. Mirror the pattern at lines 923, 1082, 1408.
+            #
+            # Session 98 (2026-05-11): the executor wrap kept OTHER coroutines
+            # responsive but did not bound _main_loop's OWN await. Phase 0.1
+            # observed an 8h gap on May 10 03:08-11:07 UTC where
+            # snapshot_universe vastly overshot its internal 300s deadline.
+            # Wrap the await in asyncio.wait_for with a hard outer cap.
+            # On timeout: log, increment counter, sleep 60s, continue.
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: _universe.snapshot_universe(scan_id))
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, lambda: _universe.snapshot_universe(scan_id)
+                    ),
+                    timeout=_SNAPSHOT_OUTER_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "snapshot_universe outer-deadline %ds exceeded (scan_id=%s) — "
+                    "abandoning scan, retrying next cycle. Likely flaky Kalshi; "
+                    "see Battle Scar #13 / Session 98.",
+                    _SNAPSHOT_OUTER_TIMEOUT_SEC, scan_id,
+                )
+                try:
+                    state = _load_bot_state()
+                    state["snapshot_outer_timeout_count_24h"] = (
+                        state.get("snapshot_outer_timeout_count_24h", 0) + 1
+                    )
+                    _save_bot_state(state)
+                except Exception:
+                    logger.exception("snapshot_outer_timeout counter update failed")
+                await asyncio.sleep(60)
+                continue
             # Session 13a: pull the snapshotted universe out as a list of
             # Market dataclasses so scan_cycle can pass it to the
             # Strategy contract without strategies re-fetching from
