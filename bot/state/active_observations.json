@@ -128,5 +128,43 @@
         "last_updated": "2026-05-11T14:54:00+00:00"
       }
     ]
+  },
+  {
+    "session": 99,
+    "shipped_at": "2026-05-11T16:00:00+00:00",
+    "description": "live_momentum scalar fair-value proxy (estimated_win_prob) — Data Collection Backlog Priority 3 instrumentation, no sizing changes",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "live_momentum decisions with non-null estimated_win_prob in decisions.jsonl.extra",
+        "expectation": "rising forward; non-null when wp_edge + leader_price both present (entry-decision sites at live_watcher.py:1422-1453). Stays null at scan-time sites where game_ctx=None — that's correct, not a regression.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T16:00:00+00:00"
+      },
+      {
+        "name": "live_momentum paper_trades records carrying estimated_win_prob",
+        "expectation": "rising forward on accepted live_momentum trades. paper_trades.json filter: type==live_momentum AND estimated_win_prob present. Pre-Session-99 trades won't carry the field (forward-only).",
+        "current_value": 0,
+        "last_updated": "2026-05-11T16:00:00+00:00"
+      },
+      {
+        "name": "tools/calibration_report.py renders live_momentum proxy section",
+        "expectation": "yes; pre-trades shows 'ships forward-only; expect first calibration after ~14d' caveat; post-trades renders Brier + bias + bucket table",
+        "current_value": "renders, n=0 caveat (verified pre-restart)",
+        "last_updated": "2026-05-11T16:00:00+00:00"
+      },
+      {
+        "name": "vig_stack records spillover of estimated_win_prob (regression-lock)",
+        "expectation": "0; any vig_stack paper_trades.json record carrying estimated_win_prob means a non-live_watcher writer started populating paper_estimated_win_prob in its opp dict. Investigate the writer; vig_stack should never produce this field.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T16:00:00+00:00"
+      },
+      {
+        "name": "Brier score on resolved live_momentum proxy calibration (watch-list trigger)",
+        "expectation": "re-evaluate proxy model after 14d (target 2026-05-25). If Brier <= 0.20 across >= 30 resolved trades, the proxy is calibrated enough to consider confidence-weighted sizing in a future session. Brier > 0.25 means worse-than-random — investigate the v1 math identity (likely a game_context.win_probability quality issue, not a proxy bug).",
+        "current_value": "n/a (no resolved trades yet)",
+        "last_updated": "2026-05-11T16:00:00+00:00"
+      }
+    ]
   }
 ]

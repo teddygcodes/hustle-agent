@@ -707,6 +707,16 @@ allowlisted no-entry/entry context:
   "source": "watcher" | "scan",
   "context_available": bool,
   "missing_context_fields": list[str],
+  # Session 99 forward-only — scalar fair-value proxy. Present when
+  # _build_live_momentum_decision_context is called from the per-tick site at
+  # bot/live_watcher.py:1422-1453 (game_ctx-available path) AND wp_edge +
+  # leader_price are both populated. Absent at the 6 scan-time call sites
+  # (game_ctx=None, so wp_edge=None, so the proxy returns None — the merge
+  # then drops it from the dict). Calibration via tools/calibration_report.py
+  # → report_live_momentum_calibration().
+  "estimated_win_prob": float | None,  # clamp(wp_edge + leader_price/100, 0.05, 0.95)
+  "model_source": str,                 # "game_context_win_probability_v1"
+  "confidence_components": dict,       # {wp_edge, market_implied, pre_clamp_raw, clamped}
 }
 ```
 
@@ -791,9 +801,12 @@ price are known. If a blocked live-watcher path lacks contracts, keep
   "exit_reason": str | None,           # 'auto_take_profit' | 'auto_cut_loss' | 'edge_flipped' | 'manual' | etc. Persisted forward-only since Session 36.
   "dqs": float | None,                 # Dip Quality Score at entry. live_momentum ONLY, forward-only since Session 50 (2026-05-01). None on conviction-without-DQS paths and absent on all non-live_momentum strategies. Source: bot/game_context.py:compute_dip_quality() per Session 33.
   "sport": str | None,                 # Lowercase sport tag. live_momentum ONLY, forward-only since Session 50 (2026-05-01). Also set on live_latency_arb (WATCH path) records. Absent on vig_stack records.
+  "estimated_win_prob": float | None,  # Scalar fair-value proxy clamped [0.05, 0.95]. live_momentum ONLY, forward-only since Session 99 (2026-05-11). Mathematically: wp_edge + leader_price/100 ≡ game_context.win_probability at entry tick. Absent on vig_stack records. Calibrated via tools/calibration_report.py → report_live_momentum_calibration().
+  "model_source": str | None,          # Identifier for the proxy model that produced estimated_win_prob. live_momentum ONLY, forward-only since Session 99. Currently "game_context_win_probability_v1"; bump to _v2 for any future variant that incorporates DQS, momentum tilts, or additional signals.
+  "confidence_components": dict | None,# Diagnostic dict for the proxy. live_momentum ONLY, forward-only since Session 99. Shape is model-version-dependent. v1 carries {wp_edge, market_implied, pre_clamp_raw, clamped}; downstream readers must handle absent keys gracefully across versions.
   "timestamp": str,                    # ISO 8601 UTC, entry time. Canonical for paper_trades (NOT 'ts' which decisions.jsonl uses)
   "resolved_at": str | None,           # settlement time
-  # Note: paper_trades.json had NO 'sport' field pre-Session 50; for older records, derive from ticker prefix via the per-game/futures map below. Same for `dqs` (live_momentum only) and the meaningful-confidence value on live_momentum trades.
+  # Note: paper_trades.json had NO 'sport' field pre-Session 50; for older records, derive from ticker prefix via the per-game/futures map below. Same for `dqs` (live_momentum only) and the meaningful-confidence value on live_momentum trades. Pre-Session-99 live_momentum trades won't carry `estimated_win_prob`/`model_source`/`confidence_components` — readers must treat absence as None.
 }
 ```
 
@@ -927,17 +940,19 @@ Bundle only when the data path, owner files, and verification story are shared. 
 
 **What did not change.** No entry logic, exit logic, sizing, disabled sports, thresholds, active strategy lists, or vig_stack behavior. This was data collection only.
 
-### Priority 3: live_momentum fair-value proxy
+### Priority 3: live_momentum fair-value proxy — shipped Session 99
 
 **Gap.** live_momentum still lacks a reliable scalar predicted probability. Calibration and sizing are weaker because the strategy logs price-action decisions but not a comparable "our fair" value at entry.
 
-**Manageable session shape.** One research/plumbing session:
+**Shipped shape (Session 99, 2026-05-11).** One instrumentation session:
 
-- Define a conservative `estimated_win_prob` for live_momentum entries from available `GameContext` fields (`win_probability`, `wp_edge`, leader price, momentum, DQS).
-- Persist `estimated_win_prob`, `model_source`, and `confidence_components` on live_momentum decisions/trades forward-only.
-- Extend `tools/calibration_report.py` to separate this proxy from vig_stack fair-value calibration so bad proxy performance cannot be mistaken for a vig_stack model failure.
+- Conservative `estimated_win_prob` for live_momentum decisions: `clamp(wp_edge + leader_price/100, 0.05, 0.95)`. Phase 0 surfaced the math identity — this reconstructs `game_context.win_probability` exactly when both inputs are present; the proxy persists an existing scalar that wasn't being saved. Model identifier: `game_context_win_probability_v1`.
+- Persisted `estimated_win_prob`, `model_source`, `confidence_components` on:
+  - `decisions.jsonl.extra` for every live_momentum decision (merged into `primary_context`/`opponent_context` at the per-tick build site).
+  - `paper_trades.json` for every accepted live_momentum trade (Session 50 forward-only pattern; vig_stack records stay clean).
+- `tools/calibration_report.py` extended with a separate `report_live_momentum_calibration()` section reading paper_trades.json so bad proxy performance cannot be mistaken for a vig_stack model failure.
 
-**Do not include yet.** Sizing changes. First measure calibration; size later.
+**What did not change.** No sizing. No entry/exit logic. No threshold tuning. No predictions.jsonl writes for live_momentum (paper_trades.json is the calibration source). This was data collection only — first measure calibration; size later.
 
 ### Priority 4: Counterfactual exit paths for live_momentum
 
