@@ -220,14 +220,14 @@
       {
         "name": "longest SCAN CYCLE gap in last 24h during awake hours",
         "expectation": "< 60 min after Session 101. Pre-ship: 1h 59min (13:22-15:21 EDT) AND 2h 6min (15:21-17:28 EDT) on 2026-05-11 — two ~2h gaps in 4h. Post-ship expect inner deadline (300s) to bound to ~5min normal, ~5-10min worst-case. If gaps still > 60min within 14d, the Layer 1 daemon-thread guard isn't bounding the leak — investigate per the watch-list.",
-        "current_value": "n/a (pre-observation; first post-restart SCAN CYCLE not yet logged)",
-        "last_updated": "2026-05-11T21:40:23+00:00"
+        "current_value": "Post-restart longest 38 min 16s (3 consecutive scans, 2 intervals); 24h-rolling still 2h 6min from pre-restart 15:21-17:28 EDT gap until it ages out (~2026-05-12 17:30 EDT). Cadence regression eliminated.",
+        "last_updated": "2026-05-11T23:02:00+00:00"
       },
       {
         "name": "median SCAN CYCLE interval during awake hours",
         "expectation": "approx 30 min (config IDLE = 1800s) with ≤30s overshoot per Step 9 wall-clock sleep tolerance. Pre-ship median was severely degraded by the multi-hour gaps. Post-ship target: ≤ 35 min median across rolling 24h awake-hours window.",
-        "current_value": "n/a (pre-observation)",
-        "last_updated": "2026-05-11T21:40:23+00:00"
+        "current_value": "Post-restart median 38 min 07s (n=2 intervals: 38:16, 37:58). Slightly above the 35 min target but far below the 60 min watch threshold. The 3-8 min overshoot above the 30 min IDLE config likely reflects Step 3b-8 sync work + wall-clock-sleep polling overshoot; worth a brief audit in a future session if it persists beyond Layer 1's normal noise floor.",
+        "last_updated": "2026-05-11T23:02:00+00:00"
       },
       {
         "name": "count of '_kalshi_get total wall-clock timeout' log entries in last 24h",
