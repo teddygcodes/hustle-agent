@@ -5031,3 +5031,41 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 **Methodology validation.** This ship validates the breakeven-WR analysis methodology (loss/win ratio × actual WR vs. structural breakeven WR). If forward P&L improves vs. counterfactual continuation, the framework becomes reusable for future per-family decisions. If it fails (some unforeseen factor restores profitability), we learn the analysis is incomplete. Either outcome is informative — the 14-day observation window in `active_observations.json` will resolve it.
 
 **README sync.** Add a Session 93 recap entry calling out the breakeven-WR analysis, the per-family disable mechanism, the strict-filter Phase 0 reverification, and the +1 (not +3) test delta. Three-commit ship pattern preserved: code+tests, CLAUDE-sessions.md, README.md; then `git push origin main`.
+
+### ☑ Session 94 — Data collection backlog and first substrate session plan (May 10, planner doc-only)
+
+**Trigger.** Tyler asked what data Glint is not collecting that it should be collecting after the May 10 deep dive showed a clean split: `vig_stack` is the real profit engine (+$848.95 all-time / +$980.75 last 14d), while `live_momentum` remains a research arm (-$34.71 all-time / -$26.22 last 14d). The answer exposed seven collection gaps, but shipping them as one instrumentation blob would violate attribution discipline. This session turns those gaps into a prioritized, manageable backlog and drafts the first coder prompt.
+
+**Phase 0 evidence.**
+- `python3 tools/glint_status.py` at 2026-05-10 21:40 ET: bot alive, Degraded only on WARNs, +$814.24 net, 10 open vig_stack positions, 17 active candidates, 3 triggered watch-list checks.
+- `paper_trades.json`: 354 total rows, 320 settled, 10 open. Strategy split: `vig_stack` 214 settled / +$848.95 / 75% WR / 5.3% ROI; `live_momentum` 106 settled / -$34.71 / 54% WR / -1.8% ROI.
+- Last-14d split: `vig_stack` +$980.75 across 128 settled; `live_momentum` -$26.22 across 42 settled.
+- Family/sport cuts: KXHIGHAUS, KXHIGHMIA, KXHIGHDEN, and capped KXMLBGAME are the current profit engine. KXHIGHCHI and KXINX were correctly disabled in Session 93. ATP/NBA live_momentum are current drags; IPL/NHL are positive but thin/outlier-exposed.
+- `decisions.jsonl` check surfaced dashboard drift: `reentry_blocked` already fired 4 times in the last 3 days, and `family_disabled_reject` already fired 3 times post-Session-93, while `bot/state/active_observations.json` still showed both as 0.
+- TP/SL post-May-5 tick-replay sweep completed for the TP/SL grid and found no test improvement vs baseline. The LM/TS grid sweep ran too long and was stopped as analysis-only; no bot process touched.
+
+**Decision.** Add a new `CLAUDE.md` operator-manual section, `Data Collection Backlog: What We Still Need`, with seven prioritized gaps and session grouping rules. First ship should be Priority 1 + Priority 7 together: blocked-trade shadow evidence plus auto-computed active observations. They share the same evidence surface (blocked/disallowed decisions), the same dashboard pain (manual counters drift), and the same verification story (no new trades, only better proof that recent blocks are doing what we think).
+
+**Backlog now documented in CLAUDE.md.**
+1. Shadow evidence for blocked/disallowed trades: `family_disabled_reject`, `sport_disabled`, `reentry_blocked`.
+2. Live_momentum no-entry context: richer reject/scan fields for leader price, spread, volume, dip, DQS, momentum, WP edge, score, phase.
+3. live_momentum fair-value proxy: `estimated_win_prob`, `model_source`, `confidence_components`, separate calibration path.
+4. Counterfactual exit paths for live_momentum: offline report first, runtime logging only if useful.
+5. Vig_stack ladder context: family + ladder shape + selected rung + distance-to-bucket.
+6. Paper liquidity/fill-quality realism: bid/ask/spread/slippage/fill realism before live mode.
+7. Active observations auto-compute: keep registry expectations manual, compute `current_value` from machine-readable data when possible.
+
+**What did NOT change.**
+- No production bot code.
+- No strategy thresholds, caps, disabled family sets, or live_momentum behavior.
+- No state-file schema changes yet; the backlog names future schema candidates only.
+- No bot restart.
+
+**Verification.**
+- CLAUDE.md now contains the new backlog before `When Tyler Asks "How is it looking?"`.
+- This Session 94 block is appended to `CLAUDE-sessions.md`, per Session 89 convention.
+- README sync added as a one-line Session 94 recap.
+
+**Next session prompt.** First coder session should be: "Session 95 - blocked-trade shadow ledger + active observation auto-compute." It should start from the Canonical Data Schema Reference, implement the narrow blocked-gate shadow path, compute §10 active observation values from decisions/shadow evidence, add tests, and avoid broad shadow mode.
+
+**README sync.** Add a Session 94 recap one-liner noting this is a planner doc-only backlog, not production code, and naming Session 95 as the first recommended implementation slice.

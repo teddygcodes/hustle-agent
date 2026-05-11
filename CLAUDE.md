@@ -787,6 +787,97 @@ The day we stop learning new wrong premises about our own bot is the day we know
 
 ---
 
+## Data Collection Backlog: What We Still Need
+
+**Trigger.** May 10 deep-dive: Glint is now a profitable vig_stack bot with a live_momentum research arm, but several profit decisions still end with "we cannot quantify that yet." This section is the backlog for closing those blind spots. Treat these as substrate work: collect the minimum data that lets the next tuning session make a decision, not decorative telemetry.
+
+### Session grouping rule
+
+Bundle only when the data path, owner files, and verification story are shared. If two gaps require different runtime hooks, different settlement logic, or different reports, split them. Do not ship a giant "more logging" session; those rot quickly and make attribution impossible.
+
+### Priority 1: Shadow evidence for blocked/disallowed trades
+
+**Gap.** We can block disabled families/sports (`family_disabled_reject`, `sport_disabled`, `reentry_blocked`) but we do not have a first-class ledger answering "was the block correct?" Session 93 currently has to infer would-have-traded KXHIGHCHI/KXINX from `decisions.jsonl`, and active observations are manually stale already.
+
+**Manageable session shape.** One session can ship:
+
+- `bot/state/shadow_trades.jsonl` (or similarly named append-only state file) for blocked-but-measurable opportunities.
+- Emission for `family_disabled_reject`, `sport_disabled`, and `reentry_blocked` only. Keep the first version narrow.
+- A resolver/report helper that marks shadow rows settled when the market result is known, reusing existing Kalshi/tracker/clv settlement helpers where practical.
+- `tools/glint_status.py` §10 auto-computed current values for Session 90/92/93 active observations from decisions + shadow rows, replacing manual counters.
+
+**Why first.** It directly validates recent P&L interventions without risking new trades. It also fixes the operator-dashboard drift where §10 showed 0 `reentry_blocked` and 0 `family_disabled_reject` while `decisions.jsonl` already had 4 and 3.
+
+**Do not include yet.** Broad shadow mode for every rejected gate, strategy auto-promotion, or orderbook sizing. Those are larger lifecycle pieces.
+
+### Priority 2: Live momentum no-entry context
+
+**Gap.** We know watch-but-no-enter is high, and `scan_found.skip_reason` exists, but many no-entry decisions still lack enough structured context to decide whether the gate is too strict. We need the "why not" surface to carry the same discipline as accepted trades.
+
+**Manageable session shape.** One live_watcher instrumentation session:
+
+- Add structured fields on live_momentum rejects and scan/no-entry records: `sport`, `leader_ticker`, `leader_price`, `opponent_price`, `spread`, `volume_24h`, `recent_high`, `dip_cents`, `dqs`, `momentum`, `wp_edge`, `completion`, `score_state`, `match_phase`, and `time_remaining` when available.
+- Keep forward-only; do not backfill.
+- Add a compact report slice in `tools/journal_analysis.py` or `tools/cohort_report.py` that shows no-entry reasons by sport and gate with the new fields.
+
+**Do not include yet.** New entry logic or threshold changes. This session is data collection only.
+
+### Priority 3: live_momentum fair-value proxy
+
+**Gap.** live_momentum still lacks a reliable scalar predicted probability. Calibration and sizing are weaker because the strategy logs price-action decisions but not a comparable "our fair" value at entry.
+
+**Manageable session shape.** One research/plumbing session:
+
+- Define a conservative `estimated_win_prob` for live_momentum entries from available `GameContext` fields (`win_probability`, `wp_edge`, leader price, momentum, DQS).
+- Persist `estimated_win_prob`, `model_source`, and `confidence_components` on live_momentum decisions/trades forward-only.
+- Extend `tools/calibration_report.py` to separate this proxy from vig_stack fair-value calibration so bad proxy performance cannot be mistaken for a vig_stack model failure.
+
+**Do not include yet.** Sizing changes. First measure calibration; size later.
+
+### Priority 4: Counterfactual exit paths for live_momentum
+
+**Gap.** Tick replay can answer alternate exit questions, but the answer is not first-class in the daily data. Every live_momentum entry should become a training example for exit policy.
+
+**Manageable session shape.** One analysis-tool session:
+
+- Add an offline report that computes hold-to-settlement, TP/SL variants, trailing-only, and no-reentry variants for recent live_momentum entries.
+- Persist report outputs under `bot/state/reports/` rather than writing per-trade state on the first pass.
+- Promote to runtime logging only if the offline report repeatedly influences tuning decisions.
+
+**Do not include yet.** Runtime exit changes.
+
+### Priority 5: Vig_stack ladder context
+
+**Gap.** We know which families win, but not enough about which ladder shapes within a family are fragile.
+
+**Manageable session shape.** One vig_stack instrumentation session:
+
+- Persist on each vig_stack opportunity/trade: `family`, `ladder_total_yes_sum`, `rung_count`, `selected_rung_rank`, `no_price`, `forecast_bucket_distance`, `time_to_close`, and relevant source/forecast metadata if already available.
+- Add a family x ladder-shape report to identify tail-loss patterns beyond family prefix.
+
+**Do not include yet.** Family cap/floor changes. Instrument first, then tune.
+
+### Priority 6: Paper liquidity and fill-quality realism
+
+**Gap.** Paper mode may overstate fill quality. Before live mode, we need a friction view: spread, movement before execute, and whether the edge survives realistic execution.
+
+**Manageable session shape.** One executor/scanner instrumentation session:
+
+- Persist `bid`, `ask`, `spread`, `depth_proxy` if available, `price_moved_before_execute`, `would_fill_at_mid`, and `would_fill_at_ask`.
+- Add a friction-adjusted P&L/CLV report that discounts paper fills by spread/slippage assumptions.
+
+**Do not include yet.** Live order placement changes. This is paper realism only.
+
+### Priority 7: Active observations auto-compute
+
+**Gap.** `bot/state/active_observations.json` is operator-curated, so values drift. May 10 example: §10 showed 0 for Session 90/93 counters even though decisions had already logged `reentry_blocked=4` and `family_disabled_reject=3`.
+
+**Manageable session shape.** This can ship together with Priority 1 because both read the same blocked-trade evidence. If Priority 1 is deferred, ship a smaller status-only session that computes known metrics from decisions/paper_trades without introducing new shadow rows.
+
+**Rule.** `active_observations.json` may remain the registry of expectations, but `current_value` should be computed by `glint_status.py` when the data source is machine-readable. Manual values are acceptable only for metrics without a data path yet.
+
+---
+
 ## When Tyler Asks "How is it looking?"
 
 Run `python3 tools/glint_status.py` and scan top-down. Session 91 reshaped the report into an operator dashboard: read sections in order and most questions answer themselves.
