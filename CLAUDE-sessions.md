@@ -5152,3 +5152,61 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - `CLAUDE.md` State Files table and Canonical Data Schema Reference now document the Session 96 live_momentum context shape under `decisions.jsonl.extra` and `live_journal.json scan_found.extra`.
 - `CLAUDE.md` Data Collection Backlog Priority 2 marked shipped.
 - README Session 96 recap added.
+
+### ☑ Session 97 — live_momentum per-sport breakeven disable (atp + nba_game) (May 11, Outcome A narrow code+tests ship)
+
+**Trigger.** A full week of post-Session-54 `live_momentum` data accumulated. Top-line bled from +$10 → -$33 across 96 settled trades. Session 88's pre/post-Session-54 cohort split proved the lifetime average hides distinct sub-populations; Session 93 just shipped the structural template for surgical disables via `VIG_STACK_DISABLED_FAMILIES` on the same breakeven-WR math. This session applies that framework to live_momentum sport cohorts to identify which sports are structurally losing vs. profitable.
+
+**Phase 0 — per-sport breakeven analysis.** All settled `live_momentum` trades from `bot/state/paper_trades.json`, grouped by sport from ticker prefix:
+
+| Sport | N | WR | BE WR | Gap | P&L | Post-S54 (n≥3) | Verdict |
+|---|---|---|---|---|---|---|---|
+| ipl | 11 | 63.6% | 32.5% | +31.1pp | +$68.16 | — | PROFITABLE |
+| nhl_game | 12 | 83.3% | 74.4% | +8.9pp | +$11.60 | — | PROFITABLE |
+| atp_challenger | 17 | 52.9% | 59.5% | -6.6pp | -$7.80 | n=0 post-fix | DEFER (already disabled) |
+| ufc | 11 | 36.4% | 60.3% | -23.9pp | -$9.10 | WR 33.3% / BE 45.5% thin | BORDERLINE |
+| nba_game | 26 | 53.8% | 70.7% | -16.9pp | -$44.97 | WR 25% / BE 78.6% | DISABLE |
+| atp | 22 | 40.9% | 68.2% | -27.2pp | -$45.60 | WR 25% / BE 73.9% | DISABLE |
+
+Session 54 boundary used for Phase 0.2: `2026-05-05T05:45:53+00:00` (paper-balance reconstruction fix per Battle Scar #16).
+
+**Outcome A (narrow).** Added `atp` and `nba_game` to `MOMENTUM_DISABLED_SPORTS`. UFC held off pending more data — n=11 right at the brief's threshold AND post-fix data sparse fired both clauses of the brief's "If Phase 0 evidence is mixed... default to highest-confidence cohort only. Don't bundle uncertain disables." rule. Captures -$90.57 of the -$98.85 losing-cohort P&L.
+
+This ship reverses Session 38a's atp re-enable. Session 38a was based on CF data (+11.32¢ mean CLV / n=56 settled CFs / +CLV 82%) plus 4 historical pre-disable paper trades (+$8.60 / 3W/1L). We now have 22 real post-re-enable trades showing -$45.60 / 40.9% WR. Real money superseded CF projection — exactly the failure mode the shadow ledger (Session 95) was built to surface. The structural leak on atp is W:L magnitude 0.47 (avg loss $5.18 / avg win $2.42), a mathematical floor that sizing changes cannot fix.
+
+**Implementation.**
+- `bot/config.py:219` — `MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "nba_game", "wta", "wta_challenger"}`. Comment block extended with the May 11 evidence and the explicit Session 38a reversal rationale. No new mechanism; no helper function; mirrors the existing Session 2 / Session 38a-2 disable pattern exactly.
+- No `bot/live_watcher.py` change. The entry-path `can_enter` gate at `live_watcher.py:1395-1401` already consults the set; shadow-write wiring at `live_watcher.py:738-755` (Session 95) already auto-writes `sport_disabled` rows for the new disables. The disabled-sport block does NOT fire on `_check_exit`, so already-open atp and nba_game positions continue exiting on TP / SL / trailing-stop normally (verified comment block preserved at config.py:216-218).
+
+**Tests.**
+- `tests/test_live_watcher.py::test_session_97_disable_set_membership` — locks the new set contents (atp/atp_challenger/nba_game/wta/wta_challenger all in, ufc/nhl_game/ipl all out). Prevents accidental drift in either direction.
+- `tests/test_live_watcher.py::test_each_disabled_sport_writes_shadow_row` (parametrized × 5) — verifies the shadow-ledger contract holds for every member of the disabled set, so Session 97's 14d validation window collects counterfactual evidence on the new disables.
+- `tests/test_discovery_counterfactual_hotspots.py` fixture refresh — 6 tests that used `KXATPMATCH` / `KXNBAGAME` as "non-disabled cohort" fixture examples swapped to `KXNHLGAME` / `KXIPLGAME`; `test_session_46_replay`'s `n_disabled_sport_cohorts_in_top3` expectation updated from `2 → 3` (now all of atp_challenger / wta / atp are disabled in the Session 46 fixture's top-3). The discovery agent's counters were doing the right thing; the fixtures had captured a stale set membership.
+
+**Verification.**
+- ☑ Targeted suite: `python3 -m pytest tests/test_live_watcher.py tests/test_discovery_counterfactual_hotspots.py --tb=short` → all pass including 6 new Session 97 tests.
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short` → **1580 passed** (Session 96 baseline 1574 + 6 net tests). No new failures.
+- ☑ Bot restart via path-rooted Battle Scar #14 pattern. Post-restart `tools/glint_status.py` snapshot confirmed.
+- ☑ `tail` checks on `decisions.jsonl` and `shadow_trades.jsonl` for new `sport_disabled` rows on atp and nba_game tickers as live games surface.
+- ☑ Open atp / nba_game positions persist (grandfathered) — no force-exit, mirroring the Session 93 precedent.
+
+**What did NOT change.**
+- No new helper function, no new constant, no new disable mechanism — pure set-membership extension of the Session 2 / 38a-2 pattern.
+- No `bot/live_watcher.py` source change (existing gate at line 1399 already consults `MOMENTUM_DISABLED_SPORTS`).
+- No `bot/shadow_trades.py` change (`sport_disabled` already in `ALLOWED_BLOCKED_REASONS`).
+- No force-exit on existing positions.
+- No `bot/executor.py` change (this is a live_watcher-specific entry gate).
+- No `tools/journal_analysis.py` change (Session 96's per-sport extension already surfaces this).
+- No `agent/engine.py` work.
+
+**Docs.**
+- `bot/state/active_observations.json` — Session 97 entry added with two metrics: new atp + nba_game live_momentum entries over 14d (expect 0); shadow rows accumulated on disabled sports (expect rising).
+- `CLAUDE.md` — surgical fact updates only (strategies-table disable scope line, "Why live_momentum is positive" current disable set value, recent-ship pointer). Full session history lives here per Session 89 convention.
+- README Session 97 recap added.
+
+**Watch-list triggers.**
+- **UFC re-evaluation.** When N ≥ 15 settled live_momentum UFC trades, re-run the breakeven analysis. If WR still below BE by ≥5pp post-fix, ship a follow-on session adding UFC to the disable set.
+- **atp_challenger** at N_post-S54 ≥ 10, re-evaluate whether the disable is still warranted (Session 38a-2 deferred this).
+- **nhl_game vigilance.** Currently PROFITABLE (+$11.60 at 83.3% WR / BE 74.4%, n=12). If 14-day rolling WR drops below 78%, escalate — the BE is high, small drift could flip it.
+- **Shadow-ledger validation.** If atp + nba_game shadow rows reach N ≥ 20 over 14d with aggregate WR > 55%, the disable was wrong — re-enable. If shadow WR < 40%, disable is data-confirmed and the watch-list trigger retires.
+- **Session 54 boundary fix.** Documented as `2026-05-05T05:45:53+00:00` so future cohort-split sessions can reuse without re-derivation.

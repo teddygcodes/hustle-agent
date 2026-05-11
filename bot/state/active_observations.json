@@ -70,5 +70,37 @@
         "last_updated": "2026-05-10T12:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 97,
+    "shipped_at": "2026-05-11T00:00:00+00:00",
+    "description": "live_momentum disabled on atp + nba_game at live_watcher entry (breakeven-WR framework)",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "new live_momentum positions opened on atp or nba_game after ship",
+        "expectation": "0; any post-Session-97 entry on these sports means the disable regressed",
+        "current_value": 0,
+        "last_updated": "2026-05-11T00:00:00+00:00"
+      },
+      {
+        "name": "sport_disabled rejects on atp + nba_game in decisions.jsonl",
+        "expectation": ">=1 per scan that surfaces an atp or nba_game live_momentum opportunity; rising count means the entry guard is firing on live cohorts",
+        "current_value": 0,
+        "last_updated": "2026-05-11T00:00:00+00:00"
+      },
+      {
+        "name": "shadow_trades.jsonl rows on atp + nba_game blocked_reason=sport_disabled",
+        "expectation": "rising across 14d (Session 95 wiring auto-emits on each sport_disabled reject); if >=20 shadow rows hit settlement with aggregate WR > 55%, the disable was wrong and re-enable warranted; if WR < 40%, disable is data-confirmed",
+        "current_value": 0,
+        "last_updated": "2026-05-11T00:00:00+00:00"
+      },
+      {
+        "name": "ufc live_momentum settled trade count (watch-list trigger)",
+        "expectation": "re-run the breakeven analysis when N >= 15; currently n=11 with -23.9pp gap on lifetime but post-fix data sparse",
+        "current_value": 11,
+        "last_updated": "2026-05-11T00:00:00+00:00"
+      }
+    ]
   }
 ]
