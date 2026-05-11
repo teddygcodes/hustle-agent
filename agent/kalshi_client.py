@@ -6,6 +6,7 @@ Public endpoints work without auth. Trading endpoints require API key + private 
 """
 
 import json
+import threading
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -14,6 +15,15 @@ import uuid
 from pathlib import Path
 
 import certifi
+
+# Session 101: per-request total wall-clock cap for _kalshi_get. urlopen's
+# socket-level timeout=10 catches connect failures and full stalls, but is a
+# per-recv timeout: a server that drips response bytes (1 byte per few seconds)
+# keeps each recv() within budget so the timeout never fires, and a single call
+# can run for hours. The daemon-thread wrapper below enforces a total
+# wall-clock cap. See bot.log 2026-05-11 14:17:51-15:21:42 EDT, scan_id
+# 20260511T181751: 3831s drip case that bypassed urlopen(timeout=10).
+_KALSHI_TOTAL_TIMEOUT_SEC = 30
 
 try:
     import kalshi_python
@@ -118,6 +128,18 @@ def _kalshi_get(path: str, params: dict = None) -> dict:
     """GET from Kalshi production REST API, return parsed JSON.
 
     Retries up to 3 times with exponential backoff on 429 (rate limit) responses.
+
+    Session 101: bounded by _KALSHI_TOTAL_TIMEOUT_SEC total wall-clock per call
+    via a daemon worker thread. urlopen's socket-level timeout=10 stays in
+    place as the primary defense (catches connect failures and full stalls);
+    the daemon-thread guard is the safety net for slow-drip responses
+    (server trickles bytes within the per-recv budget, bypassing the socket
+    timeout). On timeout the worker is abandoned (daemon=True ensures it does
+    not block process exit); the leaked thread holds one TCP connection until
+    the OS closes it. Acceptable cost for cadence safety. The error string
+    contains "timeout", matched by bot.universe._is_transient_kalshi_error so
+    snapshot_universe's existing retry loop handles it identically to a
+    connection-reset.
     """
     import time as _time
     url = PRODUCTION_URL + path
@@ -127,18 +149,46 @@ def _kalshi_get(path: str, params: dict = None) -> dict:
             url = f"{url}?{query}"
     ctx = ssl.create_default_context(cafile=certifi.where())
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    for attempt in range(3):
+
+    state: dict = {"result": None, "exception": None, "done": False}
+
+    def _worker():
         try:
-            with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
-                return json.loads(r.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429:
-                wait = 2 ** attempt + 1  # 2s, 3s, 5s
-                print(f"  [Kalshi] 429 rate limit on {path} — retrying in {wait}s (attempt {attempt+1}/3)")
-                _time.sleep(wait)
-                continue
-            raise
-    raise Exception(f"Kalshi 429 rate limit exceeded after 3 retries on {path}")
+            for attempt in range(3):
+                try:
+                    with urllib.request.urlopen(req, context=ctx, timeout=10) as r:
+                        state["result"] = json.loads(r.read())
+                        return
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        wait = 2 ** attempt + 1  # 2s, 3s, 5s
+                        print(f"  [Kalshi] 429 rate limit on {path} — retrying in {wait}s (attempt {attempt+1}/3)")
+                        _time.sleep(wait)
+                        continue
+                    state["exception"] = e
+                    return
+            state["exception"] = Exception(
+                f"Kalshi 429 rate limit exceeded after 3 retries on {path}"
+            )
+        except Exception as e:
+            state["exception"] = e
+        finally:
+            state["done"] = True
+
+    t = threading.Thread(
+        target=_worker,
+        daemon=True,
+        name=f"kalshi-get-{path.replace('/', '-')[:40]}",
+    )
+    t.start()
+    t.join(timeout=_KALSHI_TOTAL_TIMEOUT_SEC)
+    if not state["done"]:
+        raise TimeoutError(
+            f"_kalshi_get total wall-clock timeout {_KALSHI_TOTAL_TIMEOUT_SEC}s on {path}"
+        )
+    if state["exception"] is not None:
+        raise state["exception"]
+    return state["result"]
 
 
 def _dollars_to_cents(val):

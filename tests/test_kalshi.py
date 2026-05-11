@@ -386,3 +386,123 @@ class TestToolRegistration:
         schema_names = {s["name"] for s in engine.TOOL_SCHEMAS}
         executor_names = set(engine.TOOL_EXECUTORS.keys())
         assert schema_names == executor_names, f"Mismatch: schemas={schema_names - executor_names}, executors={executor_names - schema_names}"
+
+
+# ---------------------------------------------------------------------------
+# Session 101: _kalshi_get total wall-clock timeout (daemon-thread guard)
+# ---------------------------------------------------------------------------
+
+class TestKalshiGetTotalTimeout:
+    """Regression coverage for the Session 101 daemon-thread total-timeout
+    wrapper around _kalshi_get. The bug: urlopen's timeout= is a per-recv
+    socket timeout, not a total-request timeout. A slow-drip Kalshi response
+    keeps each recv() within budget so urlopen never raises, and a single
+    call can run for hours. See bot.log 2026-05-11 14:17:51-15:21:42 EDT,
+    scan_id 20260511T181751: 3831s drip that bypassed urlopen(timeout=10).
+    """
+
+    def test_total_timeout_fires_on_slow_drip(self, monkeypatch):
+        """Daemon-thread guard raises TimeoutError when urlopen blocks past
+        _KALSHI_TOTAL_TIMEOUT_SEC, well before the underlying call completes."""
+        import time
+
+        monkeypatch.setattr(kalshi_client, "_KALSHI_TOTAL_TIMEOUT_SEC", 0.5)
+
+        def _slow_urlopen(*args, **kwargs):
+            time.sleep(2.0)
+            raise RuntimeError("unreachable in test: timeout should fire first")
+
+        monkeypatch.setattr(kalshi_client.urllib.request, "urlopen", _slow_urlopen)
+
+        t0 = time.monotonic()
+        with pytest.raises(TimeoutError, match="total wall-clock timeout"):
+            kalshi_client._kalshi_get("/markets")
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.5, f"timeout took {elapsed:.2f}s, expected < 1.5s"
+
+    def test_normal_path_unaffected(self, monkeypatch):
+        """The wrapper does not break the fast path: a normal urlopen call
+        returning valid JSON within milliseconds returns the parsed dict."""
+        expected = {"markets": [{"ticker": "KXTEST"}], "cursor": None}
+
+        class _MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(expected).encode()
+
+        monkeypatch.setattr(
+            kalshi_client.urllib.request, "urlopen", lambda *a, **kw: _MockResponse()
+        )
+
+        result = kalshi_client._kalshi_get("/markets")
+        assert result == expected
+
+    def test_propagates_http_429_retry(self, monkeypatch):
+        """The 429 rate-limit retry path still works inside the worker thread.
+        First two urlopen calls raise HTTPError 429; third succeeds; backoff
+        sleeps fire with the documented 2s/3s schedule."""
+        import time as time_mod
+        import urllib.error
+
+        expected = {"markets": [], "cursor": None}
+        call_count = {"n": 0}
+
+        class _MockResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(expected).encode()
+
+        def _mock_urlopen(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                raise urllib.error.HTTPError(
+                    url="https://test", code=429, msg="Too Many", hdrs=None, fp=None
+                )
+            return _MockResponse()
+
+        sleep_calls = []
+        real_sleep = time_mod.sleep
+
+        def _fake_sleep(s):
+            sleep_calls.append(s)
+            real_sleep(0.01)  # tiny real sleep so the worker yields
+
+        monkeypatch.setattr(kalshi_client.urllib.request, "urlopen", _mock_urlopen)
+        monkeypatch.setattr(time_mod, "sleep", _fake_sleep)
+
+        result = kalshi_client._kalshi_get("/markets")
+        assert result == expected
+        # 2 retries with sleeps of 2**0+1=2 and 2**1+1=3 seconds
+        assert sleep_calls == [2, 3]
+        assert call_count["n"] == 3
+
+    def test_timeout_message_is_transient_error(self, monkeypatch):
+        """The TimeoutError's string passes bot.universe._is_transient_kalshi_error
+        so snapshot_universe's existing retry loop handles it identically to a
+        connection-reset, without needing changes to the universe.py path."""
+        import time
+        from bot.universe import _is_transient_kalshi_error
+
+        monkeypatch.setattr(kalshi_client, "_KALSHI_TOTAL_TIMEOUT_SEC", 0.3)
+
+        def _slow_urlopen(*args, **kwargs):
+            time.sleep(2.0)
+            raise RuntimeError("unreachable")
+
+        monkeypatch.setattr(kalshi_client.urllib.request, "urlopen", _slow_urlopen)
+
+        try:
+            kalshi_client._kalshi_get("/markets")
+        except TimeoutError as e:
+            error_msg = f"Kalshi API error: {str(e)}"
+            assert _is_transient_kalshi_error(error_msg) is True, (
+                f"Timeout error string {error_msg!r} did not match transient-error tokens"
+            )
+        else:
+            pytest.fail("expected TimeoutError to be raised")
