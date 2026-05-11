@@ -661,6 +661,116 @@ class TestSession50PaperTradeFields:
 
 
 # ---------------------------------------------------------------------------
+# Session 99 — paper_trades.json fair-value proxy fields
+# ---------------------------------------------------------------------------
+
+class TestSession99PaperTradeProxyFields:
+    """Forward-only persistence of estimated_win_prob / model_source /
+    confidence_components on live_momentum paper_trades records. Mirrors the
+    Session 50 dqs/sport/confidence pattern: when the opp dict carries
+    paper_estimated_win_prob etc., the inline write site at executor.py
+    PAPER_MODE branch emits them on the record. When absent (mimicking
+    vig_stack), no spillover."""
+
+    def _run_paper_trade(self, opp, sizing):
+        """Helper: mock the 4 internal checks and call execute_trade."""
+        with patch("bot.executor.verify_contract_direction") as mock_dir, \
+             patch("bot.executor.get_balance") as mock_bal, \
+             patch("bot.executor._check_position_limits") as mock_pos, \
+             patch("bot.executor._verify_edge_still_exists") as mock_edge, \
+             patch("bot.executor.get_market") as mock_market:
+            mock_dir.return_value = {
+                "direction_correct": True, "confidence": "high",
+                "explanation": "ok", "warnings": [],
+            }
+            mock_bal.return_value = {"balance_dollars": 100.0}
+            mock_pos.return_value = (True, "ok")
+            mock_edge.return_value = (True, "ok")
+            mock_market.return_value = {"yes_ask": 99, "yes_bid": 43}
+
+            from bot.executor import execute_trade
+            return execute_trade(opp, sizing)
+
+    def test_paper_trade_persists_estimated_win_prob_for_live_momentum(self, tmp_state):
+        """When opp carries paper_estimated_win_prob / paper_model_source /
+        paper_confidence_components, all 3 land on the paper_trades record.
+        estimated_win_prob is rounded to 4 decimals."""
+        opp = _make_opp(opp_type="live_momentum")
+        opp["paper_estimated_win_prob"] = 0.6512345
+        opp["paper_model_source"] = "game_context_win_probability_v1"
+        opp["paper_confidence_components"] = {
+            "wp_edge": 0.05,
+            "market_implied": 0.60,
+            "pre_clamp_raw": 0.65,
+            "clamped": False,
+        }
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["estimated_win_prob"] == 0.6512  # rounded to 4 decimals
+        assert rec["model_source"] == "game_context_win_probability_v1"
+        assert rec["confidence_components"]["wp_edge"] == 0.05
+        assert rec["confidence_components"]["clamped"] is False
+
+    def test_paper_trade_omits_proxy_fields_for_vig_stack(self, tmp_state):
+        """Spillover prevention — a vig_stack opp without the paper_* keys
+        produces a record without estimated_win_prob / model_source /
+        confidence_components. Byte-equality regression-lock for vig_stack."""
+        opp = _make_opp(opp_type="weather", relative_edge=0.22)
+        # explicitly NO paper_estimated_win_prob etc.
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert "estimated_win_prob" not in rec
+        assert "model_source" not in rec
+        assert "confidence_components" not in rec
+
+    def test_paper_trade_handles_partial_proxy_fields(self, tmp_state):
+        """When only paper_estimated_win_prob is set (no model_source / no
+        confidence_components), only estimated_win_prob lands on the record.
+        Mirrors Session 50's partial-fields handling."""
+        opp = _make_opp(opp_type="live_momentum")
+        opp["paper_estimated_win_prob"] = 0.72
+        # explicitly NOT setting paper_model_source / paper_confidence_components
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert rec["estimated_win_prob"] == 0.72
+        assert "model_source" not in rec
+        assert "confidence_components" not in rec
+
+    def test_paper_trade_skips_non_numeric_estimated_win_prob(self, tmp_state):
+        """Defensive: if paper_estimated_win_prob is non-numeric somehow, the
+        record stays clean — no estimated_win_prob field, no crash."""
+        opp = _make_opp(opp_type="live_momentum")
+        opp["paper_estimated_win_prob"] = "not-a-number"
+        sizing = _make_sizing(contracts=5, price_cents=45)
+
+        result = self._run_paper_trade(opp, sizing)
+        assert result["success"] is True
+
+        trades = json.loads(tmp_state["paper_trades"].read_text())
+        assert len(trades) == 1
+        rec = trades[0]
+        assert "estimated_win_prob" not in rec
+
+
+# ---------------------------------------------------------------------------
 # execute_double — Fix 1 regression
 # ---------------------------------------------------------------------------
 

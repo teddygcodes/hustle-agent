@@ -2035,3 +2035,131 @@ class TestSession56DeadInfraRemoval:
             "trailing-stop logic at _check_exit uses MOMENTUM_DQS_TRAIL_STOP "
             "and is the actual production trailing-stop path."
         )
+
+
+# ---------------------------------------------------------------------------
+# Session 99 — fair-value proxy fields land on live_momentum decisions
+# ---------------------------------------------------------------------------
+
+def test_session_99_proxy_fields_ride_through_annotate_helper():
+    """The merge at live_watcher.py:1422-1453 attaches estimated_win_prob,
+    model_source, confidence_components to primary_context/opponent_context.
+    `_annotate_live_momentum_context` must preserve those keys (it starts
+    with `out = dict(context or {})` per the Session 96 contract — this
+    test locks that pass-through so a future refactor can't accidentally
+    drop the proxy fields)."""
+    from bot.live_watcher import _annotate_live_momentum_context
+    from bot.live_momentum_proxy import estimate_live_momentum_win_prob, MODEL_SOURCE
+
+    # Build a minimal pre-proxy context with the two required inputs.
+    pre_proxy = {
+        "wp_edge": 0.05,
+        "leader_price": 60,
+        "sport": "nba",
+        "ticker": "KXNBAGAME-26MAY10TEST-LAL",
+        "context_available": True,
+    }
+    proxy = estimate_live_momentum_win_prob(pre_proxy)
+    pre_proxy["estimated_win_prob"] = proxy["estimated_win_prob"]
+    pre_proxy["model_source"] = proxy["model_source"]
+    pre_proxy["confidence_components"] = proxy["confidence_components"]
+
+    out = _annotate_live_momentum_context(
+        pre_proxy, skip_reason="position_open", entry_gate="position_open",
+    )
+
+    assert out["estimated_win_prob"] == 0.65
+    assert out["model_source"] == MODEL_SOURCE
+    assert out["confidence_components"]["wp_edge"] == 0.05
+    assert out["confidence_components"]["market_implied"] == 0.6
+    assert out["confidence_components"]["clamped"] is False
+    # Late-bound labels still apply correctly on top of the proxy keys.
+    assert out["skip_reason"] == "position_open"
+    assert out["entry_gate"] == "position_open"
+
+
+def test_session_99_proxy_fields_appear_in_decisions_jsonl_extras(tmp_path, monkeypatch):
+    """End-to-end: a `_log_decision_dampened` call with a proxy-enriched
+    extra dict writes estimated_win_prob / model_source / confidence_components
+    into the decisions.jsonl record's `extra`. Mirrors the
+    test_log_decision_dampened_writes_wp_edge_and_mom_ctx precedent."""
+    import json
+    from bot import decisions
+    import bot.shadow_trades as shadow
+    from bot.live_watcher import LiveGameWatcher, _annotate_live_momentum_context
+    from bot.live_momentum_proxy import estimate_live_momentum_win_prob, MODEL_SOURCE
+
+    f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
+
+    # Build the proxy-enriched primary_context the way live_watcher does
+    # at lines 1422-1453.
+    primary_context = {
+        "wp_edge": 0.08,
+        "leader_price": 72,
+        "sport": "nba",
+        "ticker": "KXNBAGAME-26MAY10TEST-LAL",
+        "leader_side": "primary",
+        "context_available": True,
+    }
+    proxy = estimate_live_momentum_win_prob(primary_context)
+    primary_context["estimated_win_prob"] = proxy["estimated_win_prob"]
+    primary_context["model_source"] = proxy["model_source"]
+    primary_context["confidence_components"] = proxy["confidence_components"]
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXNBAGAME-26MAY10TEST-LAL"
+    w._last_decision = (None, None)
+
+    # Simulate a reject path identical to live_watcher.py:1476-1489
+    # ("cannot_enter" → no can_enter branch).
+    w._log_decision_dampened(
+        decision="reject", reason="position_open",
+        gates={"can_enter": False, "sport_enabled": True, "position_open": False},
+        edge=0.08,
+        extra={
+            **_annotate_live_momentum_context(
+                primary_context, skip_reason="position_open",
+                entry_gate="position_open",
+            ),
+            "sport": "nba",
+        },
+    )
+
+    rec = json.loads(f.read_text().splitlines()[0])
+    assert rec["opp_type"] == "live_momentum"
+    assert rec["decision"] == "reject"
+    extra = rec["extra"]
+    # Proxy fields land in the persisted record.
+    assert extra["estimated_win_prob"] == 0.80
+    assert extra["model_source"] == MODEL_SOURCE
+    assert extra["confidence_components"]["wp_edge"] == 0.08
+    assert extra["confidence_components"]["market_implied"] == 0.72
+
+
+def test_session_99_proxy_returns_none_when_game_ctx_absent():
+    """At scan-time call sites (3320/3382/3544/3587/3633/3659), game_ctx is
+    None so wp_edge is also None. The proxy must correctly return
+    estimated_win_prob=None for those records — never a phantom scalar."""
+    from bot.live_watcher import _build_live_momentum_decision_context
+    from bot.live_momentum_proxy import estimate_live_momentum_win_prob
+
+    # Mimic a scan-time call (no game_ctx, only market + ticker).
+    ctx = _build_live_momentum_decision_context(
+        sport="ufc",
+        ticker="KXUFCFIGHT-26MAY10TEST-AAA",
+        leader_market={"ticker": "KXUFCFIGHT-26MAY10TEST-AAA", "yes_ask": 60,
+                       "yes_bid": 58, "volume_24h": 500},
+        leader_price=60,
+        source="scan",
+    )
+    # leader_price present but wp_edge absent (no game_ctx → no win_probability).
+    proxy = estimate_live_momentum_win_prob(ctx)
+    assert proxy["estimated_win_prob"] is None
+    assert proxy["confidence_components"]["reason"] == "missing_required_input"
+    assert proxy["confidence_components"]["wp_edge_present"] is False
+    assert proxy["confidence_components"]["leader_price_present"] is True

@@ -50,6 +50,7 @@ from bot.clv import (
     record_live_momentum_counterfactual_skip as _record_lm_cf,
     _should_emit_live_momentum_cf,
 )
+from bot.live_momentum_proxy import estimate_live_momentum_win_prob
 from collections import deque
 
 logger = logging.getLogger("glint.live_watcher")
@@ -1435,6 +1436,15 @@ class LiveGameWatcher:
             source="watcher",
             elapsed_seconds=elapsed,
         )
+        # Session 99: merge scalar win-prob proxy into the context dict so it
+        # rides through every downstream _annotate_live_momentum_context call
+        # and lands on both decisions.jsonl extras and the opp dict consumed
+        # by _auto_bet_momentum. Forward-only; sizing-touching changes out of
+        # scope per Data Collection Backlog Priority 3.
+        _primary_proxy = estimate_live_momentum_win_prob(primary_context)
+        primary_context["estimated_win_prob"] = _primary_proxy["estimated_win_prob"]
+        primary_context["model_source"] = _primary_proxy["model_source"]
+        primary_context["confidence_components"] = _primary_proxy["confidence_components"]
         opponent_context = _build_live_momentum_decision_context(
             sport=self.sport,
             ticker=self._opponent_ticker,
@@ -1451,6 +1461,10 @@ class LiveGameWatcher:
             source="watcher",
             elapsed_seconds=elapsed,
         )
+        _opponent_proxy = estimate_live_momentum_win_prob(opponent_context)
+        opponent_context["estimated_win_prob"] = _opponent_proxy["estimated_win_prob"]
+        opponent_context["model_source"] = _opponent_proxy["model_source"]
+        opponent_context["confidence_components"] = _opponent_proxy["confidence_components"]
 
         if not can_enter:
             sport_lc = (self.sport or "").lower()
@@ -2138,6 +2152,14 @@ class LiveGameWatcher:
             "paper_confidence": _paper_conf,
             "paper_dqs": dqs_score if dqs_score else None,  # 0.0 → None for empty-DQS scalp paths
             "paper_sport": self.sport.lower() if self.sport else None,
+            # Session 99 — forward-only fair-value proxy fields read from the
+            # proxy-enriched primary_context/opponent_context built at the per-tick
+            # _build_live_momentum_decision_context site. Vig_stack records won't
+            # carry these (live_watcher is the only writer); see executor.py
+            # PAPER_MODE branch for the conditional persistence pattern.
+            "paper_estimated_win_prob": (decision_context or {}).get("estimated_win_prob"),
+            "paper_model_source": (decision_context or {}).get("model_source"),
+            "paper_confidence_components": (decision_context or {}).get("confidence_components"),
             "decision_context": decision_context,
         }
 

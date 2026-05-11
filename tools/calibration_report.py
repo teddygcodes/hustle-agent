@@ -29,9 +29,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PREDICTIONS_FILE = REPO_ROOT / "bot/state/predictions.jsonl"
 ARCHIVE_DIR = REPO_ROOT / "bot/state/archive"
+PAPER_TRADES_FILE = REPO_ROOT / "bot/state/paper_trades.json"
 
 BUCKETS = [(0, 10), (10, 20), (20, 30), (30, 40), (40, 50),
            (50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+
+# Session 99 — buckets for live_momentum estimated_win_prob (0.0–1.0 probability).
+PROB_BUCKETS = [(0.50, 0.60), (0.60, 0.70), (0.70, 0.80),
+                (0.80, 0.90), (0.90, 1.01)]
 
 REGIME_AXES = ("time_of_day", "day_of_week", "sport_phase", "event_horizon_hr", "match_phase")
 
@@ -172,6 +177,83 @@ def report(days: int = 7, regime_by: str | None = None) -> str:
     return "\n".join(out)
 
 
+def report_live_momentum_calibration(days: int = 7) -> str:
+    """Session 99: Brier calibration for live_momentum estimated_win_prob.
+
+    Reads paper_trades.json (forward-only since Session 99 — pre-ship trades
+    won't carry the field). Renders as a separate section so bad proxy
+    performance cannot be mistaken for a vig_stack model failure (Data
+    Collection Backlog Priority 3 requirement).
+
+    The `days` arg is accepted for parity with `report()` but is currently
+    unused because paper_trades.json is the live (un-rotated) state file.
+    """
+    out = ["", "## live_momentum proxy calibration"]
+    if not PAPER_TRADES_FILE.exists():
+        out.append("\n_paper_trades.json missing._")
+        return "\n".join(out)
+    try:
+        trades = json.loads(PAPER_TRADES_FILE.read_text())
+    except Exception:
+        out.append("\n_paper_trades.json unreadable._")
+        return "\n".join(out)
+    if not isinstance(trades, list):
+        out.append("\n_paper_trades.json schema unexpected._")
+        return "\n".join(out)
+    rows = [
+        t for t in trades
+        if isinstance(t, dict)
+        and t.get("type") == "live_momentum"
+        and t.get("status") in ("won", "lost")
+        and t.get("estimated_win_prob") is not None
+    ]
+    out[-1] = f"## live_momentum proxy calibration (n={len(rows)})"
+    if not rows:
+        out.append(
+            "\n_No resolved live_momentum trades with estimated_win_prob yet — "
+            "ships forward-only; expect first calibration after ~14d._"
+        )
+        return "\n".join(out)
+
+    preds: list[tuple[float, int]] = []
+    for t in rows:
+        try:
+            prob = float(t["estimated_win_prob"])
+        except (TypeError, ValueError):
+            continue
+        preds.append((prob, 1 if t["status"] == "won" else 0))
+    if not preds:
+        out.append("\n_All rows had unreadable estimated_win_prob; nothing to calibrate._")
+        return "\n".join(out)
+
+    brier = sum((p - a) ** 2 for p, a in preds) / len(preds)
+    mean_pred = sum(p for p, _ in preds) / len(preds)
+    mean_actual = sum(a for _, a in preds) / len(preds)
+
+    out.append(f"\n- Mean predicted: **{mean_pred:.3f}**")
+    out.append(f"- Mean actual win rate: **{mean_actual:.3f}**")
+    out.append(f"- Mean bias (predicted − actual): **{mean_pred - mean_actual:+.3f}**")
+    out.append(
+        f"- Brier score: **{brier:.4f}** (lower = better; 0.0 = perfect, 0.25 = random)\n"
+    )
+
+    buckets: dict[tuple[float, float], list[int]] = defaultdict(lambda: [0, 0])
+    for prob, won in preds:
+        for lo, hi in PROB_BUCKETS:
+            if lo <= prob < hi:
+                buckets[(lo, hi)][0] += 1
+                buckets[(lo, hi)][1] += won
+                break
+
+    out.append("| Predicted prob bucket | n | actual win rate |")
+    out.append("|---|---|---|")
+    for (lo, hi), (n, wins) in sorted(buckets.items()):
+        rate = wins / n if n else 0
+        out.append(f"| [{lo:.2f},{hi:.2f}) | {n} | {rate:.1%} |")
+
+    return "\n".join(out)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--days", type=int, default=7,
@@ -185,3 +267,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     print(report(days=args.days, regime_by=args.regime_by))
+    # Session 99: live_momentum proxy calibration as a separate section so it
+    # cannot be conflated with vig_stack fair-value calibration.
+    print(report_live_momentum_calibration(days=args.days))

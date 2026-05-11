@@ -1185,6 +1185,22 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
         paper_sport = opportunity.get("paper_sport")
         if paper_sport is not None:
             record["sport"] = paper_sport.lower() if isinstance(paper_sport, str) else None
+        # Session 99 — forward-only scalar fair-value proxy for live_momentum.
+        # Vig_stack opp dicts won't carry these `paper_*` keys (live_watcher is
+        # the only writer); the conditional keeps vig_stack records clean.
+        # Schema in CLAUDE.md "Canonical Data Schema Reference → paper_trades.json".
+        paper_ewp = opportunity.get("paper_estimated_win_prob")
+        if paper_ewp is not None:
+            try:
+                record["estimated_win_prob"] = round(float(paper_ewp), 4)
+            except (TypeError, ValueError):
+                pass
+        paper_ms = opportunity.get("paper_model_source")
+        if paper_ms is not None:
+            record["model_source"] = paper_ms
+        paper_cc = opportunity.get("paper_confidence_components")
+        if paper_cc is not None:
+            record["confidence_components"] = paper_cc
         paper_trades.append(record)
         _save_json(PAPER_TRADES_FILE, paper_trades)
 
