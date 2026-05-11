@@ -395,6 +395,8 @@ await loop.run_in_executor(None, lambda: sync_fn(arg))
 ```
 If you write a new async loop and it calls into `bot/universe.py`, `bot/scanner.py`, `bot/tracker.py`, `bot/executor.py`, or anything that hits Kalshi: assume it's blocking, wrap in executor, audit at PR time. The Session 39 regression test at [tests/test_main.py:test_main_loop_runs_snapshot_universe_via_executor](hustle-agent/tests/test_main.py) asserts `snapshot_universe` runs on a non-`MainThread` worker thread — if a future refactor regresses it back to a direct sync call, that test fails.
 
+**Session 98 (2026-05-11) addendum — `run_in_executor` does not bound the awaiting coroutine.** `await loop.run_in_executor(...)` keeps OTHER coroutines responsive but the calling coroutine still blocks until the executor returns. Phase 0.1 found a 479-min `_main_loop` stall on May 10 03:08-11:07 UTC where `snapshot_universe` overshot its internal 300s deadline by hours (per-page deadline check trips only AFTER each slow page; layered Kalshi-client + urllib3 retries can make a single page take 60-120s, so 666 pages × ~38s = 7+ hours). `_heartbeat_loop` kept ticking, live_watcher kept firing, but `_main_loop`'s scan section was wedged. The Session 98 fix wraps `loop.run_in_executor(None, snapshot_universe)` in `asyncio.wait_for(..., timeout=_SNAPSHOT_OUTER_TIMEOUT_SEC=600)` at [bot/main.py:1290](hustle-agent/bot/main.py:1290); on `asyncio.TimeoutError` it logs, increments `bot_state.snapshot_outer_timeout_count_24h`, sleeps 60s, and continues. Regression test at [tests/test_main.py:test_main_loop_aborts_long_snapshot_after_outer_timeout](hustle-agent/tests/test_main.py) asserts the counter increments and the recovery sleep fires. **Caveat:** the executor thread continues running after timeout (Python `concurrent.futures` can't cancel running threads); for rare 1-2x/day timeouts this is acceptable, but if `snapshot_outer_timeout_count_24h ≥ 3/day` persists for ≥ 3 days, ship per-request HTTP timeouts in `agent/kalshi_client.py` to bound the leaked work at its source.
+
 ### 14. Cross-bot PID identification — bare `bot.main` grep matches OTHER bots in the fleet (May 3, 2026)
 
 Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/hustle-agent/`, Bob = `~/Desktop/bob/`, future bots TBD). Each bot's main entry is invoked as `python3 -m bot.main` because each repo names its package `bot/`. Result: **`ps aux | grep bot.main` matches EVERY bot's process, not just Glint's.** Same for `pgrep -f "bot.main"`, `pkill -f "bot.main"`, etc.
@@ -518,7 +520,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 97 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 98 (2026-05-11).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 
@@ -587,7 +589,7 @@ If a third instance happens, the next decision could ride on falsified evidence.
   "started_at": str,                  # ISO 8601 UTC
   "last_heartbeat": str,              # ISO 8601 UTC
   "last_scan": str,                   # ISO 8601 UTC
-  "current_date": str,                # YYYY-MM-DD; daily reset key for scans_today + telegram_throttled_count_24h
+  "current_date": str,                # YYYY-MM-DD; daily reset key for scans_today + telegram_throttled_count_24h + snapshot_outer_timeout_count_24h
   "last_odds_api_request": str,
   "last_morning_briefing": str,       # YYYY-MM-DD
   "last_nightly_summary": str,        # YYYY-MM-DD
@@ -614,10 +616,14 @@ If a third instance happens, the next decision could ride on falsified evidence.
   "telegram_throttled_count_24h": int,           # reset with scans_today; forward-only since Session 52
   "telegram_last_send_attempt_at": str | None,   # ISO 8601 UTC; forward-only since Session 52
   "telegram_last_send_success_at": str | None,   # ISO 8601 UTC; forward-only since Session 52
+
+  "snapshot_outer_timeout_count_24h": int,       # reset with scans_today; forward-only since Session 98
 }
 ```
 
 Forward-only rule: older `bot_state.json` files may be missing any `telegram_*` keys. Readers must treat missing `telegram_throttled_until`, `telegram_last_send_attempt_at`, and `telegram_last_send_success_at` as `None`; missing `telegram_throttled_count_24h` as `0`. Do not rename these fields or add aliases.
+
+Session 98 forward-only rule: pre-Session-98 `bot_state.json` files may be missing `snapshot_outer_timeout_count_24h`; readers must treat missing as `0`. Counter resets daily alongside `scans_today` at midnight UTC roll. Non-zero values confirm the `_main_loop` outer `asyncio.wait_for` guard at [bot/main.py:1290](hustle-agent/bot/main.py:1290) fired; see Battle Scar #13's Session 98 addendum.
 
 ### `bot/state/clv.json` records
 

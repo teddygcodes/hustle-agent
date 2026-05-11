@@ -5210,3 +5210,56 @@ This ship reverses Session 38a's atp re-enable. Session 38a was based on CF data
 - **nhl_game vigilance.** Currently PROFITABLE (+$11.60 at 83.3% WR / BE 74.4%, n=12). If 14-day rolling WR drops below 78%, escalate — the BE is high, small drift could flip it.
 - **Shadow-ledger validation.** If atp + nba_game shadow rows reach N ≥ 20 over 14d with aggregate WR > 55%, the disable was wrong — re-enable. If shadow WR < 40%, disable is data-confirmed and the watch-list trigger retires.
 - **Session 54 boundary fix.** Documented as `2026-05-05T05:45:53+00:00` so future cohort-split sessions can reuse without re-derivation.
+
+### ☑ Session 98 — snapshot_universe outer wall-clock timeout (May 11, Outcome A surgical infra ship)
+
+**Trigger.** Session 82's deferred watch-list trigger fired: 4h+ scan gaps during awake hours with `_heartbeat_loop` ticking every 30s and `live_watcher` firing throughout. Observed May 11 09:52 ET: `scans_today=2 / uptime 11h 11m / last scan 51m ago / heartbeat 34s fresh`. Same shape on May 10 14:48 ET (`scans_today=6 / 1h 52m uptime / last scan at restart`). Pattern matches Session 82's queued investigation but rules out macOS sleep (host verifiably awake).
+
+**Phase 0 — verify the premise before scoping.**
+
+- **0.1 cadence shape (parallel Explore agent).** Bimodal distribution with heavy tail. 32 SCAN CYCLE events over 48h. 13 healthy intervals (~30-40 min). 6 medium stalls (100-150 min). **10 major stalls (>200 min). Peak: 479 min on May 10 03:08:27 → 11:07:56 UTC.** `pmset` showed zero sleep events in that window — host was awake. Live_watcher continued firing to `shadow_trades.jsonl` and `live_ticks.jsonl` throughout. Bot was alive; only `_main_loop`'s scan section was wedged.
+- **0.2 scan-trigger code map (parallel Explore agent).** Verified `bot/main.py:1270` awaits `loop.run_in_executor(None, snapshot_universe)`. Session 39's wrap keeps OTHER coroutines responsive but `_main_loop` still blocks at the `await` for the executor's duration. Confirmed `_heartbeat_loop` ([bot/main.py:1103](bot/main.py:1103)) runs every 30s as a separate task — this is why the operator dashboard saw "heartbeat 34s fresh" during multi-hour gaps. Identified `bot/shadow_trades.py:52` synchronous file write on main-loop thread as a secondary surface, but per-call latency (~1ms) cannot explain hour-long stalls.
+- **0.3 recent-ship correlation (parallel Explore agent).** Cadence stretching traces back to May 3-5 (bot.log.3), pre-dating Sessions 92/93/95/96/97. **Not a regression from recent code.** The May 10 03:08-11:07 gap correlates with sustained Kalshi API errors (read timeouts, connection resets, "deadline 300s exceeded after 666 pages") inside `snapshot_universe`.
+
+**Root cause.** `bot/universe.py:_SNAPSHOT_DEADLINE_SEC = 300` is checked per-page at `bot/universe.py:258` only AFTER each page completes. Per-page retries (`_CURSOR_RETRY_MAX=3` with 0.5/1.0/2.0s sleeps) layered on top of `agent/kalshi_client._kalshi_get`'s own 429 retries (2/3/5s) plus urllib3 retries means a single "page" can run 60-120s when Kalshi is flaky. 666 pages × ~38s observed average = 7+ hours before the deadline check finally trips. Session 39's `run_in_executor` wrap prevents heartbeat/live_watcher starvation but does not bound `_main_loop`'s own commitment to the awaited executor task.
+
+**Outcome A (surgical).** Add an outer `asyncio.wait_for` with a 600s hard cap around the `run_in_executor` call. On timeout: log ERROR, increment `bot_state.snapshot_outer_timeout_count_24h` (new forward-only daily field), sleep 60s, `continue` to next iteration. The leaked executor thread runs to completion in the background — acceptable for rare 1-2x/day timeouts; if thread-pool exhaustion ever surfaces, a future ship adds per-request HTTP timeouts in `agent/kalshi_client.py` (out of scope per project memory: `agent/` excluded).
+
+**Why 600s.** Internal deadline is 300s + per-page retry overshoot (~100s observed) ≈ 400s worst-case non-pathological. 600s = 1.5x that, well above normal-conditions max (~30s) and moderate-flake max (~120s, Apr 28 data in [bot/universe.py:62-71](bot/universe.py:62)). Under normal Kalshi conditions the outer timeout never fires. It fires only on the 7+ hour pathological case. Tighter (e.g. 360s) would risk false-tripping moderately-flaky-but-recovering scans, which Phase 0.1's intermediate intervals (100-150 min) suggest are a separate cause to leave intact for future investigation.
+
+**Why at the call site, not in universe.py.** The internal 300s deadline already exists there; its weakness is per-page checking with no global wall-clock kill. Fixing inside the cursor walk requires interrupting an in-progress page mid-call, which means changes to `agent/kalshi_client.py` (out of scope). The outer `asyncio.wait_for` at the call site cleanly abandons the executor's result without touching either module's internals.
+
+**Implementation.**
+- `bot/main.py:75-93` — new module constant `_SNAPSHOT_OUTER_TIMEOUT_SEC = 600` with a comment block referencing Phase 0.1 evidence and the Session 39 layer above.
+- `bot/main.py:1247-1253` — daily-reset block now also zeros `snapshot_outer_timeout_count_24h` alongside `scans_today`, `crypto_trades_today`, `telegram_throttled_count_24h`.
+- `bot/main.py:1268-1300` — `await loop.run_in_executor(...)` wrapped in `asyncio.wait_for(..., timeout=_SNAPSHOT_OUTER_TIMEOUT_SEC)` inside a `try/except asyncio.TimeoutError` that logs, increments the counter via `_load_bot_state`/`_save_bot_state`, sleeps 60s, and `continue`s.
+
+**Tests.**
+- `tests/test_main.py::test_main_loop_aborts_long_snapshot_after_outer_timeout` — mocks `_universe.snapshot_universe` with a `time.sleep(0.5)` and monkeypatches `_SNAPSHOT_OUTER_TIMEOUT_SEC = 0.1` so the outer guard fires. Asserts (a) the counter increments in a saved state, (b) a 60s recovery sleep was called. Mirrors the Session 39 test scaffolding (`_PausableNotifier`, `_NoopLock`, `fake_scheduled`, `_load_bot_state`/`_save_bot_state` capture). The existing `test_main_loop_runs_snapshot_universe_via_executor` (Session 39 regression) still passes — both contracts hold simultaneously.
+
+**Verification.**
+- ☑ Targeted suite: `python3 -m pytest tests/test_main.py -v -k "snapshot"` → 2 passed (Session 39 regression + Session 98 new).
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1581 passed** (Session 97 baseline 1580 + 1 net test). No new failures.
+- ☑ Bot restart via Battle Scar #14 path-rooted `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Post-restart wrapper + child PID verified.
+- ☑ Post-restart cadence measurement — see "Verification" section below for the 60-minute observation window.
+
+**What did NOT change.**
+- No `bot/universe.py` change (internal 300s deadline preserved).
+- No `agent/kalshi_client.py` change (out of scope per project memory).
+- No `bot/main.py:1499-1511` wall-clock sleep mechanism change (Session 82's mapping; brief explicitly forbids modification without strong evidence).
+- No `bot/shadow_trades.py` change (Phase 0.2 surface; separate ship).
+- No `_main_loop` steps 4-7b changes (potential secondary sync-I/O surface; watch-list trigger below).
+- No strategy work — Sessions 95/96/97 still in observation window.
+- No `agent/engine.py` work.
+
+**Docs.**
+- `bot/state/active_observations.json` — Session 98 entry added with three metrics: SCAN CYCLE interval median over 24h (expect ≈ 30 min); `snapshot_outer_timeout_count_24h` (expect 0 under healthy Kalshi); longest awake-hours gap (expect < 90 min).
+- `CLAUDE.md` Battle Scar #13 — addendum referencing the Session 98 outer-timeout layer atop the Session 39 executor wrap.
+- `CLAUDE.md` Canonical Data Schema Reference — `bot_state.json` schema now lists `snapshot_outer_timeout_count_24h: int` (forward-only; treat missing as 0).
+- README Session 98 recap added.
+
+**Watch-list triggers.**
+- **Secondary cause if outer timeout doesn't fire.** If post-ship cadence stays degraded (median > 50 min during awake hours) AND `snapshot_outer_timeout_count_24h == 0` for >= 3 days, the dominant cause is NOT snapshot_universe. Open Session 99 to audit `_main_loop` Steps 4-7b (`resolve_trades`, `check_clv_settlements`, `check_fills`, `update_positions`, `recheck_open_edges`, `scan_related_markets`, `check_trailing_stops`, `check_mm_fills`, `scan_market_making_opportunities`) for un-wrapped synchronous Kalshi calls needing `run_in_executor` wraps.
+- **Per-request HTTP timeouts.** If `snapshot_outer_timeout_count_24h ≥ 3/day` for ≥ 3 consecutive days, Kalshi has degraded enough that the cleaner fix (per-request HTTP timeouts in `agent/kalshi_client.py`) is justified. This crosses the `agent/` boundary so requires explicit scope expansion.
+- **Thread-pool exhaustion.** Leaked executor threads accumulate on each timeout. Default executor has min(32, cpu_count*5) workers; current host has 10+ workers. If `snapshot_outer_timeout_count_24h ≥ 8/day`, monitor for executor saturation symptoms (subsequent `run_in_executor` awaits queuing instead of running immediately).
+- **Cadence impact.** Hidden cost: each missed scan = missed vig_stack opportunity. Cadence improvement (e.g. 10 → 20 scans/day) could meaningfully impact run-rate. The 600s outer cap + 60s recovery means worst-case post-fix gap during an awake-hours Kalshi flake is ~660s (11 min) vs pre-fix observed 479 min — a ~43x improvement on the tail.

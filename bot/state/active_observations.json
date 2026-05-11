@@ -102,5 +102,31 @@
         "last_updated": "2026-05-11T00:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 98,
+    "shipped_at": "2026-05-11T14:54:00+00:00",
+    "description": "snapshot_universe outer asyncio.wait_for timeout in _main_loop (600s hard cap)",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "SCAN CYCLE interval median over 24h (awake-hours window)",
+        "expectation": "approx 30 min during awake hours under healthy Kalshi; pre-ship median was ~73 min over 48h (Phase 0.1 evidence). If post-ship median stays > 50 min during awake hours with snapshot_outer_timeout_count_24h == 0, a secondary cause exists (likely sync Kalshi calls in _main_loop steps 4-7b) and a Session 99 audit is warranted.",
+        "current_value": "n/a (pre-restart)",
+        "last_updated": "2026-05-11T14:54:00+00:00"
+      },
+      {
+        "name": "snapshot_outer_timeout_count_24h in bot_state.json",
+        "expectation": "0 under healthy Kalshi; >0 confirms the outer guard fired and abandoned a stuck scan. Counter resets daily alongside scans_today. If consistently >= 3/day for >= 3 days, Kalshi has degraded enough that per-request HTTP timeouts in agent/kalshi_client.py become the next ship.",
+        "current_value": 0,
+        "last_updated": "2026-05-11T14:54:00+00:00"
+      },
+      {
+        "name": "longest SCAN CYCLE gap during awake hours",
+        "expectation": "< 90 min after Session 98 (600s outer cap + 60s recovery sleep + 30 min IDLE wait = ~41 min max + slack). Pre-ship: 479 min observed May 10 03:08-11:07 UTC. If post-ship gaps still exceed 90 min, the outer timeout isn't firing as expected — inspect bot.log for the new ERROR line 'snapshot_universe outer-deadline 600s exceeded'.",
+        "current_value": "n/a (pre-restart)",
+        "last_updated": "2026-05-11T14:54:00+00:00"
+      }
+    ]
   }
 ]
