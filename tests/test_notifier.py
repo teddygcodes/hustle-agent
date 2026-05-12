@@ -215,6 +215,31 @@ def test_edit_dedup_records_only_on_success(monkeypatch, tmp_path):
     assert calls["n"] == 2
 
 
+def test_edit_message_by_id_noop_when_live_cards_disabled(monkeypatch, tmp_path):
+    """Session 113: LIVE_GAME_CARDS_ENABLED=False makes edit_message_by_id a no-op.
+
+    Operator doesn't read Telegram, so per-tick editMessageText calls are
+    suppressed. Returns False without invoking the bot's edit_message_text.
+    """
+    from bot import notifier
+
+    calls: list[dict] = []
+
+    class FakeBot:
+        async def edit_message_text(self, **kwargs):
+            calls.append(kwargs)
+            return True
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+    n._edit_throttle = notifier.EditThrottle(clock=lambda: 0.0)
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", False)
+
+    result = asyncio.run(n.edit_message_by_id(42, "anything"))
+
+    assert result is False
+    assert calls == []
+
+
 def test_bot_state_telegram_fields_forward_only(monkeypatch, tmp_path):
     """Existing bot_state.json files without telegram_* keys still load cleanly."""
     from bot import notifier

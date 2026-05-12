@@ -27,7 +27,13 @@ from telegram.ext import (
     filters,
 )
 
-from bot.config import BOT_STATE_FILE, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, PAPER_MODE
+from bot.config import (
+    BOT_STATE_FILE,
+    LIVE_GAME_CARDS_ENABLED,
+    PAPER_MODE,
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+)
 from bot.state_io import load_json as _load_json_state, save_json as _save_json_state
 
 logger = logging.getLogger("glint.notifier")
@@ -969,6 +975,8 @@ class TelegramNotifier:
 
     async def edit_message_by_id(self, message_id: int, text: str) -> bool:
         """Edit a previously sent message in-place (for live status card)."""
+        if not LIVE_GAME_CARDS_ENABLED:
+            return False
         if not self.app or not TELEGRAM_CHAT_ID:
             return False
         if self._check_flood():
