@@ -5715,3 +5715,48 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - No claim about S90 profitability yet. The validation unlocks only after enough post-Session-108 `reentry_blocked` rows are both sized and settled.
 
 **Watch-list / verification.** After restart, inspect the next post-Session-108 `blocked_reason="reentry_blocked"` row in `bot/state/shadow_trades.jsonl`. It should either have `sizing_status="available"` with populated `would_contracts`/`would_notional`, or an explicit `sizing_unavailable_reason` explaining why contracts were not computable. When ≥10 rows are settled and sized, compute aggregate would-have-traded P&L to evaluate S90 N=1 vs N=2.
+
+### ☑ Session 109 — Post-event reversion substrate: conservative cadence increase (2026-05-12, Outcome A-defensive ship)
+
+**Trigger.** S106 (2026-05-11, Outcome B) shelved `post_event_reversion` because the substrate looked too thin: universe snapshots ~16 days deep at p90=135.9m cadence, no settlement keys, live ticks stop at game end. S106's re-open gates were (a) denser non-live cadence, (b) longer post-resolution retention, or (c) ≥30 days of natural universe history. Session 109 was scoped as the substrate fix, with the brief's decision tree A (ship cadence) / B (design doc) / C (kill) gated on Investigation 4: do mean-reversion patterns actually exist in our scan universe at any cadence?
+
+**Investigation summary.** Three parallel Explore agents ran read-only over [bot/config.py](bot/config.py), [bot/scanner.py](bot/scanner.py), [bot/main.py](bot/main.py), [bot/universe.py](bot/universe.py), [bot/scheduler.py](bot/scheduler.py), [bot/tracker.py](bot/tracker.py), and the universe snapshot archive.
+- **Cadence config.** Global, sport-phased: `SCAN_INTERVAL_IDLE=1800` / `SCAN_INTERVAL_PREGAME=600` / `SCAN_INTERVAL_LIVE=120` at [bot/config.py:50](bot/config.py:50); `get_scan_interval()` at [bot/scanner.py:141](bot/scanner.py:141). No per-family cadence machinery exists.
+- **Safety nets.** S101's 30s per-request daemon-thread guard is workload-independent; S98's 600s outer `asyncio.wait_for` at [bot/main.py:1289](bot/main.py:1289) fits inside any loop period ≥600s, so a 900s IDLE cycle is composable without re-tuning.
+- **Retention.** Daily midnight-ET rotation at [bot/scheduler.py:162](bot/scheduler.py:162) → `bot/state/archive/universe-*.jsonl.gz`. No delete-after-N-days policy; ~2.1 MB/day storage delta at 2x IDLE cadence is negligible.
+- **Cost.** At 2x IDLE only, Kalshi calls go from ~510/day idle / ~1,440/day peak (current) to ~1,020/day idle / ~1,440/day peak — well under Kalshi 429 risk territory (~2,500+).
+- **Settlement gap.** Universe snapshots carry `status` but no `market_result`/`settled_at`/`settled_value`. Observed-but-not-traded markets leave no settlement record. NOT fixed here; denser pre-resolution coverage is the actually-needed surface for the v1 re-measurement.
+- **Investigation 4 (load-bearing).** 314,976 snapshots / 75,559 tickers / 9 observable days. **Headline reversion at 1c event threshold: 16.6% (34/205 events reverted within 6h)** — below the brief's 20% Outcome C bar. Reversion rate decreases as move size grows: 2c=13.5% (21/155), 3c=12.3% (14/114). The directional finding contradicts mean-reversion theory: larger overshoots persist more strongly. At the brief's specified ≥5c threshold the rate would extrapolate even lower. Per-family best: **KXCOPPERD 33% (N=12)**, **KXAAAGASD 29% (N=21)**, **KXHIGHMIA 26% (N=19)**. Per-family worst: **KXTRUEV 0% (N=22)**, **KXSILVERD 7% (N=27)**. ~30% of markets had zero detectable events at p90=135.9m cadence (sparse-cadence limit), which the cadence bump can partially address.
+
+**Decision: Outcome A-defensive.** Headline 16.6% argues Outcome C; commodity-spread subfamily signals at 29–33% on small N argue the brief's "mixed evidence → A-defensive" carve-out. Tyler picked the defensive read: ship a conservative single-knob cadence increase plus a 30-day re-measurement window before deciding kill vs. promote. The change is the minimum-viable substrate bump that does not risk Kalshi 429 limits, does not touch the live tick path, and does not add per-family machinery.
+
+**Outcome A-defensive shipped.**
+- [bot/config.py:50](bot/config.py:50): `SCAN_INTERVAL_IDLE = 900` (was `1800`). Live and pregame intervals unchanged. Comment annotates the session.
+- [bot/scanner.py:728](bot/scanner.py:728): IDLE log label updated to `"IDLE (15 min)"` for operator readability; no behavior change.
+- [tests/test_bot_scanners.py](tests/test_bot_scanners.py): 5 new regression tests — pin the new IDLE value, regression-lock LIVE and PREGAME constants, and assert `get_scan_interval([])` returns 900 while a fake-live game still returns 120.
+- [bot/state/active_observations.json](bot/state/active_observations.json): new Session 109 entry with 30-day window. Five tracked metrics — post-restart scan-cycle p50 interval, snapshot density on KXCOPPERD+KXAAAGASD, Kalshi 429 count, `snapshot_outer_timeout_count_24h`, and the 2026-06-11 re-measurement gate.
+- [CLAUDE.md](CLAUDE.md) Open Loops: modified the S106 entry to reflect the partial substrate unblock + 30-day re-measurement gate; kept the link to the S106 design doc.
+
+**Tests.**
+- ☑ Pre-ship baseline: `python3 -m pytest tests/ --tb=short -q` → **1635 passed in 42.14s** (matches S108 ship report).
+- ☑ Targeted: `python3 -m pytest tests/test_bot_scanners.py -q` → **23 passed in 4.31s** (18 pre-existing + 5 new S109 cases).
+- ☑ Spillover guard (live path / executor): `python3 -m pytest tests/test_live_watcher.py tests/test_bot_executor.py -q` → **125 passed in 1.65s**.
+- ☑ Full suite post-ship: `python3 -m pytest tests/ --tb=short -q` → **1640 passed in 40.87s** (baseline 1635 + 5 new).
+- ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
+- ☑ `git diff --check` passed.
+- ☑ Production-code touch check: `git diff --stat -- bot/` shows only `bot/config.py` (1 line) and `bot/scanner.py` (1 label line) under code; `bot/state/active_observations.json` is the only state-file change.
+- ☑ Restart: verified cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID and child PID captured from `bot.lock`; `bot_state.json` heartbeat fresh post-restart.
+- ☑ Post-restart pulse: tailed `bot.log` for a `next scan` log line in an idle window and confirmed the new label `IDLE (15 min)` / interval ~900s, not 1800s.
+
+**What did NOT change.**
+- No per-family cadence machinery; the global IDLE knob is the only change.
+- `SCAN_INTERVAL_LIVE` (120s) and `SCAN_INTERVAL_PREGAME` (600s) untouched.
+- No settlement-snapshot lookback pass; `status="open"` filter at [bot/universe.py:273](bot/universe.py:273) unchanged.
+- No new market types added to the scan universe.
+- No `post_event_reversion` heuristic implementation; that ships only if the 2026-06-11 re-measurement gate clears.
+- No retention policy change on `bot/state/archive/`.
+- No S98 outer `asyncio.wait_for` re-tuning (600s still fits inside 900s).
+- No live tick / live_watcher / executor / strategy / sizing / budget changes.
+- No historical backfill of any kind (forward-only per S103/S108 discipline).
+
+**Watch-list / verification.** Re-measurement gate fires at the earlier of (a) **2026-06-11** (30 days post-ship) or (b) when **N≥50 observable >=5c events** accumulate on KXCOPPERD+KXAAAGASD post-restart. At fire time, re-run Investigation 4 methodology restricted to event_threshold≥5c (S106 spec, not the 1c probe used in S109). If reversion rate ≥40% on N≥50 events AND the directional anomaly reverses, promote to a v1 heuristic session. If <40% OR the directional finding persists, kill the strategy class (deferred Outcome C). Headline must include per-family N and the ≥5c threshold explicitly to avoid the S103 fabrication trap. If `snapshot_outer_timeout_count_24h` exceeds 2 in any 24h post-restart, revert `SCAN_INTERVAL_IDLE` and reopen S98 tuning before any further cadence increase. If Kalshi 429 errors exceed 0/day, revert immediately.

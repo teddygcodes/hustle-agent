@@ -112,7 +112,7 @@ Everything runs in **paper mode by default** — full edge detection, sizing, an
 1. **`_main_loop()`** — the primary scan cycle. Runs immediately on startup, then on an adaptive schedule:
    - 2-minute cadence when games are live
    - 10-minute cadence in pregame windows
-   - 30-minute cadence when nothing is live
+   - 15-minute cadence when nothing is live (Session 109: 30 min → 15 min)
 
    Each cycle calls `scan_cycle()` in `bot/scanner.py`, which fans out to all strategy scanners in parallel (ThreadPoolExecutor), deduplicates results across strategies, ranks by edge, and returns a prioritized opportunity list. The main loop then:
    - Filters to `ACTIVE_STRATEGIES` only
@@ -636,7 +636,7 @@ All tunables live in `bot/config.py`. No scattered constants anywhere else.
 | `WEATHER_MIN_HOURS_TO_CLOSE` | `8` | Skip same-day weather markets |
 | `SCAN_INTERVAL_LIVE` | `120s` | Scan every 2 min when games are live |
 | `SCAN_INTERVAL_PREGAME` | `600s` | Scan every 10 min in pregame window |
-| `SCAN_INTERVAL_IDLE` | `1800s` | Scan every 30 min when nothing is live |
+| `SCAN_INTERVAL_IDLE` | `900s` | Scan every 15 min when nothing is live (Session 109: 1800→900) |
 | `CRYPTO_SCAN_INTERVAL` | `300s` | Crypto-only scan every 5 min |
 | `CRYPTO_CACHE_TTL` | `60s` | CoinGecko price cache TTL |
 | `PENDING_MAX` | `20` | Max queued opportunities |
