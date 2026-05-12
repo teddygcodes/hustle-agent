@@ -460,5 +460,37 @@
         "last_updated": "2026-05-12T02:38:20+00:00"
       }
     ]
+  },
+  {
+    "session": 113,
+    "shipped_at": "2026-05-12T03:10:05+00:00",
+    "description": "LIVE_GAME_CARDS_ENABLED flag (default False) gates send_message_get_id + edit_message_by_id in bot/notifier.py. Per-tick editMessageText calls suppressed; initial-card sendMessage suppressed. Operator doesn't read Telegram so per-tick API calls update a status card nobody watches — the disable removes that cost. Event-driven Telegram paths (send_confirmation, send_resolution, send_daily_summary, slash commands) are preserved — they route through send_message() and the base _telegram_call() machinery, not the two disabled methods. Cascade design: send_message_get_id returns None when flag is False, so LiveGameWatcher.status_msg_id stays None, so the existing 'if self.status_msg_id:' guards at live_watcher.py:2205 / 2633 short-circuit per-tick edits without any caller-side changes. 4 new pytest cases (2 no-op assertions, 1 flag=True regression lock, 1 send_message preservation). 3 existing edit_message_by_id tests updated to monkeypatch LIVE_GAME_CARDS_ENABLED=True so they continue exercising the dedup + throttle machinery for the case where the operator flips the flag back on. pytest 1654 → 1658 / 0 failures. Restart 63214 → 85470 via launchctl, cwd-verified.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "Telegram editMessageText / edit_message_by_id call volume per 24h",
+        "expectation": "0 with flag False. Verify via `grep -c \"edit_message_text\\|edit_message_by_id\" bot/logs/bot.log` against the rolling log. Any non-zero hit is either (a) someone flipped the flag back on (intentional re-enable), or (b) a path that bypasses the notifier-side guards — investigate.",
+        "current_value": "0 — verified at ship time over the first 3 min post-restart with 3 active LiveGameWatcher MOMENTUM instances (oklahoma, minnesota, casper ruud) firing per-tick logic normally and the cascade short-circuiting cleanly",
+        "last_updated": "2026-05-12T03:10:05+00:00"
+      },
+      {
+        "name": "Telegram 'Message is not modified' error count per 24h",
+        "expectation": "0 with flag False (errors only fired when editMessageText fired, so calls=0 implies errors=0). Pre-restart baseline was ~0.6/hour in bot/logs/bot.log.1 (Phase 0 measured 42 raw lines / 70.3h window). NOT the 236/hour the CLAUDE.md Open Loops entry framed — that framing was wrong by ~three orders of magnitude. Do not claim the dedup logic was 'fixed' — it was bypassed; the bug at bot/notifier.py:993 (hash store only after success) is unchanged.",
+        "current_value": "0 — verified at ship time",
+        "last_updated": "2026-05-12T03:10:05+00:00"
+      },
+      {
+        "name": "Event-driven Telegram path liveness (send_confirmation / send_resolution / send_daily_summary / slash commands)",
+        "expectation": "These continue firing unaffected. test_send_message_preserved_when_live_cards_disabled regression-locks this at unit-test time. Operator-discretionary spot check: send `/status` over Telegram and confirm response. Note: operator-discretionary because the operator's stated preference is to not read Telegram, but if these paths ever need to fire (e.g. a real-mode resolution alert), they MUST work regardless of the flag.",
+        "current_value": "regression-locked at unit-test time (test_send_message_preserved_when_live_cards_disabled); operator-discretionary spot check not performed at ship",
+        "last_updated": "2026-05-12T03:10:05+00:00"
+      },
+      {
+        "name": "14d re-evaluation trigger",
+        "expectation": "At 2026-05-26 OR if any metric above drifts non-zero before then, re-evaluate: (a) confirm the disable is still appropriate (operator hasn't changed Telegram-usage stance); (b) decide whether to remove the live-card code entirely (currently kept reversible) vs. fix the underlying dedup bug at bot/notifier.py:993 vs. leave as-is. If operator wants live cards back, flipping LIVE_GAME_CARDS_ENABLED=True is the entire change — no other code paths assumed False.",
+        "current_value": "not yet fired (S113 ship time)",
+        "last_updated": "2026-05-12T03:10:05+00:00"
+      }
+    ]
   }
 ]
