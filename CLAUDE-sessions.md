@@ -4,7 +4,7 @@ This file is the historical session log for the Glint trading bot. Each entry be
 
 - Operator manual lives in [CLAUDE.md](CLAUDE.md). Read that first for project scope, strategies, safety architecture, battle scars, schema reference, operating posture, and the "When Tyler Asks..." playbooks.
 - This file is append-only-but-curated. New session entries land here, NOT in CLAUDE.md.
-- Most recent ship: Session 101 (2026-05-11).
+- Most recent ship: Session 105 (2026-05-11).
 
 ---
 
@@ -5516,3 +5516,175 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - **S90 sizing-unavailable substrate gap.** Queued as a substrate ship. Wire pre-block sizing computation into the [bot/live_watcher.py](bot/live_watcher.py) reentry-reject path (likely near the existing reentry gate check) so shadow rows can carry `would_contracts` / `would_notional` and `sizing_status="available"`. Without this, S90 calibration remains permanently inferential. Mirrors the substrate-investment shape of S95 / S96 / S99 (data first, then act).
 - **NHL vigilance** (carryover from S97). If 14d rolling NHL WR drops below 78%, escalate — BE is high (74.4%) and small drift could flip it.
 - **Layer 2 outer-`wait_for` binding fix** (carryover from S101). Independent of this session's findings; Tyler re-prioritized S102 to the live_momentum deep dive but the S101-queued Layer 2 investigation remains valid as a Session 103+ candidate per the S101 watch-list trigger language ("Open Session 102 to investigate the `asyncio.get_event_loop()` → `asyncio.get_running_loop()` migration").
+
+---
+
+### ☑ Session 103 — Verify sports arb alpha + design FOK logger (2026-05-11, Outcome B documentation-only)
+
+**Definitive Session 56 read.** Session 56 disabled `sports_monotonicity_arb` and `sports_consistency_arb` because the opportunity shape was single-leg at the executor boundary, not because an attempted two-leg trade lost atomicity. `scan_monotonicity_violations()` at [bot/scanner_sports_arb.py:98](bot/scanner_sports_arb.py:98) looked for threshold violations where lower-strike YES was cheaper than higher-strike YES, then modeled the pair as `buy_yes` lower + `buy_no` higher when `lower_yes_ask + higher_no_ask < 100`; the emitted opp still had top-level `ticker=lower`, `recommended_side=yes`, `confidence=0.95`, and only a sibling `arb_pair` for the second leg. `scan_championship_series_violations()` at [bot/scanner_sports_arb.py:316](bot/scanner_sports_arb.py:316) checked championship YES ask > playoff-series YES ask, then emitted top-level `ticker=champ`, `recommended_side=no`, with the series leg only in `violation` metadata. [bot/main.py:904](bot/main.py:904) sizes a single `ticker`/`recommended_side` via normal Kelly + arb budget, and [bot/executor.py:1024](bot/executor.py:1024) paper/live execution places exactly one order; grep still shows no `arb_pair` reader in `bot/main.py` or `bot/executor.py`. There was no arb-specific exit condition; a one-leg fill would have become a normal position resolved by the generic tracker/settlement path. "0 historical fills" means 0 attempts at all: `bot/state/decisions.jsonl`, `paper_trades.json`, `trade_history.json`, and `positions.json` have zero rows for either sports arb type. Session 56 cites code-shape evidence and scanner price observations only, not empirical fill persistence. So FOK would fix the one-sided-risk bug, but it would not be evidence that the alpha survives long enough to trade.
+
+**Current-data arb-shape scan.** Live Kalshi sample at `2026-05-11T22:50:33Z` fetched open markets for `KXNBASPREAD` 79, `KXNHLSPREAD` 24, `KXNBATOTAL` 33, `KXNHLTOTAL` 48, `KXMLBTOTAL` 66, `KXNBA` 7, `KXNHL` 7, `KXMLB` 30, `KXNBASERIES` 6, `KXNHLSERIES` 6, `KXMLBGAME` 86, `KXNBAGAME` 10, `KXNHLGAME` 12, `KXATPMATCH` 16, and `KXUFCFIGHT` 46. True riskless-arb N is **0**: monotonicity executable-cost violations = 0; same-market underround (`YES ask + NO ask < 100`) = 0; Session-56 championship>series prerequisite violations = 0. Local 24h bot sample corroborates that: 17 sports-arb-attributed scans / 2,183 universe rows since `2026-05-10T22:51:49Z`, 0 monotonicity arb violations, 0 log lines containing `MONOTONICITY VIOLATION` or `CHAMPIONSHIP>SERIES VIOLATION`. There are stale/high-vig shapes, but they are not FOK-fixable free money: current same-market `YES ask + NO ask >= 110` count = 47, driven by wide spreads and often low/no volume. Representative rows:
+
+| shape | ticker(s) | observed prices | spreads | vol 24h | time to close |
+| --- | --- | --- | --- | --- | --- |
+| true monotonicity arb | none | n/a | n/a | n/a | n/a |
+| same-market underround | none | n/a | n/a | n/a | n/a |
+| championship > series | none | n/a | n/a | n/a | n/a |
+| high-vig stale, not arb | `KXMLBTOTAL-26MAY111810LAACLE-10` | YES ask 38 / NO ask 85, sum 123 | YES 23 / NO 23 | 48,103 | 71.3h |
+| high-vig stale, not arb | `KXMLBTOTAL-26MAY111810LAACLE-9` | YES ask 50 / NO ask 64, sum 114 | YES 14 / NO 14 | 136,624 | 71.3h |
+| high-vig stale, not arb | `KXUFCFIGHT-26MAY16JACCRE-CRE` | YES ask 36 / NO ask 75, sum 111 | YES 11 / NO 11 | 816 | 456.8h |
+| high-vig stale, not arb | `KXNHLTOTAL-26MAY13MINCOL-6` | YES ask 57 / NO ask 69, sum 126 | YES 26 / NO 26 | 104 | 385.2h |
+| high-vig stale, not arb | `KXNBASPREAD-26MAY12MINSAS-SAS33` | YES ask 14 / NO ask 97, sum 111 | YES 11 / NO 11 | 300 | 361.2h |
+
+**Paper-mode arb-attempt logger design (not built).** If this project is ever re-opened, v1 should be instrumentation-only and attach before the defensive `return []` lines in [bot/scanner_sports_arb.py:306](bot/scanner_sports_arb.py:306) and [bot/scanner_sports_arb.py:451](bot/scanner_sports_arb.py:451), after each function has built the internal `opportunities` list but before anything can reach [scan_sports_arb()](bot/scanner_sports_arb.py:581) as executable. The logger should write JSONL rows to a new state file, e.g. `bot/state/sports_arb_attempts.jsonl`, and should not mutate scanner return values or `ACTIVE_STRATEGIES`. Schema: `detected_at`, `scan_id`, `arb_type`, `event_ticker`, `legs` (`ticker`, `side`, `observed_ask_cents`, `observed_bid_cents`, `mid_cents`, `spread_cents`, `volume_24h`, `time_to_close_hours`, `requested_qty`, `book_depth_at_or_better`), `expected_risk_free_profit_cents`, `fok_simulation` (`would_fill_clean`, `limiting_leg`, `leg_a_fillable_qty`, `leg_b_fillable_qty`), `failed_leg_unwind` (`filled_leg_ticker`, `filled_leg_side`, `entry_price_cents`, `worst_case_exit_bid_cents`, `unwind_loss_cents`, `within_budget`), and `classification` in `would_fill_clean | would_unwind_within_budget | would_unwind_unsafe`. Depth should come from [agent/kalshi_client.py:279](agent/kalshi_client.py:279) `get_market_orderbook(ticker, depth=10)`; `kalshi_python` 2.1.0 is installed and exposes `MarketsApi.get_market_orderbook(ticker, depth=None)`. Fill simulation should require both legs to have enough displayed depth at or better than the observed ask/limit price in the detection snapshot. For monotonicity, legs are `buy YES lower` + `buy NO higher`; for championship-series, legs are `buy NO championship` + `buy YES playoff-series`. If leg B fails after leg A hypothetically fills, unwind leg A at that side's best bid and classify against a configured max unwind budget. Optional follow-up if implemented: a tiny summary tool that reports 7d/14d opportunity count, clean-fill rate, median displayed depth, and p95 unwind loss.
+
+**Decision: Outcome B — keep sports arb permanently shelved for now; do not spend Session 104 on the logger.** Step 1 proves Session 56 was not an atomicity failure with empirical attempts; it was a dormant single-leg execution bug with no accepted attempts. Step 2 finds N=0 current true arb opportunities and N=0 over the last 24h local sample, while the only nonzero current shape is high-vig/wide-spread staleness that belongs to vig-stack-style edge research, not paired FOK sports arb. Re-evaluation trigger: only re-open sports arb if a passive scanner or discovery heuristic records **>=10 true riskless sports-arb observations/week** (`monotonicity cost < 100`, same-market underround <100, or championship>series executable pair) with median expected profit >=3c, nonzero 24h volume on both legs, and at least 2 consecutive weeks of repeats. Until that fires, leave `sports_monotonicity_arb` and `sports_consistency_arb` disabled and spend no executor-refactor sessions here.
+
+**Verification.** No production code changed. No bot restart. Full pytest preserved Session 101/102 baseline: `python3 -m pytest tests/ --tb=short -q` → **1625 passed in 37.05s**.
+
+---
+
+### ☑ Session 104 — Regime tagger as global size_multiplier (2026-05-11, Outcome B design doc)
+
+**Trigger.** Strategy Priority 2 asked whether Discovery Agent's existing visibility into outlier P&L and market volatility could support a `current_regime` classifier (`calm` / `normal` / `volatile`) that multiplicatively modulates `STRATEGY_BUDGETS` or sizing. Discipline requirement: validate the regime-performance hypothesis first. If active strategies do not perform differently across measurable regimes, global regime sizing is complexity without edge.
+
+**Investigation.** Phase 0 used the last-30-day paper ledger (`bot/state/paper_trades.json`) filtered to settled statuses (`won`, `lost`, `exited_early`). Actual coverage is **327 settled trades across 27 entry days** from 2026-04-15 through 2026-05-11, so the requested N gate of >=30 days with >=3 trades per bucket is not met. The primary volatility proxy was daily mean absolute `yes_ask` movement from archived/current universe snapshots (`bot/state/archive/universe-*.jsonl.gz` plus `bot/state/universe.jsonl`), with live-tick price movement as fallback for early days before universe snapshots existed. Sensitivity checks inspected decision-log edge dispersion, median spread, live-tick movement, and outlier-P&L counts, but outcome-tainted outlier counts were not used as the classifier input.
+
+**All-settled bucket result.** Primary market-motion terciles had cutoffs around `1.3161` and `3.8674`. The all-settled table:
+
+| Bucket | Strategy | Days | Trades | WR | Avg P&L | Total P&L |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Low | `live_momentum` | 9 | 46 | 60.9% | $0.41 | $18.88 |
+| Low | `vig_stack` | 8 | 82 | 63.4% | -$1.47 | -$120.35 |
+| Mid | `live_momentum` | 7 | 25 | 60.0% | -$1.07 | -$26.67 |
+| Mid | `vig_stack` | 8 | 66 | 78.8% | -$0.48 | -$31.68 |
+| High | `live_momentum` | 8 | 37 | 37.8% | -$1.12 | -$41.37 |
+| High | `vig_stack` | 9 | 71 | 87.3% | $15.17 | $1077.02 |
+
+**Current-active-only sanity slice.** Excluding Session 93 disabled vig_stack families (`KXHIGHCHI`, `KXINX`) and Session 97 disabled live_momentum sports (`atp`, `atp_challenger`, `nba_game`, `wta`, `wta_challenger`) removes much of the old dead-cohort signal. Current-active-only table:
+
+| Bucket | Strategy | Days | Trades | WR | Avg P&L | Total P&L |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Low | `live_momentum` | 3 | 6 | 66.7% | $1.25 | $7.48 |
+| Low | `vig_stack` | 9 | 60 | 60.0% | -$1.62 | -$96.93 |
+| Mid | `live_momentum` | 6 | 18 | 55.6% | -$0.47 | -$8.42 |
+| Mid | `vig_stack` | 7 | 40 | 80.0% | $2.54 | $101.42 |
+| High | `live_momentum` | 6 | 12 | 58.3% | $4.76 | $57.15 |
+| High | `vig_stack` | 9 | 50 | 88.0% | $21.25 | $1062.66 |
+
+**Decision: Outcome B — design doc, no sizing ship.** A global high-volatility size-down would likely punish `vig_stack`, where WR improves in the high-motion bucket, while `live_momentum` high-vol weakness is confounded by now-disabled sports and too thin in the current-active slice. P&L per trade is also confounded by the 2026-04-29 paper balance bump from $500 to $10,500, so WR is the safer first-pass comparison. The implementation should not add a `size_multiplier`, `current_regime`, or runtime hook yet.
+
+**Design artifact.** Added [docs/superpowers/specs/2026-05-11-regime-tagger-design.md](docs/superpowers/specs/2026-05-11-regime-tagger-design.md). Future design if revisited:
+- Three states: `calm`, `normal`, `volatile`.
+- Use trailing daily market-motion percentiles, not realized P&L or outlier counts.
+- Update hourly and expose `current_regime` in `bot/state/bot_state.json`.
+- Apply any future multiplier after Kelly sizing in [bot/sizing.py](bot/sizing.py), before existing dollar/family caps bind.
+- Prefer per-strategy multipliers unless future data proves a true global effect.
+
+**What did NOT change.**
+- No code changes.
+- No `bot/sizing.py`, `bot/executor.py`, `bot/config.py`, or `bot_state.json` behavior change.
+- No `STRATEGY_BUDGETS` change and no global multiplier.
+- No bot restart.
+- No `bot/state/active_observations.json` edit; existing uncommitted state drift was left untouched.
+
+**Verification.**
+- ☑ Re-ran the analysis from current repo data; bucket tables above match the design doc.
+- ☑ `git diff --check` passed.
+- Full pytest intentionally not run; documentation-only change with no runtime behavior.
+
+**Watch-list trigger.** Revisit regime sizing only after >=60 calendar days of settled trade data OR >=30 current-active settled trades per strategy per volatility bucket. Until then, regime sizing remains leverage without enough measurable edge.
+
+---
+
+### ☑ Session 105 — Cross-platform settlement matcher gate (2026-05-11, Outcome B design doc)
+
+**Trigger.** Strategy Priority 3 asked for a deterministic Kalshi ↔ Polymarket settlement matcher before any Polymarket client work. The canonical failure mode is the 2024 government-shutdown mismatch: superficially similar contracts can resolve opposite ways when one asks about occurrence and the other asks about criteria/duration. False positives are catastrophic; false negatives are only missed opportunity.
+
+**Data availability.** Polymarket is not the blocker: the Gamma API docs expose public unauthenticated `GET /markets` and `GET /events`, and `closed=true` includes historical markets. Direct probe confirmed closed payloads with `question`, `description`, `resolutionSource`, `endDate`, `closedTime`, `outcomes`, and `outcomePrices`; caveat is that there is no consistently clean `resolved_outcome` enum, so future normalization must infer from final prices only when unambiguous. Kalshi is not the blocker either: direct enrichment of our last-90-day terminal paper ledger found **327 terminal paper rows**, **320 unique terminal tickers**, and **320/320 Kalshi API-enriched resolved tickers** with `title`, `yes_sub_title`, `no_sub_title`, `rules_primary`, `close_time`, `settlement_ts`, and `result`.
+
+**Ground-truth search.** No acceptable public labeled Kalshi ↔ Polymarket equivalence corpus was found. Predexon exposes cross-platform matching endpoints, including active exact-pair bulk output, but the docs explicitly say matching is LLM-powered, can hallucinate, and requires Dev/Pro access for matching. Matchr/PMXT/Skreenr/Conduit/MarketPinger advertise matched-market products, but no open auditable historical labeled corpus surfaced. SimpleFunctions' Hugging Face `settled-markets` dataset and Kingsets provide venue-level settled market data, not pair labels. The 2024 shutdown example remains a useful negative example, but one negative example is not a validation set.
+
+**Decision: Outcome B — design doc, no matcher code.** A unit-tested deterministic matcher would only prove the code follows its own rules; it would not prove those rules identify identical settlement. Without labeled equivalent and divergent pairs, we cannot measure the required zero false positives, >=30% high-confidence recovery on equivalent pairs, or sustainable `MATCH_NEEDS_REVIEW` workload. Outcome C is too strong because venue data access exists and a future corpus could unblock the path; Outcome A is rejected because the validation gate is missing.
+
+**Design artifact.** Added [docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). The doc preserves the v1 deterministic spec: normalized market objects, `MatchResult` enum, 24h date alignment, stopword-stripped Jaccard thresholds (`>=0.60` high confidence, `0.30-0.60` review), resolution-source upgrade only after text/date gates pass, ticker-family rules starting empty, and manual allow/block overrides with block precedence.
+
+**What did NOT change.**
+- No `bot/cross_platform_matcher.py`.
+- No Polymarket client.
+- No scanner, executor, strategy, or config changes.
+- No paper/live cross-platform trading path.
+- No LLM-based matching dependency.
+- No bot restart; PID 90247 remains untouched.
+
+**Verification.**
+- ☑ Active-observations loose end checked first: `git diff -- bot/state/active_observations.json` returned empty, so no commit-or-revert action was needed.
+- ☑ Polymarket Gamma closed-market probe succeeded with browser user-agent; plain Python without user-agent got 403, so a future client must set a reasonable user-agent.
+- ☑ Kalshi API enrichment succeeded for 320/320 unique terminal paper-ledger tickers.
+- ☑ `git diff --check` passed.
+- Full pytest intentionally not run; documentation-only change with no runtime behavior.
+
+**Watch-list trigger.** Re-open cross-platform settlement matching only if a public labeled crosswalk appears, we create an internal human-reviewed corpus with at least 20 equivalent and 20 divergent pairs, a vendor provides auditable historical pair labels for manual verification, or a peer-reviewed deterministic method with corpus appears. Until then, Polymarket client work stays blocked before integration.
+
+---
+
+### ☑ Session 106 — Post-event reversion discovery heuristic (2026-05-11, Outcome B design doc)
+
+**Trigger.** Returning to the paused discovery-agent expansion thread after the strategy-session detour. `post_event_reversion` was the highest-leverage proposed heuristic because it would search a fundamentally different strategy class: prediction markets overreacting to news/data releases and reverting over the next 24-72h. Constraint from the strategy session: zero LLM calls and no news feed integration. Events must be inferred from price/volume only. This session validates substrate first, then decides A/B/C; it does not implement entry, exit, or sizing.
+
+**Substrate check.** `bot/state/live_ticks.jsonl` plus archives has **471,329 rows / 861 tickers** from `2026-04-09T05:14:06Z` to `2026-05-11T23:29:58Z`, but the surface is live sports (`nba`, `atp_challenger`, `atp`, `wta`, `nhl`, `wta_challenger`, `mlb`, `ufc`, `ipl`). Against **327 resolved paper trades**, only **102** have any live ticks, **9** have >=24h of pre-resolution coverage, and **0** have >=24h of post-resolution coverage. Live ticks are therefore useful for live-game replay but cannot classify 24-72h mean reversion. `bot/state/universe.jsonl` plus archived `universe-*.jsonl.gz` has **524,084 rows / 120,792 tickers** from `2026-04-25T16:43:33Z` to `2026-05-11T23:01:50Z`; this is the right future surface for weather/index/crypto/props, but only about 16 days deep, with scan gaps p50/p75/p90/max roughly **37.8m / 65.8m / 135.9m / 581.7m**, and no broad settlement/result fields (`524,000 active`, `84 closed`, result keys absent).
+
+**Event-detection probe.** Price movement was measured from universe midpoint `mid_cents = (yes_bid + yes_ask) / 2` with a liquidity floor of `volume_24h >= 10000` to avoid thin-market quote noise. Adjacent liquid snapshot absolute moves within <=180m had p50/p75/p90/p95/p97.5/p99 of **0.0c / 1.0c / 9.5c / 19.5c / 29.5c / 43.5c**. That makes 10c permissive and ~20c closer to a defensible p95 event threshold, but neither validates a ship: with <=120m windows, 5c produced 2,541 events / 95 observable +24h / 16 reverted (**16.8%**); 10c produced 2,122 / 40 / 3 (**7.5%**); 15c produced 1,779 / 27 / 2 (**7.4%**); 20c produced 1,449 / 13 / 2 (**15.4%**). Most events are indeterminate because the market settles/disappears before a clean +24h observation, especially sports props/totals. The observable subset is too small and too family-skewed to promote or kill the strategy class.
+
+**Decision: Outcome B — design doc, no heuristic.** Outcome A rejected because there is no trustworthy candidate substrate: live ticks lack post-event tails, universe cadence/history are too thin, and the observable +24h sample is below the `N>=30` bar for defensible validation after applying event thresholds. Outcome C rejected because universe snapshots are close to the right future source; better cadence/history and broader outcomes could unlock this later. The result is not "mean reversion is dead"; it is "do not surface a strategy-candidate row yet."
+
+**Design artifact.** Added [docs/superpowers/specs/2026-05-11-post-event-reversion-design.md](docs/superpowers/specs/2026-05-11-post-event-reversion-design.md). Future v1 remains deterministic and zero-LLM: universe-snapshot source, liquid-market floor, data-derived price-gap threshold, nearest +24h classification as reverted/persisted/indeterminate, and candidate evidence including event count, observable count, reversion rate, median reversion magnitude, family breakdown, and indeterminate rate. The observed ~20c p95 liquid move is documentation evidence only, not a shipped parameter.
+
+**What did NOT change.**
+- No `post_event_reversion.py` heuristic file.
+- No discovery-agent registration.
+- No `tools/glint_status.py` or §9 Strategy Candidates rendering change.
+- No `CLAUDE.md` promotion-bar threshold; the heuristic did not ship.
+- No bot, scanner, executor, strategy, state-schema, or cadence behavior change.
+- No `bot/state/active_observations.json` edit; `git diff -- bot/state/active_observations.json` was empty.
+- No bot restart; PID 90247 remains untouched.
+
+**Verification.**
+- ☑ Read-only substrate measurements rerun from current repo data.
+- ☑ `git diff --check` passed.
+- Full pytest intentionally not run; documentation-only Outcome B with no runtime behavior.
+- Production-code touch check: no files under `bot/` or `tools/discovery_agent/` changed.
+
+**Watch-list trigger.** Re-open `post_event_reversion` only when all gates clear: at least **30 days** of archived universe snapshots, at least **30 observable +24h event outcomes** after liquidity and data-derived event-threshold filters, preferably **<=10m** non-live scan cadence or an explicitly validated wider event window, and broad settled-market outcomes if future validation requires settled-only cohorts outside our own biased `paper_trades.json` surface. Outcome A should still require reversion rate materially above random, with the original `>=60%` at `N>=30` as the default bar; borderline evidence stays Outcome B.
+
+---
+
+### ☑ Session 107 — live_momentum context coverage patch (2026-05-11/12, Outcome A instrumentation-only ship)
+
+**Trigger.** S102's cohort deep dive found only **N=2** settled live_momentum trades with enough S96 context to slice by leader/dip/match state, blocking questions like "what is WR by leader-strength bucket?" The queued S96 architectural-gap item asked for a diagnosis-first fix: verify whether this was truly sparse context coverage, then extend the helper only where the necessary data is already in scope.
+
+**Phase 0 finding.** Evidence was mixed but actionable. Historical `decisions.jsonl` coverage was sparse mostly because S96 was forward-only: all-history live_momentum context coverage was **43/1098 (3.9%)**, and last-500 coverage was **43/500 (8.6%)**. Current May 11 watcher decisions, however, were already high coverage after the S96/S99 restarts: **43/48 (89.6%)**. The remaining fixable gaps were executor direct accept logs (`all_gates_passed`: **0/53** carrying context all-history, **0/2** on May 11) and scan/journal no-entry rows where market sides existed but `extra` was still omitted. The `leader_price + dip_cents + match_phase` count was **34/1098**, all from disabled-sport rows; IPL accepted trades still lack `match_phase` because the regime spec requires `over_count`, not elapsed time.
+
+**Outcome A shipped.** Instrumentation-only, forward-only, no behavior changes.
+- [bot/live_watcher.py](bot/live_watcher.py): `_build_live_momentum_decision_context()` now accepts partial fallback inputs (`kalshi_market`, scalar price/bid/volume aliases) while preserving existing field names, types, omission behavior, `context_available`, and `missing_context_fields`. Added `_build_live_momentum_scan_context()` to select the higher-priced available side for scan-time gates without leaking full market blobs.
+- [bot/live_watcher.py](bot/live_watcher.py): scan-time `scan_found.extra` now covers the formerly empty reachable gates: `bad_event_shape` when side data exists, `not_today`, `settled`, `unknown_name`, `already_watching`, and `recently_watched`. Existing context-rich scan gates (`low_volume`, `no_leader`, no-volume-growth, capacity, spawn) kept their schema.
+- [bot/executor.py](bot/executor.py): live_momentum executor direct logs now merge `opportunity["decision_context"]` into `self_check_failed` and `all_gates_passed`, matching the existing position-limit reject path. Non-live_momentum logs remain unchanged; vig_stack spillover is regression-locked.
+- [CLAUDE.md](CLAUDE.md): removed the resolved S96 architectural-gap Open Loop and replaced it with the narrower S107 follow-on for rich in-match state (`over_count`/round/set fields) needed for `match_phase` slicing.
+
+**Tests.**
+- Added helper coverage for partial alias inputs and scan-context rows on the formerly empty gates.
+- Added executor coverage for live_momentum position rejects, `self_check_failed`, and `all_gates_passed` merging `decision_context`, plus a vig_stack spillover guard.
+- ☑ Targeted: `python3 -m pytest tests/test_live_watcher.py tests/test_bot_executor.py -q -k "live_momentum_context_helper or ScanLiveMatchesSkipReason or Session107LiveMomentumDecisionContext or Session99 or session_99"` → **28 passed**.
+- ☑ Broader touched files: `python3 -m pytest tests/test_live_watcher.py tests/test_bot_executor.py -q` → **124 passed**.
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1630 passed in 38.55s**.
+- ☑ Restart: verified cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`, path-rooted wrapper PID **90243** pre-restart, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID **22181**, child PID **22200** from `bot.lock`; `bot_state.json` heartbeat/start at `2026-05-12T00:04:36Z`.
+- ☑ Immediate post-restart pulse: no fresh `live_momentum` decisions yet by `00:05Z`, but `live_journal.json` scan context improved immediately: **118/118** fresh `scan_found` rows had `context_available=true`, including the formerly empty gates `not_today=30/30` and `settled=1/1`.
+
+**What did NOT change.**
+- No live_momentum entry/exit logic.
+- No sizing, budget, cap, disable, or strategy threshold changes.
+- No vig_stack context changes.
+- No historical backfill.
+- No invented IPL `match_phase` fallback from elapsed wall-clock; rich cricket state remains a follow-on.
+
+**Watch-list / verification.** `bot/state/active_observations.json` now tracks 14d context coverage for live_momentum decisions, executor `all_gates_passed` context, scan/journal context on formerly empty gates, and the S102 slice counts (`leader_price + dip_cents` vs `leader_price + dip_cents + match_phase`). Post-restart expectation: context coverage should rise immediately on executor accept rows and scan/no-entry rows; `match_phase` may remain thin until a future rich-state session.

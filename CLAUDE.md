@@ -710,7 +710,7 @@ allowlisted no-entry/entry context:
   # Session 99 forward-only — scalar fair-value proxy. Present when
   # _build_live_momentum_decision_context is called from the per-tick site at
   # bot/live_watcher.py:1422-1453 (game_ctx-available path) AND wp_edge +
-  # leader_price are both populated. Absent at the 6 scan-time call sites
+  # leader_price are both populated. Absent at scan-time call sites
   # (game_ctx=None, so wp_edge=None, so the proxy returns None — the merge
   # then drops it from the dict). Calibration via tools/calibration_report.py
   # → report_live_momentum_calibration().
@@ -723,6 +723,16 @@ allowlisted no-entry/entry context:
 Rows only include fields available at that decision point. Missing values are
 omitted and named in `missing_context_fields`. Do not add full market dicts,
 GameContext objects, ESPN payloads, or order blobs to `extra`.
+
+Session 107 widened the same schema to reachable partial-context paths:
+scan-time `scan_found.extra` rows for `not_today`, `settled`,
+`unknown_name`, `already_watching`, `recently_watched`, and
+`bad_event_shape` now use the higher-priced available side as
+`leader_side="scan"` context, and live_momentum executor direct logs
+(`all_gates_passed`, `self_check_failed`) merge the watcher-built
+`decision_context`. This is still forward-only and partial: IPL
+`match_phase` remains `None` until a future session sources `over_count`
+or equivalent rich cricket state.
 
 ### `bot/state/live_journal.json` live_momentum scan context
 
@@ -1030,9 +1040,9 @@ When a new session ships an Outcome B (design doc) or Outcome C with deferred wo
 
 Items where Outcome B was filed but no data accumulates passively.
 
-- **S96 — live_momentum context architectural gap.** Per-tick context emission only fires when `game_ctx` is available; many decision paths emit empty context. Surfaced concretely in S102 cohort analysis (matched N=2 instead of expected ~30). **Unblocks:** extend `_build_live_momentum_decision_context()` (`bot/live_watcher.py`) to populate context on broader decision paths. **Why it matters:** until this ships, every cohort analysis on live_momentum is N-thin and biased toward per-tick paths.
-
 - **S90 — Re-entry breaker counterfactual computation.** Shadow rows for `reentry_blocked` carry `sizing_status=unavailable`, making counterfactual P&L uncomputable. Surfaced concretely in S102 (couldn't validate whether the breaker is saving or costing money). **Unblocks:** add sizing computation to `bot/shadow_trades.py` writer for the `reentry_blocked` path so each shadow row has `would_contracts` + `would_notional`. **Why it matters:** without this we can't measure whether S90's threshold (N=1) is correct vs N=2.
+
+- **S107 follow-on — rich live_momentum match-phase state.** Session 107 fixed reachable partial context on scan/executor paths, but `match_phase` is still structurally thin for IPL because the regime spec requires `over_count` rather than elapsed wall-clock. **Unblocks:** source compact sport-state fields (`over_count` for IPL, and richer round/set state where available) into `_build_live_momentum_decision_context()` without full ESPN blobs. **Why it matters:** leader-strength and dip buckets are now observable forward, but `sport × match_phase × leader_strength` slicing remains N-thin until rich match state exists.
 
 - **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **Unblocks:** build a manual labeled Kalshi↔Polymarket pair corpus (~50-100 pairs) by hand-labeling against historical settled markets, OR locate an emerging public dataset. **Why it matters:** without a validation corpus, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
 

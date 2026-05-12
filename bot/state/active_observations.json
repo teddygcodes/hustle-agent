@@ -280,5 +280,37 @@
         "last_updated": "2026-05-11T23:30:00+00:00"
       }
     ]
+  },
+  {
+    "session": 107,
+    "shipped_at": "2026-05-12T00:02:00+00:00",
+    "description": "live_momentum context coverage patch. Extended S96/S99 instrumentation to reachable partial-context paths: scan-time no-entry rows that already have market sides, plus executor direct live_momentum accept/self-check logs. No strategy behavior changes, no sizing changes, no historical backfill.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "live_momentum decisions with context_available=true in decisions.jsonl.extra",
+        "expectation": "materially higher forward after restart. Pre-ship all-history coverage was 43/1098 (3.9%) because S96 was forward-only; current May 11 watcher rows were already 43/48 (89.6%). The S107 lift should mainly show on executor all_gates_passed rows and future scan/no-entry context surfaces.",
+        "current_value": "pre-restart: all=43/1098, last500=43/500, May11=43/48; immediate post-restart pulse had 0 fresh live_momentum decisions by 00:05Z",
+        "last_updated": "2026-05-12T00:06:00+00:00"
+      },
+      {
+        "name": "executor all_gates_passed live_momentum rows carrying leader_price + dip_cents",
+        "expectation": "rising from the first post-restart live_momentum accept; every all_gates_passed row should merge the watcher-built decision_context and carry leader_price, dip_cents, source, and missing_context_fields.",
+        "current_value": "pre-restart: 0/53 all-history, 0/2 on May11",
+        "last_updated": "2026-05-12T00:02:00+00:00"
+      },
+      {
+        "name": "live_journal scan_found rows with partial scan context on formerly empty scan gates",
+        "expectation": "not_today/settled/unknown_name/already_watching/recently_watched/bad_event_shape rows should carry context when market side data exists. Pre-ship last500 scan_found rows were 283/500 context_available, with not_today and already_watching still empty.",
+        "current_value": "pre-restart: last500 scan_found context_available=283/500; immediate post-restart pulse: 118/118 context_available, including not_today=30/30 and settled=1/1",
+        "last_updated": "2026-05-12T00:06:00+00:00"
+      },
+      {
+        "name": "S102 cohort slice counts: leader_price + dip_cents vs leader_price + dip_cents + match_phase",
+        "expectation": "leader_price + dip_cents should grow materially after S107. The +match_phase count may remain thin for IPL until rich cricket state (over_count) is sourced; do not treat that as a regression of this patch.",
+        "current_value": "pre-restart decisions: leader_price+dip_cents=43/1098; leader_price+dip_cents+match_phase=34/1098, all sport_disabled rows",
+        "last_updated": "2026-05-12T00:02:00+00:00"
+      }
+    ]
   }
 ]
