@@ -1564,13 +1564,33 @@ def compute_active_observations(
     now: datetime,
 ) -> list:
     computed = deepcopy(observations)
+
+    # Walk the decision archives ONCE across the widest window, then filter
+    # per-observation in memory. Walking per-observation scaled O(N_obs) and
+    # by S110 was reading 13 × 14 gzipped archives = ~670K JSON parses per snapshot.
+    earliest_shipped: datetime | None = None
+    for obs in computed:
+        if not isinstance(obs, dict):
+            continue
+        shipped = _parse_iso(obs.get("shipped_at"))
+        if shipped is not None and (earliest_shipped is None or shipped < earliest_shipped):
+            earliest_shipped = shipped
+
+    decisions_window: list[tuple[datetime, dict]] = []
+    if earliest_shipped is not None:
+        for rec in _iter_decisions_with_archives(paths, earliest_shipped, now):
+            ts = _parse_iso(rec.get("ts"))
+            if ts is None:
+                continue
+            decisions_window.append((ts, rec))
+
     for obs in computed:
         if not isinstance(obs, dict):
             continue
         shipped = _parse_iso(obs.get("shipped_at"))
         if shipped is None:
             continue
-        decisions = list(_iter_decisions_with_archives(paths, shipped, now))
+        decisions = [rec for ts, rec in decisions_window if ts >= shipped]
         for m in obs.get("metrics", []) or []:
             if not isinstance(m, dict):
                 continue

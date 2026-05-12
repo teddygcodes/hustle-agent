@@ -5807,3 +5807,40 @@ Phase 0 produced concrete evidence that the integration is feasible and the sche
 - No restart of the bot.
 
 **Watch-list / verification.** Promote-to-execution trigger: the follow-on integration session per the design doc's "What a Future Integration Session Looks Like" section. Operator should schedule that session opportunistically when (a) IPL season is active so post-restart cohort growth is observable within 14 days, AND (b) S107/S109 substrate work has settled (no open mid-flight network-discipline tuning). If the follow-on session is not scheduled by 2026-06-12 (30 days), the operator should re-read this design doc to verify ESPN cricket endpoint hasn't rotated (ESPN can change league IDs or paths) before re-opening — Phase 0 of the follow-on session should re-probe the URL and capture a fresh sample. The S107 follow-on entry in CLAUDE.md Open Loops remains as the durable pointer until the integration ships.
+
+### ☑ Session 111 — Consolidator perf regression fix: hoist archive walk out of compute_active_observations (2026-05-11, Outcome A ship)
+
+**Trigger.** S110's pre-ship baseline surfaced `tests/test_glint_status.py::test_consolidator_completes_in_under_2s` failing at 2.16-2.22s vs the 2.0s budget — consistent across 3 runs, NOT a flake. S110's agent tried to bump the threshold to 3.0s; operator denied per the S78 anti-pattern (don't adjust assertions to match degraded behavior). Filed as an Open Loops follow-on with two candidate fix paths: (a) optimize `build_snapshot` hot paths, or (b) refactor the test to a seeded tmpdir. The Session 111 brief mandated profile-first and a defaulted to Outcome B if evidence was mixed; cProfile in Phase 0 produced unambiguous Outcome A evidence.
+
+**Phase 0 (cProfile).** Five back-to-back runs of the failing test now reported **1.88-1.94s** (passing but with thin margin — the regression was real but boundary-territory and natural variance had pulled it back across the line). cProfile against `build_snapshot` directly showed:
+- `compute_active_observations` ([tools/glint_status.py:1560](tools/glint_status.py:1560)) = **3.277s of 3.457s cumulative ≈ 95%** of total snapshot time.
+- `_iter_decisions_with_archives` ([tools/glint_status.py:1448](tools/glint_status.py:1448)) = 3.261s cumulative, called effectively once per active observation.
+- `json.loads` = 1.95s across **670,041 invocations** = ~50K JSON lines × **13 walks** of the decision archive set.
+
+**Root cause.** Line 1573 (pre-fix): `decisions = list(_iter_decisions_with_archives(paths, shipped, now))` sat **inside** the `for obs in computed:` loop. Each of the 13 active observations triggered a full re-walk of `bot/state/archive/decisions-*.jsonl.gz` (14 gzipped files) + the live `decisions.jsonl`. The consolidator scaled linearly with active-observation count; each session that appends an observation extends the test runtime by ~150ms. S110's regression was the natural-growth tipping point.
+
+**Decision: Outcome A.** Single function ≥ 95% cumulative time. Fix is < 20 lines with zero behavior change (same observations, same metric values, same render). The brief's pivot rule for this profile is unambiguous: ship the optimization.
+
+**Outcome A shipped.**
+- [tools/glint_status.py:1565-1596](tools/glint_status.py:1565): hoist `_iter_decisions_with_archives` outside the per-observation loop. New flow: (1) compute `earliest_shipped` across all observations; (2) materialize `decisions_window: list[tuple[datetime, dict]]` once over `[earliest_shipped, now)` with each record's `ts` pre-parsed; (3) per-observation, filter the materialized list by `ts >= obs.shipped_at`. Walk-count drops from `len(observations)` to 1. `_parse_iso` calls on `ts` drop from `~13×50K = ~670K` to `~50K`. Per-observation metric helpers (`_count_reject_reason`, `_reentry_sport_distribution`) are unchanged — they take an iterable and the filtered list satisfies that contract.
+- [CLAUDE.md "Open Loops → Operational hygiene not yet shipped"](CLAUDE.md): removed the "Consolidator perf regression (S110 surfaced)" entry — regression class is closed.
+
+**Tests.**
+- ☑ Targeted: 5 consecutive runs of `tests/test_glint_status.py::test_consolidator_completes_in_under_2s` post-fix: **0.30s, 0.31s, 0.30s, 0.30s, 0.33s** vs the 2.0s budget. **6.5× faster** than the pre-fix passing-but-thin readings of 1.88-1.94s. Headroom is now ~5× the threshold; future observation growth no longer scales the runtime.
+- ☑ Full `tests/test_glint_status.py`: **48 passed in 0.36s** (no other tests touched by the change).
+- ☑ Full pytest: **1640 passed, 0 failed in 38.15s** — S109 baseline restored exactly.
+- ☑ Production rendering: `python3 tools/glint_status.py` against live state emits 388 lines / 10 sections / fresh vitals (PID 73822, 20s heartbeat). §10 Active Observations renders all 13 observations with identical computed metric values to pre-fix (S90 reentry_blocked=6, S93 family_disabled_reject=31, S98 outer_timeout_count=0, etc.). Verified.
+- ☑ Production-code touch check: `git diff --stat` shows changes confined to `tools/glint_status.py` (one function), `CLAUDE.md` (Open Loops removal), and `CLAUDE-sessions.md` (this entry).
+- ☑ No bot restart (consolidator is read-only tooling; live state files untouched).
+- ☑ No `bot/state/*` writes (Battle Scar #1/#3 discipline maintained).
+
+**What did NOT change.**
+- No behavior change: every observation's computed metric value is identical pre/post-fix because the same predicates run over the same record set; only the iteration shape moved.
+- No bot code touched. `bot/` is untouched (consolidator lives in `tools/`).
+- No threshold relaxation (S78 anti-pattern respected — the 2.0s assertion is unchanged).
+- No test changes — the same test passes 6.5× faster against unchanged live state.
+- No new observations / metrics / sections in the glint_status output.
+- No vig_stack or live_momentum strategy work.
+- No restart of the bot. PID 73822 (S109 restart) still alive at session end (verified via path-rooted `ps aux | grep "Desktop/hustle-agent/hustle-agent"`).
+
+**Watch-list / verification.** None required — the regression class is closed and the fix is structural (eliminates an O(N_obs) scaling factor that would otherwise re-surface on every future ship). The architectural lesson: any new per-observation work in `compute_active_observations` must operate on the already-materialized `decisions_window` list rather than re-calling `_iter_decisions_with_archives`. Future regression shape: if a future contributor re-introduces a per-obs archive walk, cProfile will show the multiplier return. No active observation to register; this is a static invariant of the function shape.
