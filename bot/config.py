@@ -805,6 +805,18 @@ CRYPTO_SCAN_INTERVAL = 180     # 3 minutes — capture more transient crypto edg
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 # ---------------------------------------------------------------------------
+# Telegram live-game card editing
+# ---------------------------------------------------------------------------
+# Default False per operator preference: operator doesn't read the Telegram
+# channel, so per-tick editMessageText calls (one per 10s tick per active
+# LiveGameWatcher) update a status card nobody watches. Event-driven Telegram
+# paths (trade confirms, daily summaries, slash commands) are unaffected —
+# they route through send_message(), not edit_message_by_id /
+# send_message_get_id. Flip to True to restore live cards if operator
+# preferences change. Session 113 (2026-05-11).
+LIVE_GAME_CARDS_ENABLED = False
+
+# ---------------------------------------------------------------------------
 # Scheduled Briefings (Eastern Time)
 # ---------------------------------------------------------------------------
 MORNING_BRIEFING_HOUR = 8      # 8am ET
