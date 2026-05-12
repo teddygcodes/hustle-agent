@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from bot.cross_platform_matcher import (
+    BetTypeSignature,
     MatchResult,
+    TimeGranularity,
     dates_aligned,
+    extract_bet_type,
+    extract_time_granularity,
     jaccard,
     match_markets,
     normalize_tokens,
@@ -50,6 +54,70 @@ class TestJaccard:
         assert normalize_tokens("Will the Fed cut rates?") == {"fed", "cut", "rates"}
 
 
+class TestBetTypeExtraction:
+    def test_extracts_winner(self):
+        assert extract_bet_type("Will Atlanta Dream win?") == BetTypeSignature("winner")
+
+    def test_extracts_total(self):
+        assert extract_bet_type("Qingdao Hainiu FC vs. Dalian Yingbo FC: O/U 2.5") == BetTypeSignature(
+            "total",
+            threshold=2.5,
+        )
+
+    def test_extracts_handicap_before_map_winner(self):
+        assert extract_bet_type("Map Handicap: ISG (-1.5) vs Turma do Pagode (+1.5)") == BetTypeSignature(
+            "handicap",
+            unit="map",
+            threshold=-1.5,
+        )
+
+    def test_extracts_exact_score(self):
+        assert extract_bet_type("Exact Score: CD Real Tomayapo 2 - 2 CD San Antonio Bulo Bulo?") == BetTypeSignature(
+            "exact_score",
+            score="2-2",
+        )
+
+    def test_extracts_set_map_and_game_winners(self):
+        assert extract_bet_type("Set 1 Winner: Khachanov vs Zandschulp") == BetTypeSignature("set_winner", "set", 1)
+        assert extract_bet_type("Valorant: ZETA DIVISION vs Gen.G Esports - Map 2 Winner") == BetTypeSignature(
+            "map_winner",
+            "map",
+            2,
+        )
+        assert extract_bet_type("LoL: G2 Esports vs GIANTX - Game 2 Winner") == BetTypeSignature(
+            "game_winner",
+            "game",
+            2,
+        )
+
+    def test_extracts_completed_match_draw_btts_top_n_and_price(self):
+        assert extract_bet_type("Cordoba: Completed Match: Juan vs Maximo") == BetTypeSignature("completed_match")
+        assert extract_bet_type("Will Team A vs Team B end in a draw?") == BetTypeSignature("draw")
+        assert extract_bet_type("RB Leipzig vs. St. Pauli: Both Teams to Score") == BetTypeSignature("both_teams_to_score")
+        assert extract_bet_type("Will Beau Hossler finish in the Top 10?") == BetTypeSignature("top_n_finish", threshold=10.0)
+        assert extract_bet_type("Bitcoin price on May 12, 2026 at 4am EDT? - $82,400 or above") == BetTypeSignature(
+            "price_threshold",
+            threshold=82400.0,
+        )
+
+    def test_extracts_other_when_no_market_proposition(self):
+        assert extract_bet_type("Federal Reserve policy announcement") == BetTypeSignature("other")
+
+
+class TestTimeGranularityExtraction:
+    def test_extracts_hour_specific(self):
+        assert extract_time_granularity("Bitcoin above 82,400 on May 12, 4AM ET?") == TimeGranularity.HOUR_SPECIFIC
+
+    def test_extracts_day_wide_for_date_only_price_market(self):
+        assert extract_time_granularity("Will the price of Ethereum be above $2,500 on May 11?") == TimeGranularity.DAY_WIDE
+
+    def test_extracts_date_range(self):
+        assert extract_time_granularity("Will Bitcoin trade above $100,000 between May 10 and May 12?") == TimeGranularity.DATE_RANGE
+
+    def test_extracts_indefinite(self):
+        assert extract_time_granularity("Atlanta Dream vs. Minnesota Lynx") == TimeGranularity.INDEFINITE
+
+
 class TestMatchResultSemantics:
     def test_high_confidence_when_date_and_keywords_align(self):
         decision = match_markets(
@@ -83,8 +151,8 @@ class TestMatchResultSemantics:
 
     def test_source_match_can_upgrade_review_to_high_confidence(self):
         decision = match_markets(
-            _market("KXFED", "Fed rate June", source="https://federalreserve.gov"),
-            _market("123", "Fed outcome June", source="federalreserve.gov"),
+            _market("KXFED", "Will Fed rate be over 4.5 in June?", source="https://federalreserve.gov"),
+            _market("123", "Will Fed outcome policy decision be over 4.5 in June?", source="federalreserve.gov"),
         )
         assert decision.result == MatchResult.MATCH_HIGH_CONFIDENCE
         assert decision.reason == "resolution_source_upgrade"
@@ -110,6 +178,38 @@ class TestMatchResultSemantics:
             _market("123", "Bitcoin above 100000 May 12?"),
         )
         assert decision.result == MatchResult.INSUFFICIENT_DATA
+
+    def test_bet_type_mismatch_forces_no_match_before_jaccard(self):
+        decision = match_markets(
+            _market("KXGAME", "Qingdao Hainiu vs Dalian Yingbo FC"),
+            _market("1970416", "Qingdao Hainiu FC vs. Dalian Yingbo FC: O/U 2.5"),
+        )
+        assert decision.result == MatchResult.NO_MATCH
+        assert decision.reason.startswith("bet_type_mismatch")
+
+    def test_ambiguous_bet_type_needs_review(self):
+        decision = match_markets(
+            _market("KXEVENT", "Federal Reserve policy announcement"),
+            _market("123", "Federal Reserve policy announcement"),
+        )
+        assert decision.result == MatchResult.MATCH_NEEDS_REVIEW
+        assert decision.reason == "bet_type_ambiguous"
+
+    def test_time_granularity_mismatch_needs_review(self):
+        decision = match_markets(
+            _market("KXBTC", "Bitcoin price on May 12, 2026 at 4am EDT? - $82,400 or above"),
+            _market("123", "Will the price of Bitcoin be above $82,400 on May 12?"),
+        )
+        assert decision.result == MatchResult.MATCH_NEEDS_REVIEW
+        assert decision.reason == "time_granularity_mismatch: hour_specific != day_wide"
+
+    def test_matching_new_gates_preserve_existing_keyword_high_path(self):
+        decision = match_markets(
+            _market("KXBTC", "Bitcoin price on May 12, 2026 at 4am EDT? - $82,400 or above"),
+            _market("123", "Bitcoin above 82,400 on May 12, 4AM ET?"),
+        )
+        assert decision.result == MatchResult.MATCH_HIGH_CONFIDENCE
+        assert decision.reason == "date_aligned_and_keyword_high"
 
 
 class TestManualOverrides:
