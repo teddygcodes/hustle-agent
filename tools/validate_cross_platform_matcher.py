@@ -85,6 +85,15 @@ def _labeler_matches(row: dict, labeler_filter: str | None) -> bool:
     return _labeler(row) == labeler_filter.strip().lower()
 
 
+def _labeling_session_matches(row: dict, labeling_session_filter: str | None) -> bool:
+    if not labeling_session_filter:
+        return True
+    session = row.get("labeling_session")
+    if session is None:
+        return False
+    return str(session).strip().upper() == labeling_session_filter.strip().upper()
+
+
 def _write_jsonl(records: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -93,22 +102,56 @@ def _write_jsonl(records: list[dict], path: Path) -> None:
     os.replace(tmp, path)
 
 
+def _new_metric_bucket() -> dict:
+    return {
+        "labeled_count": 0,
+        "exact_count": 0,
+        "safe_count": 0,
+        "false_positive_count": 0,
+        "false_negative_count": 0,
+        "confusion": Counter(),
+    }
+
+
+def _record_metric_bucket(bucket: dict, label: str, matcher_label: str, result: MatchResult) -> None:
+    bucket["labeled_count"] += 1
+    bucket["confusion"][f"{label}->{result.value}"] += 1
+    if matcher_label == label:
+        bucket["exact_count"] += 1
+    if matcher_label == label or (label == "NO_MATCH" and matcher_label == "NEEDS_REVIEW"):
+        bucket["safe_count"] += 1
+    if result == MatchResult.MATCH_HIGH_CONFIDENCE and label == "NO_MATCH":
+        bucket["false_positive_count"] += 1
+    if result == MatchResult.NO_MATCH and label == "MATCH":
+        bucket["false_negative_count"] += 1
+
+
+def _finalize_metric_bucket(bucket: dict) -> dict:
+    labeled_count = bucket["labeled_count"]
+    return {
+        "labeled_count": labeled_count,
+        "accuracy": bucket["safe_count"] / labeled_count if labeled_count else None,
+        "exact_accuracy": bucket["exact_count"] / labeled_count if labeled_count else None,
+        "false_positive_count": bucket["false_positive_count"],
+        "false_negative_count": bucket["false_negative_count"],
+        "confusion": dict(bucket["confusion"]),
+    }
+
+
 def validate_queue(
     queue_path: Path = DEFAULT_QUEUE_PATH,
     disagreement_path: Path = DEFAULT_DISAGREEMENT_PATH,
     disagreement_limit: int = 40,
     labeler: str | None = None,
+    labeling_session: str | None = None,
 ) -> dict:
     rows = load_jsonl(queue_path)
     distribution: Counter[str] = Counter()
     heuristic_agree = 0
     heuristic_disagree = 0
-    labeled_count = 0
-    labeled_exact = 0
-    labeled_safe = 0
-    false_positive_count = 0
-    false_negative_count = 0
-    confusion: Counter[str] = Counter()
+    overall_metrics = _new_metric_bucket()
+    per_bucket: dict[str, dict] = {}
+    per_stratum: dict[str, dict] = {}
     disagreements: list[dict] = []
 
     for row in rows:
@@ -139,24 +182,56 @@ def validate_queue(
                     "matcher_reason": decision.reason,
                 })
 
-        label = _operator_label(row) if _labeler_matches(row, labeler) else None
+        label = (
+            _operator_label(row)
+            if _labeler_matches(row, labeler) and _labeling_session_matches(row, labeling_session)
+            else None
+        )
         if label:
-            labeled_count += 1
-            confusion[f"{label}->{result_value}"] += 1
-            if matcher_label == label:
-                labeled_exact += 1
-            if matcher_label == label or (label == "NO_MATCH" and matcher_label == "NEEDS_REVIEW"):
-                labeled_safe += 1
-            if decision.result == MatchResult.MATCH_HIGH_CONFIDENCE and label == "NO_MATCH":
-                false_positive_count += 1
-            if decision.result == MatchResult.NO_MATCH and label == "MATCH":
-                false_negative_count += 1
+            _record_metric_bucket(overall_metrics, label, matcher_label, decision.result)
+            bucket_key = decision.result.name
+            stratum_key = str(row.get("sample_stratum") or "unstratified")
+            _record_metric_bucket(
+                per_bucket.setdefault(bucket_key, _new_metric_bucket()),
+                label,
+                matcher_label,
+                decision.result,
+            )
+            _record_metric_bucket(
+                per_stratum.setdefault(stratum_key, _new_metric_bucket()),
+                label,
+                matcher_label,
+                decision.result,
+            )
 
     disagreements.sort(key=lambda r: (float(r.get("jaccard") or 0), -float(r.get("days_apart") or 0)), reverse=True)
     top_disagreements = disagreements[:disagreement_limit]
     _write_jsonl(top_disagreements, disagreement_path)
 
     heuristic_total = heuristic_agree + heuristic_disagree
+    validation = _finalize_metric_bucket(overall_metrics)
+    labeled_count = validation["labeled_count"]
+    validation.update({
+        "labeler_filter": labeler,
+        "labeling_session_filter": labeling_session,
+        "per_bucket": {
+            key: _finalize_metric_bucket(bucket)
+            for key, bucket in sorted(per_bucket.items())
+        },
+        "per_stratum": {
+            key: _finalize_metric_bucket(bucket)
+            for key, bucket in sorted(per_stratum.items())
+        },
+        "status": (
+            "validation_available"
+            if labeled_count
+            else (
+                f"0 labels available for labeler={labeler}, labeling_session={labeling_session}, awaiting review."
+                if labeler or labeling_session
+                else "0 labels available, awaiting operator review."
+            )
+        ),
+    })
     summary = {
         "queue_path": str(queue_path),
         "rows": len(rows),
@@ -168,24 +243,7 @@ def validate_queue(
             "agree_rate": heuristic_agree / heuristic_total if heuristic_total else None,
             "disagree_rate": heuristic_disagree / heuristic_total if heuristic_total else None,
         },
-        "operator_validation": {
-            "labeler_filter": labeler,
-            "labeled_count": labeled_count,
-            "accuracy": labeled_safe / labeled_count if labeled_count else None,
-            "exact_accuracy": labeled_exact / labeled_count if labeled_count else None,
-            "false_positive_count": false_positive_count,
-            "false_negative_count": false_negative_count,
-            "confusion": dict(confusion),
-            "status": (
-                "validation_available"
-                if labeled_count
-                else (
-                    f"0 labels available for labeler={labeler}, awaiting review."
-                    if labeler
-                    else "0 labels available, awaiting operator review."
-                )
-            ),
-        },
+        "operator_validation": validation,
         "disagreement_report_path": str(disagreement_path),
         "disagreement_report_rows": len(top_disagreements),
     }
@@ -208,6 +266,8 @@ def print_summary(summary: dict) -> None:
     validation = summary["operator_validation"]
     if validation.get("labeler_filter"):
         print(f"Labeler filter: {validation['labeler_filter']}")
+    if validation.get("labeling_session_filter"):
+        print(f"Labeling session filter: {validation['labeling_session_filter']}")
     if validation["labeled_count"] == 0:
         print(validation["status"])
     else:
@@ -219,6 +279,10 @@ def print_summary(summary: dict) -> None:
             f"false_negatives={validation['false_negative_count']}"
         )
         print(f"Confusion: {validation['confusion']}")
+        if validation.get("per_bucket"):
+            print(f"Per bucket: {validation['per_bucket']}")
+        if validation.get("per_stratum"):
+            print(f"Per stratum: {validation['per_stratum']}")
     print(
         "Priority disagreement pairs written: "
         f"{summary['disagreement_report_rows']} -> {summary['disagreement_report_path']}"
@@ -236,6 +300,11 @@ def main(argv=None) -> int:
         default=None,
         help="Restrict validation metrics to rows labeled by this labeler, e.g. codex or operator.",
     )
+    parser.add_argument(
+        "--labeling-session",
+        default=None,
+        help="Restrict validation metrics to rows from a specific labeling session, e.g. S121.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
     args = parser.parse_args(argv)
 
@@ -244,6 +313,7 @@ def main(argv=None) -> int:
         disagreement_path=Path(args.disagreement_path),
         disagreement_limit=args.disagreement_limit,
         labeler=args.labeler,
+        labeling_session=args.labeling_session,
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))

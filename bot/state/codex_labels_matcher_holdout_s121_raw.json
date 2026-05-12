@@ -1,0 +1,242 @@
+[
+  {
+    "kalshi_ticker": "KXLALIGABTTS-26MAY09RSORBB",
+    "polymarket_ticker": "2083805",
+    "label": "MATCH",
+    "reasoning": "Both questions identify the same Real Sociedad vs Real Betis soccer fixture and the same both-teams-to-score proposition. The bet-type is BTTS on both venues, and the time granularity is the same single match window despite the close timestamps differing by a few hours."
+  },
+  {
+    "kalshi_ticker": "KXLIGUE1BTTS-26MAY10HACOM",
+    "polymarket_ticker": "2092495",
+    "label": "MATCH",
+    "reasoning": "Both questions identify Marseille at Le Havre and ask whether both teams score. The bet-type is identical BTTS, and the time granularity is the same single Ligue 1 fixture rather than a broader date or range."
+  },
+  {
+    "kalshi_ticker": "KXLNBELITEGAME-26MAY101030SNBCHO-CHO",
+    "polymarket_ticker": "2188082",
+    "label": "MATCH",
+    "reasoning": "Both questions refer to the same Nancy vs Cholet basketball game, with Cholet as the yes-side on Kalshi and first-listed side on Polymarket. The bet-type is game winner, and the time granularity is one specific fixture on May 10."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091610HOUCIN-HOU",
+    "polymarket_ticker": "2154788",
+    "label": "MATCH",
+    "reasoning": "Both questions identify the Houston Astros vs Cincinnati Reds MLB game with Houston as the yes-side. The bet-type is full-game winner, and the time granularity is the same May 9 fixture."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091610WSHMIA-WSH",
+    "polymarket_ticker": "2154790",
+    "label": "MATCH",
+    "reasoning": "Both questions identify Washington Nationals vs Miami Marlins with Washington as the yes-side. The bet-type is full-game winner, and the time granularity is the same May 9 game window."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091805COLPHI-COL",
+    "polymarket_ticker": "2154792",
+    "label": "MATCH",
+    "reasoning": "Both questions identify Colorado Rockies vs Philadelphia Phillies for the May 9 MLB game, with Colorado as the yes-side. The bet-type is full-game winner, and the time granularity is that single listed game."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091805COLPHI-COL",
+    "polymarket_ticker": "2154818",
+    "label": "NO_MATCH",
+    "reasoning": "The teams match, but the URLs and close times point to different games in the Rockies-Phillies series: Kalshi is the May 9 game while Polymarket is the May 10 game. The bet-type is full-game winner on both venues, but the time granularity/event identity differs by game date, so matching no/no outcomes are not enough."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091810MINCLE-MIN",
+    "polymarket_ticker": "2154794",
+    "label": "MATCH",
+    "reasoning": "Both questions identify Minnesota Twins vs Cleveland Guardians with Minnesota as the yes-side. The bet-type is full-game winner, and the time granularity is the same May 9 MLB game."
+  },
+  {
+    "kalshi_ticker": "KXPGATOP10-TRC26-KKIT",
+    "polymarket_ticker": "2156215",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Kurt Kitayama finishes in the top 10 at the 2026 Truist Championship. The bet-type is top-10 finisher on both venues, and the time granularity is the same tournament result."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1022-T81399.99",
+    "polymarket_ticker": "2226441",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Bitcoin is above $81,400 on May 10 at 10 PM Eastern. The bet-type is the same above-threshold crypto price proposition, and the time granularity is the same hour-specific snapshot."
+  },
+  {
+    "kalshi_ticker": "KXWTACHALLENGERMATCH-26MAY11GIBSAS-GIB",
+    "polymarket_ticker": "2225440",
+    "label": "MATCH",
+    "reasoning": "Both questions identify Talia Gibson vs Aliaksandra Sasnovich with Gibson as the yes-side. The bet-type is match winner, and the time granularity is the same Paris tennis match."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1116-T83599.99",
+    "polymarket_ticker": "2233287",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Bitcoin is above $83,600 on May 11 at 4 PM Eastern. The bet-type is the same above-threshold crypto price proposition, and the time granularity is the same hour-specific snapshot."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY0915-T79599.99",
+    "polymarket_ticker": "2216317",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Bitcoin is above $79,600 on May 9 at 3 PM Eastern. The bet-type is the same above-threshold crypto price proposition, and the time granularity is the same hour-specific snapshot."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTMAP-26MAY120400VARTS-2-VAR",
+    "polymarket_ticker": "2234685",
+    "label": "MATCH",
+    "reasoning": "Both questions identify VARREL vs Team Secret Map 2 with VARREL as the yes-side. The bet-type is map-2 winner, and the time granularity is the same individual Valorant map."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1206-T82999.99",
+    "polymarket_ticker": "2239488",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Bitcoin is above $83,000 on May 12 at 6 AM Eastern. The bet-type is the same above-threshold crypto price proposition, and the time granularity is the same hour-specific snapshot."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1116-T87999.99",
+    "polymarket_ticker": "2155904",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Bitcoin above $88,000 on May 11, but Kalshi specifies 4 PM Eastern while Polymarket only names the date. The text does not establish the same settlement timestamp, so the pair should remain review-only."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1121-T2499.99",
+    "polymarket_ticker": "2155818",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Ethereum above $2,500 on May 11, but Kalshi specifies 9 PM Eastern while Polymarket gives only the date. That missing timestamp leaves settlement-window equivalence ambiguous."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1117-T1899.99",
+    "polymarket_ticker": "2155799",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions ask about Ethereum above $1,900 on May 11, but Kalshi is a 5 PM Eastern snapshot and Polymarket is date-only. The shared yes outcome corroborates direction, not exact settlement-window identity."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1105-T81999.99",
+    "polymarket_ticker": "2155896",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions involve Bitcoin above $82,000 on May 11, but Kalshi specifies 5 AM Eastern and Polymarket does not specify a time. The date-only wording is not enough to prove the same market."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1021-T2399.99",
+    "polymarket_ticker": "2148696",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions involve Ethereum above $2,400 on May 10, but Kalshi is explicitly 9 PM Eastern while Polymarket is date-only. The settlement window could differ, so the label should remain ambiguous."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1018-T77999.99",
+    "polymarket_ticker": "2148780",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Bitcoin above $78,000 on May 10, but Kalshi anchors the claim to 6 PM Eastern and Polymarket gives only the date. Matching outcomes do not prove identical timestamp semantics."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY0920-T77999.99",
+    "polymarket_ticker": "2141002",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Bitcoin above $78,000 on May 9, but Kalshi uses an 8 PM Eastern snapshot and Polymarket is date-only. The time-granularity gap makes the pair unsafe to auto-match."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1007-T2299.99",
+    "polymarket_ticker": "2148693",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Ethereum above $2,300 on May 10, but Kalshi is fixed at 7 AM Eastern and Polymarket does not show a time. This is a plausible topical match but not a confirmed settlement match."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY092105PITSF-SF",
+    "polymarket_ticker": "2154832",
+    "label": "NO_MATCH",
+    "reasoning": "The teams match, but the close times and Polymarket URL indicate the May 10 Pirates-Giants game while Kalshi is the May 9 game. These are separate fixtures in the same series, so same-team text and both-no outcomes do not make them one market."
+  },
+  {
+    "kalshi_ticker": "KXHIGHMIA-26MAY10-B88.5",
+    "polymarket_ticker": "2186697",
+    "label": "MATCH",
+    "reasoning": "Both questions ask whether Miami's highest temperature on May 10 falls in the 88 to 89 degree range. The wording uses different formatting for the interval, but the city, date, metric, and range are the same."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY0912-T77999.99",
+    "polymarket_ticker": "2141002",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Bitcoin above $78,000 on May 9, but Kalshi specifies noon Eastern and Polymarket gives no time. The pair needs manual review because crypto date-only markets may not share Kalshi's hourly snapshot."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1008-T85999.99",
+    "polymarket_ticker": "2148793",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Bitcoin above $86,000 on May 10, but Kalshi is an 8 AM Eastern snapshot and Polymarket only gives the date. That time-granularity difference prevents a confident match."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1114-T2699.99",
+    "polymarket_ticker": "2155827",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Ethereum above $2,700 on May 11, but Kalshi specifies 2 PM Eastern and Polymarket is date-only. Outcome agreement is not enough to resolve the missing settlement timestamp."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1012-T2199.99",
+    "polymarket_ticker": "2148691",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Ethereum above $2,200 on May 10, but Kalshi names a noon Eastern snapshot and Polymarket only names the date. This should stay review-only unless the venue rules establish the exact same timestamp."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1118-T2099.99",
+    "polymarket_ticker": "2155804",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both questions concern Ethereum above $2,100 on May 11, but Kalshi specifies 6 PM Eastern and Polymarket lacks a time. The shared threshold and date are insufficient for an automatic match."
+  },
+  {
+    "kalshi_ticker": "KXNWSLGAME-26MAY09ANGSAN-ANG",
+    "polymarket_ticker": "2212593",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a full-game winner market for Angel City FC vs San Diego Wave FC, while Polymarket asks for the exact 0-0 score. Those propositions can settle differently even on the same fixture, so this is not the same market."
+  },
+  {
+    "kalshi_ticker": "KXBSLGAME-26MAY100600ESEYMB-ESE",
+    "polymarket_ticker": "2163384",
+    "label": "NO_MATCH",
+    "reasoning": "The pair names the same Esenler vs Merkezefendi basketball game, but the yes-side appears reversed across venues. Kalshi's Esenler-side contract resolved yes while Polymarket's Merkezefendi-first market resolved no, so these are not the same yes-side claim."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTMAP-26MAY100400RRQT1-1-RRQ",
+    "polymarket_ticker": "2216480",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a Map 1 winner contract for Rex Regum Qeon, while Polymarket is a map handicap T1 -1.5 / RRQ +1.5 proposition. Same teams and map do not overcome the different bet type."
+  },
+  {
+    "kalshi_ticker": "KXNWSLGAME-26MAY09ANGSAN-ANG",
+    "polymarket_ticker": "1958796",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a match-winner contract for Angel City FC, while Polymarket is an over/under 1.5 goals market. These are different bet types on the same fixture and can resolve independently."
+  },
+  {
+    "kalshi_ticker": "KXMLBGAME-26MAY091915STLSD-SD",
+    "polymarket_ticker": "2154806",
+    "label": "NO_MATCH",
+    "reasoning": "Both rows name the Cardinals vs Padres game, but Kalshi's San Diego-side contract resolved yes while Polymarket's St. Louis-first market resolved no. The yes-side semantics diverge, so this is not a shared settlement claim."
+  },
+  {
+    "kalshi_ticker": "KXLOWTNYC-26MAY09-B52.5",
+    "polymarket_ticker": "2178996",
+    "label": "NO_MATCH",
+    "reasoning": "Both markets concern the lowest temperature in New York City on May 9, but Kalshi asks for 52 to 53 degrees while Polymarket asks for 43 degrees or below. The temperature bands are mutually different propositions."
+  },
+  {
+    "kalshi_ticker": "KXLOLGAME-26MAY100500DCGDFM-DCG",
+    "polymarket_ticker": "2154471",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a Deep Cross Gaming contract at the broader game/series level, while Polymarket explicitly asks for Game 2 winner with DetonatioN FocusMe first. The event text overlaps, but the yes-side and game granularity are not the same."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTGAME-26MAY091100BBLTH-TH",
+    "polymarket_ticker": "2184839",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a match winner market for Team Heretics against BBL Esports, while Polymarket asks for Map 1 winner. Match winner and map winner are different bet types even when the teams are the same."
+  },
+  {
+    "kalshi_ticker": "KXPGATOP10-ONMBC26-TCRO",
+    "polymarket_ticker": "2156659",
+    "label": "NO_MATCH",
+    "reasoning": "Both questions concern Trace Crowe at the ONEflight Myrtle Beach Classic, but Kalshi asks for a top-10 finish and Polymarket asks for a top-20 finish. Those thresholds define different settlement claims."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTMAP-26MAY100500XLGEDG-3-XLG",
+    "polymarket_ticker": "2214652",
+    "label": "NO_MATCH",
+    "reasoning": "Both rows identify XLG vs EDward Gaming Map 3, but Kalshi is the XLG-side contract and Polymarket lists EDward Gaming as the yes-side. The outcomes are complementary rather than the same yes-side proposition."
+  }
+]
