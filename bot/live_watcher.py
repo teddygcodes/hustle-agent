@@ -38,12 +38,11 @@ from bot.config import (
     get_leader_min_for_sport,
     MOMENTUM_PRICE_WINDOW,
     MOMENTUM_MAX_ENTRIES, MOMENTUM_REENTRY_COOLDOWN, MOMENTUM_REENTRY_LOSS_LIMIT,
-    MOMENTUM_SCALE_SMALL_DIP, MOMENTUM_SCALE_MED_DIP, MOMENTUM_SCALE_LARGE_DIP,
     MOMENTUM_DQS_THRESHOLD, MOMENTUM_DQS_TRAIL_STOP,
     MOMENTUM_DISABLED_SPORTS,
     TENNIS_QUALITY_MIN_TICKS, TENNIS_QUALITY_MIN_RANGE,
     SPORT_PROFILES,
-    PAPER_MODE, PAPER_STARTING_BALANCE,
+    PAPER_MODE, PAPER_STARTING_BALANCE, CONVICTION_SIZE_FACTOR,
 )
 import bot.odds_scraper as _odds
 from bot.clv import (
@@ -765,6 +764,9 @@ class LiveGameWatcher:
         edge: float | None = None,
         extra: dict | None = None,
         close_ts: str | None = None,
+        shadow_would_contracts: int | None = None,
+        shadow_would_entry_price_cents: int | float | None = None,
+        shadow_extra: dict | None = None,
     ) -> None:
         """Emit a decisions.log_decision row only on (decision, reason) state
         change. A flat-market live watcher would otherwise emit ~6 records/sec
@@ -796,6 +798,31 @@ class LiveGameWatcher:
             if decision == "reject" and reason in {"sport_disabled", "reentry_blocked"}:
                 try:
                     from bot.shadow_trades import record_blocked_trade
+                    shadow_record_extra = dict(merged or {})
+                    if isinstance(shadow_extra, dict):
+                        shadow_record_extra.update(shadow_extra)
+                    if reason == "reentry_blocked" and shadow_would_contracts is not None:
+                        try:
+                            if int(shadow_would_contracts) <= 0:
+                                shadow_would_contracts = None
+                                shadow_record_extra["missing_sizing_fields"] = ["would_contracts"]
+                                shadow_record_extra["sizing_unavailable_reason"] = "non_positive_contracts"
+                        except (TypeError, ValueError):
+                            shadow_would_contracts = None
+                            shadow_record_extra["missing_sizing_fields"] = ["would_contracts"]
+                            shadow_record_extra["sizing_unavailable_reason"] = "invalid_contracts"
+                    if (
+                        reason == "reentry_blocked"
+                        and shadow_would_contracts is None
+                        and "sizing_unavailable_reason" not in shadow_record_extra
+                    ):
+                        shadow_record_extra["missing_sizing_fields"] = ["would_contracts"]
+                        shadow_record_extra["sizing_unavailable_reason"] = "sizing_not_provided"
+                    entry_price_cents = (
+                        shadow_would_entry_price_cents
+                        if shadow_would_entry_price_cents is not None
+                        else shadow_record_extra.get("kalshi_price")
+                    )
                     record_blocked_trade(
                         ticker=self.ticker or "",
                         opp_type="live_momentum",
@@ -803,11 +830,11 @@ class LiveGameWatcher:
                         source="live_watcher",
                         source_decision_reason=reason,
                         would_side="yes",
-                        would_entry_price_cents=(merged or {}).get("kalshi_price"),
-                        would_contracts=None,
-                        sport=(merged or {}).get("sport"),
-                        close_ts=(merged or {}).get("close_ts"),
-                        extra=merged,
+                        would_entry_price_cents=entry_price_cents,
+                        would_contracts=shadow_would_contracts,
+                        sport=shadow_record_extra.get("sport"),
+                        close_ts=shadow_record_extra.get("close_ts"),
+                        extra=shadow_record_extra,
                     )
                 except Exception:
                     pass
@@ -1056,6 +1083,17 @@ class LiveGameWatcher:
             return None
         return result.get("market", result)
 
+    def _current_momentum_balance(self) -> float:
+        """Return the balance used by live_momentum sizing."""
+        balance = self.balance
+        if PAPER_MODE:
+            pt_file = pathlib.Path("bot/state/paper_trades.json")
+            if pt_file.exists():
+                trades = json.loads(pt_file.read_text())
+                paper_pnl = sum(t.get("pnl") or 0 for t in trades)
+                balance = PAPER_STARTING_BALANCE + paper_pnl
+        return balance
+
     def _dip_size_multiplier(self, dip_cents: float) -> float:
         """Scale bet size by dip size — DATA: bigger dips = better bounce.
 
@@ -1066,15 +1104,8 @@ class LiveGameWatcher:
 
         Bet MORE on bigger dips, not less.
         """
-        profile = self._get_sport_profile()
-        min_dip = profile.get("min_dip", 4)
-
-        if dip_cents >= min_dip + 6:    # e.g., 12c+ for NBA (min=6)
-            return MOMENTUM_SCALE_LARGE_DIP   # 1.5x — biggest dips = best signal
-        elif dip_cents >= min_dip + 3:  # e.g., 9c+ for NBA
-            return MOMENTUM_SCALE_MED_DIP     # 1.2x
-        else:
-            return MOMENTUM_SCALE_SMALL_DIP   # 1.0x — just met threshold
+        from bot.live_momentum_sizing import live_momentum_dip_size_multiplier
+        return live_momentum_dip_size_multiplier(dip_cents, self._get_sport_profile())
 
     def _get_sport_profile(self) -> dict:
         """Get sport-specific trading parameters. Falls back to defaults."""
@@ -1544,6 +1575,53 @@ class LiveGameWatcher:
             else:
                 _reason = "cannot_enter"
                 _gates = {"can_enter": False}
+            shadow_would_contracts = None
+            shadow_extra = None
+            if _reason == "reentry_blocked":
+                try:
+                    from bot.live_momentum_sizing import size_live_momentum_entry
+
+                    sizing_balance = self._current_momentum_balance()
+                    shadow_sizing = size_live_momentum_entry(
+                        price_cents=yes_ask,
+                        dip_cents=dip_cents,
+                        sport=sport_lc,
+                        balance=sizing_balance,
+                        game_ctx=self._game_ctx,
+                        espn_data=espn_data,
+                        sport_profile=sport_profile,
+                        conviction=False,
+                    )
+                    shadow_would_contracts = shadow_sizing.get("contracts")
+                    shadow_extra = {
+                        "would_sizing_source": "live_momentum_sizing_v1",
+                        "would_sizing_price_cents": yes_ask,
+                        "would_sizing_dip_cents": dip_cents,
+                        "would_sizing_balance": round(sizing_balance, 2),
+                        "would_sizing_fair_prob": (
+                            round(shadow_sizing["fair_prob"], 4)
+                            if shadow_sizing.get("fair_prob") is not None
+                            else None
+                        ),
+                        "would_sizing_fair_prob_source": shadow_sizing.get("fair_prob_source"),
+                        "would_sizing_reason": (
+                            (shadow_sizing.get("sizing") or {}).get("reason")
+                            if shadow_sizing.get("sizing")
+                            else None
+                        ),
+                    }
+                    if shadow_would_contracts is None:
+                        shadow_extra["missing_sizing_fields"] = shadow_sizing.get(
+                            "missing_sizing_fields", []
+                        )
+                        shadow_extra["sizing_unavailable_reason"] = shadow_sizing.get(
+                            "sizing_unavailable_reason", "unsized"
+                        )
+                except Exception as exc:
+                    shadow_extra = {
+                        "missing_sizing_fields": ["sizing_exception"],
+                        "sizing_unavailable_reason": type(exc).__name__,
+                    }
             self._log_decision_dampened(
                 decision="reject", reason=_reason, gates=_gates,
                 edge=wp_edge,
@@ -1557,6 +1635,8 @@ class LiveGameWatcher:
                        "open_bets": len(self.bets_placed),
                        "losses_seen": len(self._entry_losses)},  # Session 90
                 close_ts=_close_ts,
+                shadow_would_contracts=shadow_would_contracts,
+                shadow_extra=shadow_extra,
             )
 
         buy_ticker = None
@@ -2100,79 +2180,53 @@ class LiveGameWatcher:
     ):
         """Place a momentum buy — YES on the leader. Supports both sides via ticker_override."""
         from bot.executor import execute_trade
-        from bot.sizing import kelly_size
+        from bot.live_momentum_sizing import size_live_momentum_entry
 
         side = "yes"
         price_cents = yes_ask
-        # Fair probability: use GameContext win prob if available (much smarter),
-        # fall back to price + dip assumption
-        if self._game_ctx and self._game_ctx._snapshots and self._game_ctx.win_probability > 0:
-            # Use empirical win probability as fair value
-            fair_prob = min(0.95, self._game_ctx.win_probability)
+        use_ticker = ticker_override or self.ticker
+
+        balance = self._current_momentum_balance()
+        sport_profile = self._get_sport_profile()
+        sizing_result = size_live_momentum_entry(
+            price_cents=price_cents,
+            dip_cents=dip_cents,
+            sport=self.sport,
+            balance=balance,
+            game_ctx=self._game_ctx,
+            espn_data=self._last_espn_data,
+            sport_profile=sport_profile,
+            conviction=conviction,
+        )
+        fair_prob = sizing_result.get("fair_prob")
+        if sizing_result.get("fair_prob_source") == "game_context":
             logger.info(
                 "Momentum sizing: using win_prob=%.3f as fair_prob (kalshi=%dc, dip=%dc)",
                 fair_prob, yes_ask, dip_cents,
             )
-        else:
-            # Fallback: fair prob = market price + dip (assume dip is temporary)
-            fair_prob = min(0.95, (yes_ask + dip_cents) / 100.0)
-        use_ticker = ticker_override or self.ticker
-
-        # Compute paper balance if needed
-        balance = self.balance
-        if PAPER_MODE:
-            import json, pathlib
-            pt_file = pathlib.Path("bot/state/paper_trades.json")
-            if pt_file.exists():
-                trades = json.loads(pt_file.read_text())
-                paper_pnl = sum(t.get("pnl") or 0 for t in trades)
-                balance = PAPER_STARTING_BALANCE + paper_pnl
-
-        # Dip-scaled sizing: small dips = high confidence = bigger bet
-        size_mult = self._dip_size_multiplier(dip_cents)
-
-        # Edge = dip in dollar terms. Fair prob = price + dip.
-        # e.g. buying at 60c with 4c dip → fair = 64%, edge = 0.04
-        assumed_edge = dip_cents / 100.0
-        confidence = 0.80
-        sizing = kelly_size(
-            edge=assumed_edge,
-            probability=fair_prob,
-            balance=balance,
-            price_cents=price_cents,
-            confidence=confidence,
-            sport=self.sport,  # SESSION 49: per-sport size_multiplier (NBA/UFC 0.5x)
-        )
-        if sizing["contracts"] <= 0:
+        sizing = sizing_result.get("sizing")
+        if not sizing or sizing_result.get("contracts") is None:
             logger.debug("Momentum sizing returned 0 contracts")
             return
-
-        # Apply dip multiplier to contract count
-        import math
-        scaled_contracts = max(1, math.floor(sizing["contracts"] * size_mult))
+        scaled_contracts = sizing_result["contracts"]
+        size_mult = sizing_result["size_multiplier"]
+        assumed_edge = sizing_result["assumed_edge"]
 
         # CONVICTION: Reduce size — we're less confident without a dip signal
         if conviction:
-            from bot.config import CONVICTION_SIZE_FACTOR
-            scaled_contracts = max(1, int(scaled_contracts * CONVICTION_SIZE_FACTOR))
-            logger.info("Conviction sizing: %dx (%.0f%% of normal)", scaled_contracts, CONVICTION_SIZE_FACTOR * 100)
-
-        # INSTINCT: Reduce size in high-volatility situations (clutch, empty net)
-        from bot.game_context import SportInstincts
-        bet_instincts = SportInstincts.detect(self._game_ctx, self._last_espn_data, self.sport or "")
-        if bet_instincts.should_reduce_size:
-            scaled_contracts = max(1, scaled_contracts // 2)
-            logger.info("Instincts halved position: %s (%s)", use_ticker, bet_instincts.flags)
-
-        # Cap contracts per sport profile (UFC/tennis = smaller positions)
-        sport_profile = self._get_sport_profile()
-        max_contracts = sport_profile.get("max_contracts")
-        if max_contracts and scaled_contracts > max_contracts:
-            logger.info("Momentum: capping contracts %d → %d (sport max)", scaled_contracts, max_contracts)
-            scaled_contracts = max_contracts
-        sizing["contracts"] = scaled_contracts
-        sizing["total_cost"] = round(scaled_contracts * price_cents / 100.0, 2)
-        sizing["max_payout"] = round(scaled_contracts * 1.0, 2)
+            logger.info(
+                "Conviction sizing: %dx (%.0f%% of normal)",
+                sizing_result.get("post_conviction_contracts", scaled_contracts),
+                CONVICTION_SIZE_FACTOR * 100,
+            )
+        if sizing_result.get("instincts"):
+            logger.info("Instincts halved position: %s (%s)", use_ticker, sizing_result["instincts"])
+        if sizing_result.get("capped_by_sport"):
+            logger.info(
+                "Momentum: capping contracts %d → %d (sport max)",
+                sizing_result.get("uncapped_contracts", scaled_contracts),
+                scaled_contracts,
+            )
 
         gc = self._game_ctx
         # Session 50 — forward-only observability for paper_trades.
@@ -2275,7 +2329,7 @@ class LiveGameWatcher:
                 "lead_trend": round(gc.lead_trend, 3) if gc else None,
                 "wp_edge": round(gc.win_probability - price_cents / 100.0, 3) if gc else None,
             } if gc else None,
-            "instincts": bet_instincts.flags if bet_instincts.flags else [],
+            "instincts": sizing_result.get("instincts", []),
             "size_multiplier": size_mult,
         }
         self.bets_placed.append(entry_record)

@@ -491,7 +491,54 @@ def test_log_decision_dampened_reentry_blocked_shadow_and_dedupe(tmp_path, monke
     rec = json.loads(rows[0])
     assert rec["blocked_reason"] == "reentry_blocked"
     assert rec["extra"]["losses_seen"] == 1
+    assert rec["would_contracts"] is None
+    assert rec["sizing_status"] == "unavailable"
+    assert rec["extra"]["missing_sizing_fields"] == ["would_contracts"]
+    assert rec["extra"]["sizing_unavailable_reason"] == "sizing_not_provided"
     assert rec["sport"] == "atp"
+
+
+def test_log_decision_dampened_reentry_blocked_shadow_available_sizing(tmp_path, monkeypatch):
+    import json
+    from bot import decisions
+    import bot.shadow_trades as shadow
+    from bot.live_watcher import LiveGameWatcher
+
+    f = tmp_path / "decisions.jsonl"
+    shadow_f = tmp_path / "shadow_trades.jsonl"
+    monkeypatch.setattr(decisions, "DECISIONS_FILE", f)
+    monkeypatch.setattr("bot.decisions.BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "BOT_STATE_DIR", tmp_path)
+    monkeypatch.setattr(shadow, "SHADOW_TRADES_FILE", shadow_f)
+
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.ticker = "KXIPLGAME-26MAY11DCPBKS-PBKS"
+    w._last_decision = (None, None)
+
+    w._log_decision_dampened(
+        decision="reject",
+        reason="reentry_blocked",
+        gates={"can_enter": False, "sport_enabled": True, "reentry_blocked": False},
+        edge=-0.18,
+        extra={"sport": "ipl", "kalshi_price": 68, "losses_seen": 1},
+        close_ts="2026-05-14T14:00:00Z",
+        shadow_would_contracts=20,
+        shadow_extra={
+            "would_sizing_source": "live_momentum_sizing_v1",
+            "would_sizing_price_cents": 68,
+            "would_sizing_dip_cents": 5,
+            "would_sizing_balance": 10500.0,
+        },
+    )
+
+    rec = json.loads(shadow_f.read_text().splitlines()[0])
+    assert rec["blocked_reason"] == "reentry_blocked"
+    assert rec["would_entry_price"] == 0.68
+    assert rec["would_contracts"] == 20
+    assert rec["would_notional"] == 13.6
+    assert rec["sizing_status"] == "available"
+    assert rec["extra"]["would_sizing_source"] == "live_momentum_sizing_v1"
+    assert "missing_sizing_fields" not in rec["extra"]
 
 
 # ---------------------------------------------------------------------------
