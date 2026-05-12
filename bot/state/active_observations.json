@@ -111,21 +111,21 @@
     "metrics": [
       {
         "name": "SCAN CYCLE interval median over 24h (awake-hours window)",
-        "expectation": "approx 30 min during awake hours under healthy Kalshi; pre-ship median was ~73 min over 48h (Phase 0.1 evidence). If post-ship median stays > 50 min during awake hours with snapshot_outer_timeout_count_24h == 0, a secondary cause exists (likely sync Kalshi calls in _main_loop steps 4-7b) and a Session 99 audit is warranted.",
-        "current_value": "n/a (pre-restart)",
-        "last_updated": "2026-05-11T14:54:00+00:00"
+        "expectation": "SUPERSEDED by S101 Layer 1. See S101 entry for current cadence median tracking.",
+        "current_value": "Tracked under S101 entry, not here",
+        "last_updated": "2026-05-12T02:30:00+00:00"
       },
       {
         "name": "snapshot_outer_timeout_count_24h in bot_state.json",
-        "expectation": "0 under healthy Kalshi; >0 confirms the outer guard fired and abandoned a stuck scan. Counter resets daily alongside scans_today. If consistently >= 3/day for >= 3 days, Kalshi has degraded enough that per-request HTTP timeouts in agent/kalshi_client.py become the next ship.",
-        "current_value": 0,
-        "last_updated": "2026-05-11T14:54:00+00:00"
+        "expectation": "SUPERSEDED by S101: outer asyncio.wait_for is structurally broken on Python 3.14 (silent-failure binding bug \u2014 likely asyncio.get_event_loop() vs get_running_loop()). Counter will remain 0 indefinitely until S101 Layer 2 binding fix ships (queued in Open Loops). The actual safety net for the cadence regression is S101 Layer 1 (per-request 30s daemon-thread guard in agent/kalshi_client.py), tracked under S101 entry.",
+        "current_value": "0 (structurally locked at 0; not a healthy-Kalshi signal)",
+        "last_updated": "2026-05-12T02:30:00+00:00"
       },
       {
         "name": "longest SCAN CYCLE gap during awake hours",
-        "expectation": "< 90 min after Session 98 (600s outer cap + 60s recovery sleep + 30 min IDLE wait = ~41 min max + slack). Pre-ship: 479 min observed May 10 03:08-11:07 UTC. If post-ship gaps still exceed 90 min, the outer timeout isn't firing as expected \u2014 inspect bot.log for the new ERROR line 'snapshot_universe outer-deadline 600s exceeded'.",
-        "current_value": "n/a (pre-restart)",
-        "last_updated": "2026-05-11T14:54:00+00:00"
+        "expectation": "SUPERSEDED by S101 Layer 1. The 90 min ceiling claim assumed the outer 600s wait_for would fire \u2014 it doesn't (S101 finding). S101's per-request 30s daemon-thread guard is the real bound; verified post-S101 at 38 min 16s longest gap. See S101 entry for current cadence metrics.",
+        "current_value": "Tracked under S101 entry, not here",
+        "last_updated": "2026-05-12T02:30:00+00:00"
       }
     ]
   },
@@ -406,6 +406,26 @@
         "expectation": "CLAUDE.md Open Loops 'S107 follow-on' bullet continues to point at docs/superpowers/specs/2026-05-12-live-momentum-rich-match-phase-design.md until the follow-on integration session ships and the entry is removed. If the entry disappears without the follow-on shipping, regenerate it from the design doc.",
         "current_value": "pointer in place at CLAUDE.md line ~1047",
         "last_updated": "2026-05-12T01:30:00+00:00"
+      }
+    ]
+  },
+  {
+    "session": 111,
+    "shipped_at": "2026-05-12T02:14:00+00:00",
+    "description": "consolidator perf fix: hoist archive walk out of compute_active_observations. Pre-fix per-observation re-walk of N observations \u00d7 14 gzipped archives = ~670K JSON parses per snapshot, scaling linearly with active observation count (S110 was tipping point). Post-fix walks archives once over [earliest_shipped, now), pre-parses ts, then filters per-observation. Walk count drops from N to 1; runtime 1.88-1.94s \u2192 0.30-0.33s (6.5x). Restored 1640/0 baseline. Zero behavior change. S78 anti-pattern respected (assertion unchanged, fix is structural).",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "test_consolidator_completes_in_under_2s runtime",
+        "expectation": "<1s sustained across runs (post-fix range was 0.30-0.33s, ample headroom under the 2s budget). If runtime drifts above 1.5s, a new structural regression has been introduced (likely a new per-observation work loop that bypassed the S111 hoist). Re-profile compute_active_observations and check whether new ships have re-introduced the per-obs archive walk pattern.",
+        "current_value": "0.30-0.33s (5 consecutive post-fix runs)",
+        "last_updated": "2026-05-12T02:30:00+00:00"
+      },
+      {
+        "name": "compute_active_observations archive-walk count per snapshot (S111 invariant)",
+        "expectation": "Exactly 1 walk per snapshot, regardless of len(active_observations). Add an assertion or log if the walk count exceeds 1 \u2014 that means a future change re-introduced per-observation iteration. S111's structural fix relies on this invariant.",
+        "current_value": "1 walk per snapshot (post-S111 design)",
+        "last_updated": "2026-05-12T02:30:00+00:00"
       }
     ]
   }
