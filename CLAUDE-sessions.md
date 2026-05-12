@@ -5946,3 +5946,65 @@ Phase 0 produced concrete evidence that the integration is feasible and the sche
 **Watch-list trigger (14d, 2026-05-26):** registered in `bot/state/active_observations.json` Session 113 entry. If any of the 4 metrics drifts non-zero before 2026-05-26: re-evaluate. Most likely cause of a drift would be (a) operator flipping the flag back on intentionally (then update the entry and continue), or (b) a path that bypasses the notifier-side guards — investigate the path and add a guard there too. Re-evaluation also considers whether to remove the live-card code entirely vs. fix the dedup bug at [bot/notifier.py:993](bot/notifier.py:993) vs. leave as-is.
 
 **Architectural lesson.** Notifier-side guards composed cleanly with the existing caller-side `if self.status_msg_id:` short-circuits in `live_watcher.py`. By returning `None` from `send_message_get_id` instead of forcing every call site to wrap in `if LIVE_GAME_CARDS_ENABLED:`, the disable required exactly two guards in one file rather than four guards across two files — and the regression risk is concentrated in one place. When a feature flag gates a small number of methods with already-guarded call sites, return-value cascade is a strictly better diff shape than caller-side flag checks. Don't propagate flag checks unless the call site does work the no-op can't substitute for.
+
+### ☑ Session 114 — MOMENTUM_LEADER_MIN dead-zone filter verification kill (2026-05-11, Outcome C — documentation only)
+
+**Trigger.** CLAUDE.md Open Loops "Operational hygiene" carried a long-standing entry (Session 2, 2026-04-20) about adding an explicit `[75-80¢)` exclusion in live_momentum's leader-price gate — the historical bucket showed -$3.20 / 9 trades. The Session 114 brief required verifying the historical claim against current data before acting, with three permitted outcomes: A (ship the exclusion), B (re-tune bounds), C (kill if the dead zone has disappeared). Last operational-hygiene Open Loops item after S113 closed the Telegram-dedup entry.
+
+**Phase 0 corrections — surfaced during exploration, recorded here so future sessions don't inherit the wrong framing.**
+
+1. **`MOMENTUM_LEADER_MIN = 0.65`, not 0.70.** Session 19c (2026-04-27) lowered the floor 0.70 → 0.65 on a 15-variant tick-replay sweep ([bot/config.py:70](bot/config.py:70)). The Open Loops entry at [CLAUDE.md:1090](CLAUDE.md:1090) and the brief's verification-gate test `is_leader(price=0.69) → False` both referenced the stale 0.70 value. At 0.69 the gate is `0.69 >= 0.65 = True`, not False; the test was unimplementable as written. (For Outcome C this doesn't affect the ship; recorded for the next operator who revisits.)
+2. **`is_leader` is a local variable, not a function.** [bot/live_watcher.py:1392](bot/live_watcher.py:1392) assigns `is_leader = player_prob >= sport_leader_min` (and mirror at line 1402 for the opponent side). The brief framed the fix target as `is_leader()` — but there is no function. For Outcome A the fix surface would be the assignment line, not a function body.
+3. **S97 disabled `atp` AND added `nba_game` to `MOMENTUM_DISABLED_SPORTS`.** Current disable set: `{atp, atp_challenger, nba_game, wta, wta_challenger}`. The brief named this correctly; recorded here so the data cohort filter used in Investigation 1 is reproducible by a future operator.
+
+**Investigation 1 — bucket re-measurement on current data.** Filter on [bot/state/paper_trades.json](bot/state/paper_trades.json): `type == "live_momentum"` AND `status` in `{exited_early, won, lost}` AND `sport NOT IN MOMENTUM_DISABLED_SPORTS`. Time span: 2026-04-15 → 2026-05-12 (24-day window straddling two structural breaks — post-S54 sizing fix on May 5 and S97 ATP/NBA disable on May 11).
+
+5c-bucket breakdown (post-S97 cohort, n=91):
+
+| bucket | N | W | L | WR | avg_pnl | total |
+|---|---|---|---|---|---|---|
+| `[65-70¢)` | 9 | 3 | 6 | 33% | -$3.85 | -$34.62 |
+| `[70-75¢)` | 31 | 15 | 16 | 48% | +$0.80 | +$24.84 |
+| **`[75-80¢)`** | **22** | **13** | **9** | **59%** | **+$0.46** | **+$10.17** |
+| `[80-85¢)` | 21 | 17 | 4 | 81% | +$1.28 | +$26.97 |
+| `[85-90¢)` | 8 | 4 | 4 | 50% | -$1.99 | -$15.92 |
+
+**The historical dead-zone signal has disappeared.** `[75-80¢)` is now positive-EV at 59% WR, +$0.46/trade, +$10.17 total across 22 settled trades.
+
+**Driver analysis on `[75-80¢)` in full data (n=23, total -$5.23 before disable-set filter):** 1 ATP trade contributed -$15.40 (single worst trade in bucket); 2 IPL +$11.19; 2 UFC +$0.20; 18 untagged (pre-May-2 sport-tagging era) -$1.22 (~$-0.07/trade, noise). Removing the one ATP trade flips the bucket to +$10.17 / 22 trades. The historical signal was a per-sport artifact (ATP main tour), structurally resolved by S97's re-add of `"atp"` to `MOMENTUM_DISABLED_SPORTS` on the breakeven-WR analysis (22 real post-re-enable ATP trades, -$45.60 / 40.9% WR vs 68.2% BE). The 1c-resolution `[78-79¢)` micro-bucket shows N=5 / -$19.60 / 0% WR — interesting but right at the brief's "thin evidence" floor (N<5 = don't ship); insufficient grounds for a narrower exclusion.
+
+**Forward impact estimate (if Outcome A had shipped anyway):** 22 trades / 24-day span ≈ 6.4 trades/wk in `[75-80¢)`. Total +$10.17 / 24d × 7 = **+$2.97/wk REMOVED** by exclusion (positive = excluding would COST positive EV). The shipping cost of "doing the historical TODO" today exceeds the upside.
+
+**Caveat — small-sample structural-break window.** The 24-day cohort straddles two structural changes (post-S54 corrected sizing 2026-05-05; S97 ATP/NBA disable 2026-05-11), so n=22 in `[75-80¢)` is not entirely S54-era-clean. The bucket conclusion is sturdy at 5c resolution but should be re-checked if `live_momentum` cohort behavior shifts materially.
+
+**Decision: Outcome C — documentation only.** Per the brief's own decision rule: "Investigation 1 shows the dead zone has DISAPPEARED in current data → Outcome C." No code change. No `bot/config.py` or `bot/live_watcher.py` edit. The historical TODO is closed by data evolution, not by a code ship.
+
+**Outcome C shipped (3 documentation surfaces, 0 production files, 0 test LOC):**
+
+- [CLAUDE.md "Open Loops → Operational hygiene"](CLAUDE.md): removed the active `MOMENTUM_LEADER_MIN dead-zone filter` bullet; replaced with a `(Resolved by S114, 2026-05-11)` in-place note matching the line-1080 IPL/S112 precedent. Bullet now serves as a closure breadcrumb with bucket numbers and Session 114 backlink.
+- [CLAUDE.md "Why live_momentum is positive" Money section narrative (~line 526)](CLAUDE.md): updated the trailing "proper dead-zone filter is TODO" sentence to reflect the S114 verification — historical signal traced to single-trade ATP artifact, now positive-EV at +$10.17 / 22 trades / 59% WR post-S97. Surrounding paragraph (Sessions 2 / 38a / 97 narrative chain) untouched.
+- [README.md session changelog (~line 1099)](README.md): added Session 114 entry following S113 paragraph-pattern; links to this CLAUDE-sessions.md block.
+
+**Tests.** None added or modified — no production code touched. Pre-session pytest baseline (1658/0 from S113) is preserved by structural identity (no `bot/`, `tests/`, or `bot/state/` edits).
+
+**What did NOT change.**
+- No `bot/config.py` edit. `MOMENTUM_LEADER_MIN = 0.65` unchanged (since S19c, 2026-04-27).
+- No `bot/live_watcher.py` edit. `is_leader = player_prob >= sport_leader_min` at [bot/live_watcher.py:1392](bot/live_watcher.py:1392) and opponent-side mirror at [bot/live_watcher.py:1402](bot/live_watcher.py:1402) unchanged.
+- No new constants. `MOMENTUM_DEAD_ZONE_LOW` / `MOMENTUM_DEAD_ZONE_HIGH` not introduced — the data did not warrant them.
+- No `bot/state/active_observations.json` entry. Per the brief's Outcome C scope (`If Outcome C: documentation only`), watch-list registration is reserved for Outcomes A / B where a behavior change needs forward measurement. Outcome C closes a loop, it doesn't open one. If `[75-80¢)` bucket EV drifts negative again on a larger cohort, the right response is a fresh investigation session, not a persistent metric.
+- No bot restart. Production bot continues at S113's PID; no live-state writes (Battle Scar #1 / #14 / #3 discipline maintained, but trivially — no state to corrupt).
+- No strategy / sizing / disable / scanner / Telegram changes.
+
+**Verification.**
+- ✅ `grep -n "dead-zone filter" CLAUDE.md` → returns only the Resolved-by-S114 bullet (no stale TODO).
+- ✅ `grep -n "is TODO" CLAUDE.md` (in the Money section context) → no `[75-80¢)` exclusion TODO remains.
+- ✅ `grep -n "Session 114" CLAUDE-sessions.md` → returns the new ☑ block (sanity-check the block landed).
+- ✅ `grep -n "Session 114" README.md` → returns the new changelog entry.
+- ✅ Anchor integrity — CLAUDE.md and README.md backlinks to `CLAUDE-sessions.md#session-114--momentum_leader_min-...` resolve to the new heading. Verify by `grep -n "^### ☑ Session 114" CLAUDE-sessions.md` returns exactly one match.
+- ✅ `python3 -m pytest tests/ --tb=short -q | tail -3` → **1658 passed, 0 failed** (preserved by structural identity; cheap sanity check that no test asserts on doc file structure).
+- ✅ `git diff --stat` confirms changes confined to `CLAUDE.md`, `CLAUDE-sessions.md`, `README.md`. Zero `bot/` files. Zero `tests/` files. Zero `bot/state/` writes.
+- ✅ `python3 tools/glint_status.py` shows bot at S113 PID with normal heartbeat, no degraded state — session shipped without disturbing live state.
+
+**Watch-list trigger.** None registered. Outcome C closes the historical loop; the breadcrumb in this ☑ block is the durable record. If a future operator investigating live_momentum bucket behavior re-derives the bucket and finds it negative again, they can re-run the same methodology (filter `paper_trades.json` to `live_momentum` + settled + non-disabled sports + bucket by leader-price) — the method is documented above and self-contained.
+
+**Architectural lesson.** Open Loops entries can be closed by data evolution without requiring a code change. The Session 2 dead-zone TODO survived 22 sessions of operational-hygiene scans because the bot's per-sport disable framework (S97) eventually resolved the underlying signal without any session author noticing the cross-cancellation. **Periodically re-verifying long-standing TODOs against current data is a cheap, high-leverage discipline — they may already be moot.** Operating Posture rule: *before shipping a historical TODO, re-measure the signal against current data; if the signal has structurally moved (per-sport disable, sizing fix, dataset shift), the TODO may close itself.* Three additional notes: (a) the brief's verification-gate test was unimplementable due to a stale MIN value — corroborates the same rule applied to test stubs; (b) `is_leader` being a local variable not a function meant the brief's "regression tests for `is_leader(price=...)`" framing assumed a function-extraction refactor that nobody had asked for — second corroboration; (c) the structural-break window caveat (S54 + S97 inside the 24-day cohort) is honest about what the n=22 number can and can't carry.
