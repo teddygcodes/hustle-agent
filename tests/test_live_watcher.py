@@ -94,6 +94,33 @@ def test_live_momentum_context_helper_missing_fields_listed():
     assert "score_state" in ctx["missing_context_fields"]
 
 
+def test_live_momentum_context_helper_partial_alias_inputs():
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    ctx = _build_live_momentum_decision_context(
+        sport="ufc",
+        ticker="KXUFCFIGHT-26MAY10TEST-AAA",
+        kalshi_market={
+            "ticker": "KXUFCFIGHT-26MAY10TEST-AAA",
+            "yes_bid": 58,
+        },
+        price_cents=60,
+        volume_24h=700,
+        source="scan",
+        skip_reason="not_today",
+    )
+
+    assert ctx["context_available"] is True
+    assert ctx["leader_price"] == 60
+    assert ctx["yes_ask"] == 60
+    assert ctx["yes_bid"] == 58
+    assert ctx["spread_cents"] == 2
+    assert ctx["volume_24h"] == 700
+    assert ctx["source"] == "scan"
+    assert "leader_price" not in ctx["missing_context_fields"]
+    assert "momentum" in ctx["missing_context_fields"]
+
+
 def test_live_momentum_context_helper_does_not_leak_blobs():
     from bot.game_context import GameContext
     from bot.live_watcher import _build_live_momentum_decision_context
@@ -1749,6 +1776,18 @@ def _scan_records(captured: list[dict]) -> list[dict]:
     return [r for r in captured if r.get("event") == "scan_found"]
 
 
+def _assert_scan_context(row: dict, *, reason: str, leader_price: int):
+    extra = row.get("extra")
+    assert isinstance(extra, dict), row
+    assert extra["context_available"] is True
+    assert extra["leader_price"] == leader_price
+    assert extra["source"] == "scan"
+    assert extra["entry_gate"] == reason
+    assert extra["skip_reason"] == reason
+    assert "missing_context_fields" in extra
+    assert "market" not in extra
+
+
 def _run_scan(markets):
     """Run scan_live_matches once with get_markets returning the given markets."""
     with patch("agent.kalshi_client.get_markets",
@@ -1782,6 +1821,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with([m])
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "bad_event_shape" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "bad_event_shape")
+        _assert_scan_context(row, reason="bad_event_shape", leader_price=70)
 
     def test_low_volume_records_skip_reason(self, skip_reason_env):
         # Both sides volume below MIN_VOLUME_LIVE (1000)
@@ -1805,6 +1846,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "not_today" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "not_today")
+        _assert_scan_context(row, reason="not_today", leader_price=70)
 
     def test_no_leader_records_skip_reason(self, skip_reason_env):
         # Both sides below MOMENTUM_LEADER_MIN * 100 (post-Session-19c: 0.65)
@@ -1830,6 +1873,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "settled" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "settled")
+        _assert_scan_context(row, reason="settled", leader_price=97)
 
     def test_unknown_name_records_skip_reason(self, skip_reason_env):
         # Empty title AND ticker without "-" → no team abbrev → unknown_name
@@ -1845,6 +1890,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "unknown_name" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "unknown_name")
+        _assert_scan_context(row, reason="unknown_name", leader_price=70)
 
     def test_already_watching_records_skip_reason(self, skip_reason_env):
         # active_watchers contains a watcher whose ticker matches the leader
@@ -1863,6 +1910,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets, active_watchers=active_watchers)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "already_watching" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "already_watching")
+        _assert_scan_context(row, reason="already_watching", leader_price=72)
 
     def test_recently_watched_records_skip_reason(self, skip_reason_env):
         from bot import live_watcher
@@ -1875,6 +1924,8 @@ class TestScanLiveMatchesSkipReason:
         _run_scan_with(markets)
         scans = _scan_records(skip_reason_env["captured"])
         assert any(s["skip_reason"] == "recently_watched" for s in scans), scans
+        row = next(s for s in scans if s["skip_reason"] == "recently_watched")
+        _assert_scan_context(row, reason="recently_watched", leader_price=72)
 
     def test_no_vol_growth_first_seen_records_skip_reason(self, skip_reason_env):
         # _prev_scan_volumes empty → first sighting → no_vol_growth_first_seen

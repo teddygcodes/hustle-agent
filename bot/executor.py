@@ -112,6 +112,19 @@ def _edge_gate_fingerprint(reason: str) -> dict[str, bool]:
     return out
 
 
+def _with_live_momentum_decision_context(
+    opp_type: str | None,
+    decision_context: dict | None,
+    extra: dict | None,
+) -> dict | None:
+    if opp_type != "live_momentum" or not isinstance(decision_context, dict):
+        return extra
+    merged = dict(decision_context)
+    if extra:
+        merged.update(extra)
+    return merged
+
+
 def _log_position_reject(ticker: str, opp_type: str | None, reason: str,
                           extra: dict | None = None,
                           close_ts: str | None = None) -> None:
@@ -240,19 +253,11 @@ def _check_position_limits(
             reject log's `extra` dict so bot.regime.tag can populate
             event_horizon_hr (Session 15.5).
     """
-    def _with_decision_context(extra: dict | None) -> dict | None:
-        if opp_type != "live_momentum" or not isinstance(decision_context, dict):
-            return extra
-        merged = dict(decision_context)
-        if extra:
-            merged.update(extra)
-        return merged
-
     # Single position limit
     if cost_dollars > balance * MAX_POSITION_PERCENT:
         _log_position_reject(
             ticker, opp_type, "position_cap",
-            extra=_with_decision_context({
+            extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                 "cost_dollars": round(cost_dollars, 2),
                 "max_allowed": round(balance * MAX_POSITION_PERCENT, 2),
                 "balance": round(balance, 2),
@@ -396,7 +401,7 @@ def _check_position_limits(
             else:
                 _log_position_reject(
                     ticker, opp_type, "duplicate",
-                    extra=_with_decision_context({
+                    extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                         "existing_count": len(existing),
                         "existing_status": existing[0].get("status") if existing else None,
                         "existing_filled": existing[0].get("filled", 0) if existing else 0,
@@ -423,7 +428,7 @@ def _check_position_limits(
             held_team = same_game[0]["ticker"].rsplit("-", 1)[1]
             _log_position_reject(
                 ticker, opp_type, "same_game",
-                extra=_with_decision_context({
+                extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                     "game_key": game_key,
                     "held_team": held_team,
                     "held_ticker": same_game[0].get("ticker"),
@@ -454,7 +459,7 @@ def _check_position_limits(
                 remaining = int((_COOLDOWN - (_now - exited_at)).total_seconds() / 60)
                 _log_position_reject(
                     ticker, opp_type, "cooldown",
-                    extra=_with_decision_context({
+                    extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                         "last_trade_age_min": int((_now - exited_at).total_seconds() / 60),
                         "cooldown_min": int(_COOLDOWN.total_seconds() / 60),
                     }),
@@ -484,7 +489,7 @@ def _check_position_limits(
     if daily_ticker_loss >= _DAILY_TICKER_LOSS_LIMIT:
         _log_position_reject(
             ticker, opp_type, "daily_loss",
-            extra=_with_decision_context({
+            extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                 "daily_ticker_loss": round(daily_ticker_loss, 2),
                 "limit": _DAILY_TICKER_LOSS_LIMIT,
             }),
@@ -538,7 +543,7 @@ def _check_position_limits(
         if (bucket_exposure + cost_dollars) > bucket_cap:
             _log_position_reject(
                 ticker, opp_type, "strategy_budget",
-                extra=_with_decision_context({
+                extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                     "bucket": bucket,
                     "current_exposure": round(bucket_exposure, 2),
                     "incoming_cost": round(cost_dollars, 2),
@@ -560,7 +565,7 @@ def _check_position_limits(
     if (total_exposure + cost_dollars) > equity * MAX_TOTAL_EXPOSURE:
         _log_position_reject(
             ticker, opp_type, "total_exposure",
-            extra=_with_decision_context({
+            extra=_with_live_momentum_decision_context(opp_type, decision_context, {
                 "total_exposure": round(total_exposure, 2),
                 "incoming_cost": round(cost_dollars, 2),
                 "cap": round(equity * MAX_TOTAL_EXPOSURE, 2),
@@ -987,11 +992,11 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                        "strategy_budget": True, "total_exposure": True,
                        "edge_recheck": True, "self_check": False},
                 decision="reject", reason="self_check_failed",
-                extra={
+                extra=_with_live_momentum_decision_context(opp_type, opportunity.get("decision_context"), {
                     "edge": opportunity.get("edge"),
                     "warnings": (edge_result.get("warnings") or [])[:3],
                     "close_ts": _close_ts,
-                },
+                }),
             )
         except Exception:
             pass
@@ -1010,10 +1015,14 @@ def execute_trade(opportunity: dict, sizing: dict) -> dict:
                    "strategy_budget": True, "total_exposure": True,
                    "edge_recheck": True, "self_check": True},
             decision="accept", reason="all_gates_passed",
-            extra={"contracts": contracts, "price_cents": price_cents,
-                   "cost_dollars": round(total_cost, 2),
-                   "paper": PAPER_MODE, "side": side,
-                   "close_ts": _close_ts},
+            extra=_with_live_momentum_decision_context(
+                opp_type,
+                opportunity.get("decision_context"),
+                {"contracts": contracts, "price_cents": price_cents,
+                 "cost_dollars": round(total_cost, 2),
+                 "paper": PAPER_MODE, "side": side,
+                 "close_ts": _close_ts},
+            ),
         )
     except Exception:
         pass

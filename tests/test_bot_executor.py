@@ -1320,6 +1320,122 @@ class TestCloseTsThreading:
         assert accept["extra"]["close_ts"] == "2026-04-26T00:00:00Z"
 
 
+class TestSession107LiveMomentumDecisionContext:
+    """Executor-side live_momentum logs merge watcher-built decision_context."""
+
+    def _decision_context(self):
+        return {
+            "context_available": True,
+            "leader_price": 69,
+            "dip_cents": 4,
+            "source": "watcher",
+            "entry_gate": "dip_buy",
+            "missing_context_fields": ["match_phase"],
+        }
+
+    def test_live_momentum_position_reject_merges_decision_context(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "s107_pos_limit.jsonl"
+        with patch.object(decisions, "DECISIONS_FILE", sandbox):
+            exc._check_position_limits(
+                balance=100.0,
+                cost_dollars=50.0,
+                ticker="KXIPLGAME-26MAY11DCPBKS-PBKS",
+                opp_type="live_momentum",
+                close_ts="2026-05-14T14:00:00Z",
+                decision_context=self._decision_context(),
+            )
+        rec = json.loads(sandbox.read_text().splitlines()[0])
+        assert rec["reason"] == "position_cap"
+        assert rec["extra"]["leader_price"] == 69
+        assert rec["extra"]["dip_cents"] == 4
+        assert rec["extra"]["source"] == "watcher"
+        assert rec["extra"]["cost_dollars"] == 50.0
+
+    def test_live_momentum_self_check_failed_merges_decision_context(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "s107_self_check.jsonl"
+        opp = _make_opp(opp_type="live_momentum", self_check=False)
+        opp["decision_context"] = self._decision_context()
+        opp["close_ts"] = "2026-05-14T14:00:00Z"
+        sizing = _make_sizing(contracts=2, price_cents=45)
+        with patch.object(decisions, "DECISIONS_FILE", sandbox), \
+             patch("bot.executor.verify_contract_direction",
+                   return_value={
+                       "direction_correct": True, "confidence": "HIGH",
+                       "explanation": "test", "warnings": [],
+                       "yes_means": "yes", "no_means": "no",
+                       "thesis_supports": "yes", "intended_side": "yes",
+                   }), \
+             patch("bot.executor.get_market",
+                   return_value={"yes_ask": 45, "yes_bid": 44}):
+            exc.execute_trade(opp, sizing)
+        reject = next(
+            json.loads(line) for line in sandbox.read_text().splitlines()
+            if json.loads(line).get("reason") == "self_check_failed"
+        )
+        assert reject["extra"]["leader_price"] == 69
+        assert reject["extra"]["dip_cents"] == 4
+        assert reject["extra"]["close_ts"] == "2026-05-14T14:00:00Z"
+
+    def test_live_momentum_all_gates_passed_merges_decision_context(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "s107_accept.jsonl"
+        opp = _make_opp(opp_type="live_momentum", self_check=True)
+        opp["decision_context"] = self._decision_context()
+        opp["close_ts"] = "2026-05-14T14:00:00Z"
+        sizing = _make_sizing(contracts=2, price_cents=45)
+        with patch.object(decisions, "DECISIONS_FILE", sandbox), \
+             patch("bot.executor.verify_contract_direction",
+                   return_value={
+                       "direction_correct": True, "confidence": "HIGH",
+                       "explanation": "test", "warnings": [],
+                       "yes_means": "yes", "no_means": "no",
+                       "thesis_supports": "yes", "intended_side": "yes",
+                   }), \
+             patch("bot.executor.get_market",
+                   return_value={"yes_ask": 45, "yes_bid": 44}):
+            exc.execute_trade(opp, sizing)
+        accept = next(
+            json.loads(line) for line in sandbox.read_text().splitlines()
+            if json.loads(line).get("reason") == "all_gates_passed"
+        )
+        assert accept["extra"]["leader_price"] == 69
+        assert accept["extra"]["dip_cents"] == 4
+        assert accept["extra"]["source"] == "watcher"
+        assert accept["extra"]["contracts"] == 2
+        assert accept["extra"]["price_cents"] == 45
+
+    def test_non_live_momentum_accept_does_not_merge_decision_context(self, tmp_state):
+        from bot import decisions, executor as exc
+        sandbox = tmp_state["tmp"] / "s107_spillover.jsonl"
+        opp = _make_opp(opp_type="vig_stack_series", self_check=True)
+        opp["ticker"] = "KXTEST-26APR-70"
+        opp["decision_context"] = self._decision_context()
+        opp["market"] = {"yes_ask": 45}
+        sizing = _make_sizing(contracts=2, price_cents=45)
+        with patch.object(decisions, "DECISIONS_FILE", sandbox), \
+             patch("bot.executor.verify_contract_direction",
+                   return_value={
+                       "direction_correct": True, "confidence": "HIGH",
+                       "explanation": "test", "warnings": [],
+                       "yes_means": "yes", "no_means": "no",
+                       "thesis_supports": "yes", "intended_side": "yes",
+                   }), \
+             patch("bot.executor._verify_edge_still_exists",
+                   return_value=(True, "ok")), \
+             patch("bot.executor.get_market",
+                   return_value={"yes_ask": 45, "yes_bid": 44}):
+            exc.execute_trade(opp, sizing)
+        accept = next(
+            json.loads(line) for line in sandbox.read_text().splitlines()
+            if json.loads(line).get("reason") == "all_gates_passed"
+        )
+        assert "leader_price" not in accept["extra"]
+        assert "dip_cents" not in accept["extra"]
+        assert accept["extra"]["contracts"] == 2
+
+
 # ---------------------------------------------------------------------------
 # Session 36 — _paper_record_exit reason persistence
 # ---------------------------------------------------------------------------

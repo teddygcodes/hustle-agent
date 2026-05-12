@@ -132,8 +132,13 @@ def _build_live_momentum_decision_context(
     ticker: str | None = None,
     leader_market: dict | None = None,
     opponent_market: dict | None = None,
+    kalshi_market: dict | None = None,
     leader_side: str | None = None,
     leader_price: int | float | None = None,
+    price_cents: int | float | None = None,
+    yes_ask: int | float | None = None,
+    yes_bid: int | float | None = None,
+    volume_24h: int | float | None = None,
     opponent_price: int | float | None = None,
     recent_high: int | float | None = None,
     dip_cents: int | float | None = None,
@@ -153,20 +158,30 @@ def _build_live_momentum_decision_context(
     """
     leader_market = leader_market if isinstance(leader_market, dict) else None
     opponent_market = opponent_market if isinstance(opponent_market, dict) else None
+    kalshi_market = kalshi_market if isinstance(kalshi_market, dict) else None
+    if leader_market is None and kalshi_market is not None:
+        leader_market = kalshi_market
     espn_data = espn_data if isinstance(espn_data, dict) else None
 
-    yes_ask = leader_price if leader_price is not None else (
-        leader_market.get("yes_ask") if leader_market else None
+    leader_ask = next(
+        (v for v in (leader_price, price_cents, yes_ask) if v is not None),
+        leader_market.get("yes_ask") if leader_market else None,
     )
-    yes_bid = leader_market.get("yes_bid") if leader_market else None
+    leader_bid = yes_bid if yes_bid is not None else (
+        leader_market.get("yes_bid") if leader_market else None
+    )
     opp_price = opponent_price if opponent_price is not None else (
         opponent_market.get("yes_ask") if opponent_market else None
     )
     spread = None
-    ask_num = _compact_number(yes_ask)
-    bid_num = _compact_number(yes_bid)
+    ask_num = _compact_number(leader_ask)
+    bid_num = _compact_number(leader_bid)
     if ask_num is not None and bid_num is not None:
         spread = max(0, ask_num - bid_num)
+    market_volume_24h = _market_volume_24h(leader_market, opponent_market)
+    if market_volume_24h is None:
+        volume_num = _compact_number(volume_24h, ndigits=0)
+        market_volume_24h = int(volume_num) if volume_num is not None else None
 
     completion = None
     momentum = None
@@ -210,12 +225,12 @@ def _build_live_momentum_decision_context(
         "ticker": ticker or (leader_market.get("ticker") if leader_market else None),
         "leader_ticker": leader_market.get("ticker") if leader_market else ticker,
         "leader_side": leader_side,
-        "leader_price": _compact_number(yes_ask, ndigits=1),
+        "leader_price": _compact_number(leader_ask, ndigits=1),
         "opponent_price": _compact_number(opp_price, ndigits=1),
-        "yes_bid": _compact_number(yes_bid, ndigits=1),
-        "yes_ask": _compact_number(yes_ask, ndigits=1),
+        "yes_bid": _compact_number(leader_bid, ndigits=1),
+        "yes_ask": _compact_number(leader_ask, ndigits=1),
         "spread_cents": _compact_number(spread, ndigits=1),
-        "volume_24h": _market_volume_24h(leader_market, opponent_market),
+        "volume_24h": market_volume_24h,
         "recent_high": _compact_number(recent_high, ndigits=1),
         "dip_cents": _compact_number(dip_cents, ndigits=1),
         "dqs": _compact_number(dqs),
@@ -242,6 +257,48 @@ def _build_live_momentum_decision_context(
     )
     compact["missing_context_fields"] = missing
     return compact
+
+
+def _build_live_momentum_scan_context(
+    *,
+    sport: str | None,
+    event_ticker: str | None,
+    sides: list[dict] | tuple[dict, ...] | None = None,
+    leader_market: dict | None = None,
+    opponent_market: dict | None = None,
+    skip_reason: str | None = None,
+    entry_gate: str | None = None,
+) -> dict:
+    """Build scan-time context from whatever market sides are already in scope."""
+    markets = [
+        m for m in (sides or [])
+        if isinstance(m, dict)
+    ]
+    if leader_market is None and markets:
+        markets.sort(key=lambda m: _compact_number(m.get("yes_ask")) or -1, reverse=True)
+        leader_market = markets[0]
+        opponent_market = markets[1] if len(markets) > 1 else None
+    elif opponent_market is None and markets:
+        for market in markets:
+            if market is not leader_market:
+                opponent_market = market
+                break
+    leader_market = leader_market if isinstance(leader_market, dict) else None
+    opponent_market = opponent_market if isinstance(opponent_market, dict) else None
+    leader_price = leader_market.get("yes_ask") if leader_market else None
+    opponent_price = opponent_market.get("yes_ask") if opponent_market else None
+    return _build_live_momentum_decision_context(
+        sport=sport,
+        ticker=(leader_market or {}).get("ticker") or event_ticker,
+        leader_market=leader_market,
+        opponent_market=opponent_market,
+        leader_side="scan",
+        leader_price=leader_price,
+        opponent_price=opponent_price,
+        skip_reason=skip_reason,
+        entry_gate=entry_gate or skip_reason,
+        source="scan",
+    )
 
 
 def _annotate_live_momentum_context(
@@ -3317,6 +3374,12 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     sport=sport,
                     skip_reason="bad_event_shape",
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        sides=sides,
+                        skip_reason="bad_event_shape",
+                    ) if sides else None,
                 )
                 continue
 
@@ -3377,6 +3440,12 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=max(price_a, price_b),
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        sides=sides,
+                        skip_reason="not_today",
+                    ),
                 )
                 continue
 
@@ -3441,6 +3510,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=leader_price,
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        leader_market=leader,
+                        opponent_market=side_b if leader is side_a else side_a,
+                        skip_reason="settled",
+                    ),
                 )
                 continue
 
@@ -3462,6 +3538,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=leader_price,
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        leader_market=leader,
+                        opponent_market=side_b if leader is side_a else side_a,
+                        skip_reason="unknown_name",
+                    ),
                 )
                 continue
 
@@ -3485,6 +3568,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=leader_price,
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        leader_market=leader,
+                        opponent_market=side_b if leader is side_a else side_a,
+                        skip_reason="already_watching",
+                    ),
                 )
                 continue
             # Also skip if this event_ticker was already watched (prevents
@@ -3500,6 +3590,13 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
                     price=leader_price,
                     volume=total_vol,
                     event_ticker=event_tk,
+                    extra=_build_live_momentum_scan_context(
+                        sport=sport,
+                        event_ticker=event_tk,
+                        leader_market=leader,
+                        opponent_market=side_b if leader is side_a else side_a,
+                        skip_reason="recently_watched",
+                    ),
                 )
                 continue
 
