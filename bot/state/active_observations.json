@@ -684,5 +684,31 @@
         "last_updated": "2026-05-12T19:45:00Z"
       }
     ]
+  },
+  {
+    "session": 122,
+    "shipped_at": "2026-05-12T19:20:09Z",
+    "description": "Matcher v3 shipped for S105 cross-platform Kalshi-Polymarket settlement matching. bot/cross_platform_matcher.py now extracts deterministic sports game-instance signatures after bet-type/time-granularity gates and before Jaccard/source/family promotion. Outcome A: the S121 Rockies-Phillies back-to-back false positive is eliminated on the 120-label corpus. No bot restart; matcher is not live-wired.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "matcher_v3_codex_validation",
+        "expectation": "S122 regression gate remains at 0 false positives and 0 false negatives on the 120 Codex-labeled corpus. Re-run: python3 tools/validate_cross_platform_matcher.py --labeler codex --json --disagreement-path /tmp/s122_matcher_disagreements.jsonl",
+        "current_value": "accuracy=97.5%; exact_accuracy=93.3%; false_positives=0; false_negatives=0; confusion={MATCH->match_high_confidence: 27, MATCH->match_needs_review: 2, NEEDS_REVIEW->match_needs_review: 14, NEEDS_REVIEW->no_match: 1, NO_MATCH->match_needs_review: 5, NO_MATCH->no_match: 71}",
+        "last_updated": "2026-05-12T19:20:09Z"
+      },
+      {
+        "name": "matcher_v3_full_corpus_distribution",
+        "expectation": "HIGH_CONFIDENCE should stay close to the v2 opportunity set and above 1,000 while eliminating sports back-to-back structural date mismatches from the high-confidence bucket.",
+        "current_value": "MATCH_HIGH_CONFIDENCE=1512; MATCH_NEEDS_REVIEW=1511; NO_MATCH=1977; game_instance_mismatch=125; game_instance_ambiguous=46; high-confidence sports structural-date mismatches within one day=0",
+        "last_updated": "2026-05-12T19:20:09Z"
+      },
+      {
+        "name": "s123_holdout_2_needed",
+        "expectation": "Fresh holdout should target same-participant/different-game-date sports patterns before treating MATCH_HIGH_CONFIDENCE as live-arb-validated.",
+        "current_value": "pending; v3 fixes known 120-label FP but remains offline-only and not live-arb-validated",
+        "last_updated": "2026-05-12T19:20:09Z"
+      }
+    ]
   }
 ]
