@@ -502,14 +502,14 @@
       {
         "name": "operator_pairs_labeled",
         "expectation": "\u226540 within 30 days (\u226520 MATCH + \u226520 NO_MATCH per S105 spec). Operator opens bot/state/cross_platform_labeling_queue.jsonl and sets operator_label to 'MATCH' / 'NEEDS_REVIEW' / 'NO_MATCH' on each row. Suggested-label hint is non-authoritative. Expected ~30-90 sec per pair. Target throughput \u226540 labels per 60-90 min session. Per-rung Bitcoin / Ethereum / sports / esports MATCH suggestions are well-calibrated by spot-check but are NOT S105's politics/econ target use case \u2014 operator should label honestly; the downstream matcher's scope filter will exclude sports/esports.",
-        "current_value": "0 \u2014 corpus written at ship time; labeling deferred to operator follow-on session",
-        "last_updated": "2026-05-12T14:49:18.147238+00:00"
+        "current_value": "0 operator labels; 40 Codex-labeled disagreement pairs from S118 pending Claude/operator spot-check",
+        "last_updated": "2026-05-12T15:33:33Z"
       },
       {
         "name": "matcher_implementation_unblocked",
         "expectation": "When \u226520 labeled MATCH + \u226520 labeled NO_MATCH accumulate in cross_platform_labeling_queue.jsonl, the S105 matcher implementation session can proceed. The matcher must achieve zero false positives on labeled-MATCH pairs and \u226530% high-confidence recovery (per S105 spec).",
-        "current_value": "blocked_on_labeling",
-        "last_updated": "2026-05-12T14:49:18.147238+00:00"
+        "current_value": "partially_unblocked_by_codex_conflict_slice; balanced MATCH recall labels still pending",
+        "last_updated": "2026-05-12T15:33:33Z"
       },
       {
         "name": "30d re-evaluation trigger",
@@ -527,21 +527,53 @@
     "metrics": [
       {
         "name": "operator_pairs_labeled_for_matcher_validation",
-        "expectation": "\u226540 total labels with \u226520 MATCH + \u226520 NO_MATCH before trusting matcher for live arb. Operator owns operator_label edits; agent must not auto-label. Re-run `python3 tools/validate_cross_platform_matcher.py` after labels are added.",
-        "current_value": "0 labels available; validation pending operator review",
-        "last_updated": "2026-05-12T15:30:00+00:00"
+        "expectation": "\u226540 reviewed labels with \u226520 MATCH + \u226520 NO_MATCH before trusting matcher for live arb. Codex labels must remain distinguishable via labeler=codex until Claude/operator spot-check. Re-run `python3 tools/validate_cross_platform_matcher.py --labeler codex` for the S118 subset or without --labeler for all labels.",
+        "current_value": "40 Codex labels available from S118, all NO_MATCH conflict-slice rows; 0 operator labels; Claude/operator spot-check pending",
+        "last_updated": "2026-05-12T15:33:33Z"
       },
       {
         "name": "matcher_false_positive_count_on_labeled_subset",
         "expectation": "0 false positives where matcher emits MATCH_HIGH_CONFIDENCE and operator_label is NO_MATCH. Any non-zero value defaults to Outcome B threshold/rule tuning before any live arb trust.",
-        "current_value": "not measurable yet (0 labeled rows)",
-        "last_updated": "2026-05-12T15:30:00+00:00"
+        "current_value": "0 on S118 Codex-labeled subset (40 NO_MATCH rows; harness run with --labeler codex)",
+        "last_updated": "2026-05-12T15:33:33Z"
       },
       {
         "name": "matcher_heuristic_disagreement_pairs",
         "expectation": "Use bot/state/matcher_heuristic_disagreement_pairs.jsonl as priority labeling queue. These rows are more informative than random top-Jaccard rows because matcher and S116 heuristic disagree.",
-        "current_value": "40 priority rows written; all top-40 are resolved_outcome_conflict disagreements (heuristic NEEDS_REVIEW, matcher NO_MATCH)",
-        "last_updated": "2026-05-12T15:30:00+00:00"
+        "current_value": "40 priority rows labeled by Codex in S118; all DIVERGED outcome cross-checks and operator_label=NO_MATCH with labeler=codex",
+        "last_updated": "2026-05-12T15:33:33Z"
+      }
+    ]
+  },
+  {
+    "session": 118,
+    "shipped_at": "2026-05-12T15:33:33Z",
+    "description": "Codex labeled the 40 S117 priority matcher-vs-heuristic disagreement pairs with labeler=codex, explicit reasoning, and mechanical outcome cross-checks. All 40 were resolved-outcome divergences and were labeled NO_MATCH. The validation harness now supports --labeler filtering so Codex labels remain distinguishable from future operator labels. Harness run on --labeler codex: accuracy 100%, false positives 0, false negatives 0. No matcher implementation change and no bot restart.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "codex_labeled_disagreement_pairs",
+        "expectation": "40 rows from bot/state/matcher_heuristic_disagreement_pairs.jsonl carry operator_label, labeler=codex, reasoning, outcome_cross_check, and outcome_corroborates_label in cross_platform_labeling_queue.jsonl; all other queue rows remain operator_label=null.",
+        "current_value": "40 labeled; 4,960 remain operator_label=null",
+        "last_updated": "2026-05-12T15:33:33Z"
+      },
+      {
+        "name": "outcome_cross_check_distribution",
+        "expectation": "Outcome cross-check is present for every Codex-labeled row; any future MATCH against DIVERGED outcome data must be rejected or downgraded to review.",
+        "current_value": "DIVERGED=40; BOTH_YES=0; BOTH_NO=0; INSUFFICIENT_DATA=0",
+        "last_updated": "2026-05-12T15:33:33Z"
+      },
+      {
+        "name": "matcher_validation_on_codex_subset",
+        "expectation": "False positives must remain 0 where matcher emits MATCH_HIGH_CONFIDENCE against label NO_MATCH. Re-run: python3 tools/validate_cross_platform_matcher.py --labeler codex",
+        "current_value": "accuracy=100%; false_positives=0; false_negatives=0; confusion={NO_MATCH->no_match: 40}",
+        "last_updated": "2026-05-12T15:33:33Z"
+      },
+      {
+        "name": "operator_final_review_pending",
+        "expectation": "Claude/operator strategic-session spot-check reviews Codex reasoning + outcome cross-checks before treating these labels as trusted ground truth. Balanced MATCH labels still needed for recall validation.",
+        "current_value": "pending",
+        "last_updated": "2026-05-12T15:33:33Z"
       }
     ]
   }

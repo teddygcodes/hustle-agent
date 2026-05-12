@@ -6179,3 +6179,47 @@ If by 2026-06-11 the operator hasn't labeled ≥40 pairs, re-evaluate: corpus ma
 **Open loop / validation gate.** S105 remains blocked for live arb trust until the operator labels at least 20 `MATCH` and 20 `NO_MATCH` rows. Once labels exist, rerun `python3 tools/validate_cross_platform_matcher.py`; any high-confidence false positive against an operator `NO_MATCH` label defaults to Outcome B tuning/design revision. Until then, the correct status is: matcher works mechanically, but it is unvalidated for trading.
 
 **Architectural lesson.** Splitting the matcher from validation was the right move. The deterministic rules can now be regression-tested and used to prioritize labeling, while the system refuses to smuggle heuristic agreement in as truth. The useful new labeling list is not the top-Jaccard queue again; it is the 40-pair disagreement slice where the matcher and candidate-builder disagree for explicit, inspectable reasons.
+
+### ☑ Session 118 — Codex labels 40 matcher-disagreement pairs + validates conflict slice (2026-05-12, Outcome A with recall caveat)
+
+**Trigger.** S117 shipped the deterministic matcher and validation harness with explicit unvalidated status because `bot/state/cross_platform_labeling_queue.jsonl` still had 0 labeled rows. The highest-leverage follow-on was the S117 priority disagreement artifact: `bot/state/matcher_heuristic_disagreement_pairs.jsonl`, where the matcher disagrees with S116's Jaccard/result heuristic. Tyler explicitly authorized Codex corpus labeling for this one-shot offline validation task, with `labeler: "codex"` separation from future operator labels.
+
+**Phase 0 correction.** The session brief expected the disagreement file to contain ~1,100 rows, but the checked-in artifact contains exactly 40 rows because the S117 harness writes the top 40 by default (`--disagreement-limit 40`). The full harness still reports 1,100 matcher-vs-heuristic disagreements across the 5,000-row queue; only the committed priority artifact is capped. The 40 checked-in rows were already the top-Jaccard priority slice.
+
+**Decision: Outcome A — matcher validated on the Codex-labeled disagreement/conflict slice; Claude/operator spot-check still pending.**
+
+**What changed.**
+- `bot/state/cross_platform_labeling_queue.jsonl`: labeled exactly the 40 S117 priority disagreement rows. Every labeled row now has `operator_label: "NO_MATCH"`, `labeler: "codex"`, 2-sentence `reasoning`, `outcome_cross_check: "DIVERGED"`, and `outcome_corroborates_label: true`. The other 4,960 queue rows remain `operator_label: null`.
+- `tools/validate_cross_platform_matcher.py`: added `--labeler` filtering so Codex labels can be validated separately from future operator labels. Default behavior still validates all labeled rows.
+- `tests/test_validate_cross_platform_matcher.py`: added a regression test proving `labeler="codex"` metrics ignore operator/legacy labels.
+- `CLAUDE.md`, `README.md`, and `bot/state/active_observations.json`: synced S105/S118 status and the review caveat.
+
+**Labeling result.**
+- Labeled subset: 40 rows.
+- Label distribution: `NO_MATCH=40`, `MATCH=0`, `NEEDS_REVIEW=0`.
+- Outcome cross-check distribution: `DIVERGED=40`, `BOTH_YES=0`, `BOTH_NO=0`, `INSUFFICIENT_DATA=0`.
+- Pattern: the high-Jaccard disagreements are same-fixture sports/esports rows where the question text names the same teams, but the contract side/draw/halftime proposition differs and stored Kalshi/Polymarket outcomes diverge. This is exactly the 2024-shutdown-shape trap in miniature: shared words are not enough when resolution outcomes disagree.
+
+**Harness result.** `python3 tools/validate_cross_platform_matcher.py --labeler codex --json`:
+- Accuracy: **100.0%** (`NO_MATCH->no_match: 40`).
+- False positives: **0**.
+- False negatives: **0**.
+- Full queue matcher distribution unchanged: `MATCH_HIGH_CONFIDENCE=2,937`, `MATCH_NEEDS_REVIEW=963`, `NO_MATCH=1,100`.
+
+**Important caveat.** This validates the matcher’s resolved-outcome-conflict guard on the highest-value disagreement slice. It does **not** validate MATCH recall because the S117 priority slice contains 0 MATCH labels. Live-arb trust still needs Claude/operator review of the Codex labels plus a future balanced corpus with reviewed MATCH examples.
+
+**What did NOT change.**
+- No matcher implementation changes.
+- No runtime LLM matching.
+- No scanner / executor / strategy / Polymarket trading-client wiring.
+- No mass-labeling; the remaining ~4,960 queue rows remain unlabeled.
+- No bot restart; this is offline operator tooling.
+
+**Tests and verification.**
+- ✅ Queue integrity check: 5,000 rows total; `operator_label`: 4,960 null + 40 `NO_MATCH`; `labeler`: 40 `codex`; `reasoning_missing=0`; all labeled rows have `outcome_cross_check=DIVERGED` and `outcome_corroborates_label=true`.
+- ✅ Validation harness: `python3 tools/validate_cross_platform_matcher.py --labeler codex --json` → `accuracy=1.0`, `false_positive_count=0`, `false_negative_count=0`, `labeled_count=40`.
+- ✅ Focused tests: `python3 -m pytest tests/test_validate_cross_platform_matcher.py tests/test_cross_platform_matcher.py -q` → 21/0.
+- ✅ Full pytest: `python3 -m pytest tests/ --tb=short -q` → 1728/0.
+- ✅ `bot/state/cross_platform_labeling_queue.jsonl` and `bot/state/active_observations.json` force-added per established state-file pattern.
+
+**Open loop update.** CLAUDE.md S105 now records: matcher validated against 40 Codex-labeled disagreement pairs in S118, with operator final review pending via Claude spot-check. The queue still needs reviewed MATCH labels before any claim about high-confidence recovery or live-arb trust.
