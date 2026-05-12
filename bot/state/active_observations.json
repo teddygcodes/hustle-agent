@@ -123,7 +123,7 @@
       },
       {
         "name": "longest SCAN CYCLE gap during awake hours",
-        "expectation": "< 90 min after Session 98 (600s outer cap + 60s recovery sleep + 30 min IDLE wait = ~41 min max + slack). Pre-ship: 479 min observed May 10 03:08-11:07 UTC. If post-ship gaps still exceed 90 min, the outer timeout isn't firing as expected — inspect bot.log for the new ERROR line 'snapshot_universe outer-deadline 600s exceeded'.",
+        "expectation": "< 90 min after Session 98 (600s outer cap + 60s recovery sleep + 30 min IDLE wait = ~41 min max + slack). Pre-ship: 479 min observed May 10 03:08-11:07 UTC. If post-ship gaps still exceed 90 min, the outer timeout isn't firing as expected \u2014 inspect bot.log for the new ERROR line 'snapshot_universe outer-deadline 600s exceeded'.",
         "current_value": "n/a (pre-restart)",
         "last_updated": "2026-05-11T14:54:00+00:00"
       }
@@ -132,12 +132,12 @@
   {
     "session": 99,
     "shipped_at": "2026-05-11T16:00:00+00:00",
-    "description": "live_momentum scalar fair-value proxy (estimated_win_prob) — Data Collection Backlog Priority 3 instrumentation, no sizing changes",
+    "description": "live_momentum scalar fair-value proxy (estimated_win_prob) \u2014 Data Collection Backlog Priority 3 instrumentation, no sizing changes",
     "observation_window_days": 14,
     "metrics": [
       {
         "name": "live_momentum decisions with non-null estimated_win_prob in decisions.jsonl.extra",
-        "expectation": "rising forward; non-null when wp_edge + leader_price both present (entry-decision sites at live_watcher.py:1422-1453). Stays null at scan-time sites where game_ctx=None — that's correct, not a regression.",
+        "expectation": "rising forward; non-null when wp_edge + leader_price both present (entry-decision sites at live_watcher.py:1422-1453). Stays null at scan-time sites where game_ctx=None \u2014 that's correct, not a regression.",
         "current_value": 0,
         "last_updated": "2026-05-11T16:00:00+00:00"
       },
@@ -161,7 +161,7 @@
       },
       {
         "name": "Brier score on resolved live_momentum proxy calibration (watch-list trigger)",
-        "expectation": "re-evaluate proxy model after 14d (target 2026-05-25). If Brier <= 0.20 across >= 30 resolved trades, the proxy is calibrated enough to consider confidence-weighted sizing in a future session. Brier > 0.25 means worse-than-random — investigate the v1 math identity (likely a game_context.win_probability quality issue, not a proxy bug).",
+        "expectation": "re-evaluate proxy model after 14d (target 2026-05-25). If Brier <= 0.20 across >= 30 resolved trades, the proxy is calibrated enough to consider confidence-weighted sizing in a future session. Brier > 0.25 means worse-than-random \u2014 investigate the v1 math identity (likely a game_context.win_probability quality issue, not a proxy bug).",
         "current_value": "n/a (no resolved trades yet)",
         "last_updated": "2026-05-11T16:00:00+00:00"
       }
@@ -170,7 +170,7 @@
   {
     "session": 100,
     "shipped_at": "2026-05-11T18:00:00+00:00",
-    "description": "vig_stack ladder context instrumentation (Data Collection Backlog Priority 5) — family, ladder_total_yes_sum_cents, rung_count, selected_rung_rank_asc+desc, rung_strike, rung_kind, no_price_cents, forecast_bucket_distance, time_to_close_hr, source_forecast_temp, source_city, ladder_context_source. No behavior changes; forward-only.",
+    "description": "vig_stack ladder context instrumentation (Data Collection Backlog Priority 5) \u2014 family, ladder_total_yes_sum_cents, rung_count, selected_rung_rank_asc+desc, rung_strike, rung_kind, no_price_cents, forecast_bucket_distance, time_to_close_hr, source_forecast_temp, source_city, ladder_context_source. No behavior changes; forward-only.",
     "observation_window_days": 14,
     "metrics": [
       {
@@ -193,7 +193,7 @@
       },
       {
         "name": "tools/calibration_report.py renders vig_stack ladder shapes section",
-        "expectation": "yes; pre-trades shows 'No resolved vig_stack trades carrying ladder context yet' forward-only caveat; post-trades renders Section A (per-family × rank) and Section B (per-weather-family × forecast_distance bucket).",
+        "expectation": "yes; pre-trades shows 'No resolved vig_stack trades carrying ladder context yet' forward-only caveat; post-trades renders Section A (per-family \u00d7 rank) and Section B (per-weather-family \u00d7 forecast_distance bucket).",
         "current_value": "renders, n=0 caveat (verified pre-restart)",
         "last_updated": "2026-05-11T18:00:00+00:00"
       },
@@ -219,24 +219,24 @@
     "metrics": [
       {
         "name": "longest SCAN CYCLE gap in last 24h during awake hours",
-        "expectation": "< 60 min after Session 101. Pre-ship: 1h 59min (13:22-15:21 EDT) AND 2h 6min (15:21-17:28 EDT) on 2026-05-11 — two ~2h gaps in 4h. Post-ship expect inner deadline (300s) to bound to ~5min normal, ~5-10min worst-case. If gaps still > 60min within 14d, the Layer 1 daemon-thread guard isn't bounding the leak — investigate per the watch-list.",
+        "expectation": "< 60 min after Session 101. Pre-ship: 1h 59min (13:22-15:21 EDT) AND 2h 6min (15:21-17:28 EDT) on 2026-05-11 \u2014 two ~2h gaps in 4h. Post-ship expect inner deadline (300s) to bound to ~5min normal, ~5-10min worst-case. If gaps still > 60min within 14d, the Layer 1 daemon-thread guard isn't bounding the leak \u2014 investigate per the watch-list.",
         "current_value": "Post-restart longest 38 min 16s (3 consecutive scans, 2 intervals); 24h-rolling still 2h 6min from pre-restart 15:21-17:28 EDT gap until it ages out (~2026-05-12 17:30 EDT). Cadence regression eliminated.",
         "last_updated": "2026-05-11T23:02:00+00:00"
       },
       {
         "name": "median SCAN CYCLE interval during awake hours",
-        "expectation": "approx 30 min (config IDLE = 1800s) with ≤30s overshoot per Step 9 wall-clock sleep tolerance. Pre-ship median was severely degraded by the multi-hour gaps. Post-ship target: ≤ 35 min median across rolling 24h awake-hours window.",
+        "expectation": "approx 30 min (config IDLE = 1800s) with \u226430s overshoot per Step 9 wall-clock sleep tolerance. Pre-ship median was severely degraded by the multi-hour gaps. Post-ship target: \u2264 35 min median across rolling 24h awake-hours window.",
         "current_value": "Post-restart median 38 min 07s (n=2 intervals: 38:16, 37:58). Slightly above the 35 min target but far below the 60 min watch threshold. The 3-8 min overshoot above the 30 min IDLE config likely reflects Step 3b-8 sync work + wall-clock-sleep polling overshoot; worth a brief audit in a future session if it persists beyond Layer 1's normal noise floor.",
         "last_updated": "2026-05-11T23:02:00+00:00"
       },
       {
         "name": "count of '_kalshi_get total wall-clock timeout' log entries in last 24h",
-        "expectation": "0-10 under normal Kalshi health; non-zero confirms the new daemon-thread guard is firing on individual hung calls. Higher counts during degradation events are expected and a feature (the guard is doing its job). If sustained > 50/day, Kalshi is severely degraded — flag in the next session brief.",
+        "expectation": "0-10 under normal Kalshi health; non-zero confirms the new daemon-thread guard is firing on individual hung calls. Higher counts during degradation events are expected and a feature (the guard is doing its job). If sustained > 50/day, Kalshi is severely degraded \u2014 flag in the next session brief.",
         "current_value": 0,
         "last_updated": "2026-05-11T21:40:23+00:00"
       },
       {
-        "name": "Layer 2 watch-list — outer wait_for binding fix (Session 102 candidate)",
+        "name": "Layer 2 watch-list \u2014 outer wait_for binding fix (Session 102 candidate)",
         "expectation": "If snapshot_outer_timeout_count_24h in bot_state.json remains absent for >=7 days while the new '_kalshi_get total wall-clock timeout' log line fires non-zero times during the same window, the Session 98 outer guard is provably broken (it should fire when inner-guard activity sustained enough to overshoot 600s). Open Session 102 with the asyncio.get_event_loop() -> asyncio.get_running_loop() migration on Python 3.14 (deprecation hypothesis) plus a regression test for the actual production binding scenario.",
         "current_value": "n/a (7d window opens 2026-05-11)",
         "last_updated": "2026-05-11T21:40:23+00:00"
@@ -246,7 +246,7 @@
   {
     "session": 102,
     "shipped_at": "2026-05-11T23:30:00+00:00",
-    "description": "live_momentum cohort + breakeven deep dive — Outcome C (documentation-only ship). Phase 0 evaluated still-enabled live_momentum sports (NHL, IPL, UFC), the S90 re-entry breaker counterfactual, and S96 context cohort slicing. No single highest-confidence intervention surfaced: UFC at n=11 is below S97's stated N>=15 re-eval threshold; S90 counterfactual is uncomputable due to sizing-unavailable on shadow rows (substrate gap); S96 cohort matched N=2 (too thin). S97 enforcement verified working (post-S97-ship ATP attempts all reject with sport_disabled). No code changes; comprehensive documentation in CLAUDE-sessions.md Session 102 block.",
+    "description": "live_momentum cohort + breakeven deep dive \u2014 Outcome C (documentation-only ship). Phase 0 evaluated still-enabled live_momentum sports (NHL, IPL, UFC), the S90 re-entry breaker counterfactual, and S96 context cohort slicing. No single highest-confidence intervention surfaced: UFC at n=11 is below S97's stated N>=15 re-eval threshold; S90 counterfactual is uncomputable due to sizing-unavailable on shadow rows (substrate gap); S96 cohort matched N=2 (too thin). S97 enforcement verified working (post-S97-ship ATP attempts all reject with sport_disabled). No code changes; comprehensive documentation in CLAUDE-sessions.md Session 102 block.",
     "observation_window_days": 14,
     "metrics": [
       {
@@ -342,12 +342,12 @@
   {
     "session": 109,
     "shipped_at": "2026-05-12T00:58:00+00:00",
-    "description": "Post-event reversion substrate (Outcome A-defensive): SCAN_INTERVAL_IDLE 1800s→900s for 2x denser non-live universe coverage. Conservative single-knob change; SCAN_INTERVAL_LIVE and SCAN_INTERVAL_PREGAME unchanged. Opens a 30-day re-measurement window: at 2026-06-11 OR when N>=50 observable >=5c events accumulate on KXCOPPERD+KXAAAGASD post-restart, re-run the S106 v1 heuristic measurement and decide promote vs. kill. Investigation 4 returned 16.6% reversion at 1c threshold on N=205 events with reversion decreasing as move size grew (2c=13.5%, 3c=12.3%); KXCOPPERD 33% (N=12) and KXAAAGASD 29% (N=21) were the borderline-evidence subfamilies that activated A-defensive instead of strict Outcome C.",
+    "description": "Post-event reversion substrate (Outcome A-defensive): SCAN_INTERVAL_IDLE 1800s\u2192900s for 2x denser non-live universe coverage. Conservative single-knob change; SCAN_INTERVAL_LIVE and SCAN_INTERVAL_PREGAME unchanged. Opens a 30-day re-measurement window: at 2026-06-11 OR when N>=50 observable >=5c events accumulate on KXCOPPERD+KXAAAGASD post-restart, re-run the S106 v1 heuristic measurement and decide promote vs. kill. Investigation 4 returned 16.6% reversion at 1c threshold on N=205 events with reversion decreasing as move size grew (2c=13.5%, 3c=12.3%); KXCOPPERD 33% (N=12) and KXAAAGASD 29% (N=21) were the borderline-evidence subfamilies that activated A-defensive instead of strict Outcome C.",
     "observation_window_days": 30,
     "metrics": [
       {
         "name": "post-S109 non-live scan cycle p50 interval (sec)",
-        "expectation": "p50 between 800 and 950 (target 900s ± jitter). If sustained >=1100 over any 7-day window post-restart, investigate scheduler drift or scan-cycle bloat.",
+        "expectation": "p50 between 800 and 950 (target 900s \u00b1 jitter). If sustained >=1100 over any 7-day window post-restart, investigate scheduler drift or scan-cycle bloat.",
         "current_value": "pre-restart baseline: SCAN_INTERVAL_IDLE = 1800s (30 min)",
         "last_updated": "2026-05-12T00:58:00+00:00"
       },
@@ -374,6 +374,38 @@
         "expectation": "Re-run Investigation 4 methodology against post-restart universe data, restricted to event_threshold>=5c (S106 spec, not the 1c probe S109 used). If reversion rate >=40% on N>=50 events AND directional anomaly (larger moves revert less) reverses, promote to v1 heuristic session. If <40% OR directional finding persists, kill the strategy class (deferred Outcome C). Headline must include per-family N and the >=5c threshold explicitly to avoid the S103 fabrication trap.",
         "current_value": "pre-restart: 0 events observed at denser cadence",
         "last_updated": "2026-05-12T00:58:00+00:00"
+      }
+    ]
+  },
+  {
+    "session": 110,
+    "shipped_at": "2026-05-12T01:30:00+00:00",
+    "description": "Rich live_momentum match-phase state (Outcome B \u2014 design doc filed). Phase 0 probing confirmed that ESPN exposes full cricket linescore schema (over_count, innings, wickets, runs) via cricket/8048/scoreboard for IPL, but the bot's ESPN_SPORT_PATHS at bot/config.py:765-771 contains only {nba, mlb, nhl, nfl, ncaab} \u2014 IPL is not currently fetched. Enabling it would add a per-tick HTTP fetch the bot has never made, violating S96/S107 'no new network calls' and the S110 brief's explicit 'no ESPN integration, no cricket API' rule. The integration is deferred to a focused follow-on session per docs/superpowers/specs/2026-05-12-live-momentum-rich-match-phase-design.md. Tennis (ATP/WTA, disabled per S97) and UFC also out of source. NHL state is reachable but regime._MATCH_PHASE_SPORTS excludes it \u2014 separate session. No bot code changes shipped.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "follow-on integration session scheduled by 2026-06-12",
+        "expectation": "operator schedules a dedicated session before 2026-06-12 that implements the design doc's IPL ESPN integration. If 2026-06-12 passes without a follow-on, re-read the design doc \u2014 ESPN can rotate league IDs or paths, so a Phase 0 re-probe of cricket/8048/scoreboard is required before re-opening. The S107 follow-on entry in CLAUDE.md Open Loops remains the durable pointer until the integration ships.",
+        "current_value": "not scheduled (S110 ship time)",
+        "last_updated": "2026-05-12T01:30:00+00:00"
+      },
+      {
+        "name": "ESPN cricket/8048/scoreboard endpoint health (re-probe required at follow-on Phase 0)",
+        "expectation": "HTTP 200 with cricket-linescore schema (overs, wickets, runs, isBatting, isCurrent on competitors[].linescores[]). If endpoint returns non-200 or returns degraded schema (e.g. only generic team-sport fields), the follow-on session must surface that finding before shipping the integration. Off-season behavior (mid-Oct \u2192 mid-Mar) also must be probed at follow-on time.",
+        "current_value": "HTTP 200 with full cricket schema confirmed 2026-05-12 (cricket/8048 returns linescores; cricket/indian-premier-league returns 404)",
+        "last_updated": "2026-05-12T01:30:00+00:00"
+      },
+      {
+        "name": "IPL live_momentum decision rows with non-null match_phase",
+        "expectation": "0% \u2014 both regime.match_phase and extra.match_phase remain null on every IPL row until the follow-on integration ships. If non-null match_phase appears on IPL rows post-S110 without the follow-on having shipped, investigate immediately \u2014 something else populated the regime market_state['over_count'] key and we need to understand what.",
+        "current_value": "0% on recent IPL rows (e.g. KXIPLGAME-26MAY10MIRCB-RCB on 2026-05-10) \u2014 confirmed pre-S110 in decisions.jsonl",
+        "last_updated": "2026-05-12T01:30:00+00:00"
+      },
+      {
+        "name": "S107 follow-on Open Loops entry pointer integrity",
+        "expectation": "CLAUDE.md Open Loops 'S107 follow-on' bullet continues to point at docs/superpowers/specs/2026-05-12-live-momentum-rich-match-phase-design.md until the follow-on integration session ships and the entry is removed. If the entry disappears without the follow-on shipping, regenerate it from the design doc.",
+        "current_value": "pointer in place at CLAUDE.md line ~1047",
+        "last_updated": "2026-05-12T01:30:00+00:00"
       }
     ]
   }
