@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Mapping, NamedTuple
 
@@ -43,6 +43,12 @@ class TimeGranularity(Enum):
     INDEFINITE = "indefinite"
 
 
+class GameInstanceSignature(NamedTuple):
+    sport: str
+    date: str
+    participants: tuple[str, ...]
+
+
 DATE_ALIGNMENT_HOURS = 24
 HIGH_CONFIDENCE_JACCARD = 0.60
 SOURCE_UPGRADE_JACCARD = 0.50
@@ -69,6 +75,89 @@ _DATE_ONLY_TEXT_RE = re.compile(
     r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?\b",
     flags=re.IGNORECASE,
 )
+_KALSHI_TICKER_DATE_RE = re.compile(r"\bKX[A-Z0-9]+-(\d{2})([A-Z]{3})(\d{2})")
+_URL_DATE_RE = re.compile(r"-(20\d{2})-(\d{2})-(\d{2})(?:\b|[-_/])")
+_MONTH_DAY_YEAR_RE = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+(\d{1,2})(?:,\s*(20\d{2}))?\b",
+    flags=re.IGNORECASE,
+)
+_VS_RE = re.compile(r"\s+(?:vs\.?|v\.?|at)\s+", flags=re.IGNORECASE)
+_GAME_SUFFIX_RE = re.compile(
+    r"\s+(?:-\s*)?(?:set|map|game)\s*\d{1,2}\s*(?:winner)?\b.*$|\s*:\s*(?:set|map|game)\s*\d{1,2}\s*(?:winner)?\b.*$",
+    flags=re.IGNORECASE,
+)
+_SPORT_PREFIX_RE = re.compile(
+    r"^(?:ahl|atp|bkbbl|bkcba|bkfr1|bkjpn|bkseriea|bkbsl|cs2|kbo|khl|lol|mlb|nba|nhl|pll|ufc|val|valorant|wnba|wta)\s*:\s*",
+    flags=re.IGNORECASE,
+)
+_BET_PREFIX_RE = re.compile(
+    r"^(?:set|map|game)\s*\d{1,2}\s+winner\s*:\s*|^winner\s*:\s*",
+    flags=re.IGNORECASE,
+)
+_BET_TRAILER_RE = re.compile(
+    r"\b(?:both teams to score|exact score|draw at halftime|end in a draw|completed match|first set winner|second set winner|winner)\b.*$",
+    flags=re.IGNORECASE,
+)
+_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+_KALSHI_SPORT_PREFIXES = (
+    ("KXMLB", "mlb"),
+    ("KXKBO", "baseball"),
+    ("KXNBA", "nba"),
+    ("KXWNBA", "wnba"),
+    ("KXNHL", "nhl"),
+    ("KXAHL", "ahl"),
+    ("KXKHL", "khl"),
+    ("KXATP", "atp"),
+    ("KXWTA", "wta"),
+    ("KXCS2", "cs2"),
+    ("KXVALORANT", "valorant"),
+    ("KXLOL", "lol"),
+    ("KXPLL", "pll"),
+    ("KXUFC", "ufc"),
+)
+_POLY_SPORT_PREFIXES = {
+    "ahl": "ahl",
+    "atp": "atp",
+    "cs2": "cs2",
+    "kbo": "baseball",
+    "khl": "khl",
+    "lol": "lol",
+    "mlb": "mlb",
+    "nba": "nba",
+    "nhl": "nhl",
+    "pll": "pll",
+    "ufc": "ufc",
+    "val": "valorant",
+    "valorant": "valorant",
+    "wnba": "wnba",
+    "wta": "wta",
+}
+_TENNIS_SPORTS = frozenset({"atp", "wta"})
+_ESPORTS = frozenset({"cs2", "lol", "valorant"})
 
 # Start intentionally empty per S105. Populate only from validated findings.
 TICKER_FAMILY_RULES: dict[tuple[str, str], str] = {}
@@ -291,6 +380,172 @@ def extract_time_granularity(market: Mapping | str | None) -> TimeGranularity:
     return TimeGranularity.INDEFINITE
 
 
+def _kalshi_sport(ticker: str) -> str | None:
+    upper = ticker.upper()
+    for prefix, sport in _KALSHI_SPORT_PREFIXES:
+        if upper.startswith(prefix):
+            return sport
+    if upper.startswith("KX") and "GAME" in upper:
+        return "sports"
+    return None
+
+
+def _polymarket_sport(market: Mapping, text: str) -> str | None:
+    slug = _fold_text(str(market.get("url") or market.get("slug") or ""))
+    match = re.search(r"/market/([^/?#]+)", slug)
+    slug = match.group(1) if match else slug.rsplit("/", 1)[-1]
+    first = slug.split("-", 1)[0]
+    if first in _POLY_SPORT_PREFIXES:
+        return _POLY_SPORT_PREFIXES[first]
+    prefix = text.split(":", 1)[0].strip().lower()
+    return _POLY_SPORT_PREFIXES.get(prefix)
+
+
+def _market_sport(market: Mapping) -> str | None:
+    ticker = _market_id(market)
+    venue = str(market.get("venue") or "").strip().lower()
+    text = _fold_text(_combined_text(market))
+    if venue == "kalshi" or ticker.upper().startswith("KX"):
+        return _kalshi_sport(ticker)
+    return _polymarket_sport(market, text)
+
+
+def _parse_kalshi_ticker_date(ticker: str) -> str | None:
+    match = _KALSHI_TICKER_DATE_RE.search(ticker.upper())
+    if not match:
+        return None
+    month = _MONTHS.get(match.group(2).lower())
+    if month is None:
+        return None
+    try:
+        return date(2000 + int(match.group(1)), month, int(match.group(3))).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_url_date(market: Mapping) -> str | None:
+    text = str(market.get("url") or market.get("slug") or "")
+    match = _URL_DATE_RE.search(text)
+    if not match:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3))).isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_question_date(text: str, close_date) -> str | None:
+    match = _MONTH_DAY_YEAR_RE.search(text)
+    if not match:
+        return None
+    month = _MONTHS.get(match.group(1).lower())
+    if month is None:
+        return None
+    year = int(match.group(3)) if match.group(3) else None
+    if year is None:
+        close_dt = parse_datetime(close_date)
+        if close_dt is None:
+            return None
+        year = close_dt.year
+    try:
+        return date(year, month, int(match.group(2))).isoformat()
+    except ValueError:
+        return None
+
+
+def _extract_game_date(market: Mapping) -> str | None:
+    ticker = _market_id(market)
+    venue = str(market.get("venue") or "").strip().lower()
+    if venue == "kalshi" or ticker.upper().startswith("KX"):
+        ticker_date = _parse_kalshi_ticker_date(ticker)
+        if ticker_date:
+            return ticker_date
+
+    url_date = _parse_url_date(market)
+    if url_date:
+        return url_date
+
+    question_date = _parse_question_date(_combined_text(market), market.get("close_date"))
+    if question_date:
+        return question_date
+
+    close_dt = parse_datetime(market.get("close_date"))
+    return close_dt.date().isoformat() if close_dt else None
+
+
+def _strip_participant_side(text: str) -> str:
+    text = _GAME_SUFFIX_RE.sub("", text)
+    text = _BET_TRAILER_RE.sub("", text)
+    text = re.split(r"\s+-\s+|\s+--\s+|[?]", text, maxsplit=1)[0]
+    return text.strip(" -:;,.")
+
+
+def _participant_key(participant: str, sport: str) -> str | None:
+    tokens = normalize_tokens(_strip_participant_side(participant))
+    if not tokens:
+        return None
+    ordered = [
+        token
+        for token in re.findall(r"[a-z0-9]+", _fold_text(_strip_participant_side(participant)))
+        if token in tokens and token not in {"fc", "cf", "sc", "sk", "bc", "bk", "team", "esports"}
+    ]
+    if not ordered:
+        return None
+    if sport in _TENNIS_SPORTS:
+        base = ordered[-1]
+    elif sport in _ESPORTS:
+        base = "".join(ordered)
+    elif len(ordered) >= 2 and ordered[0] in {"as", "la", "las", "los", "new", "real", "san", "santa", "st"}:
+        base = "".join(ordered[:2])
+    else:
+        base = ordered[0]
+    return base[:5] if len(base) > 5 else base
+
+
+def _participants_from_text(text: str, sport: str) -> tuple[str, ...] | None:
+    cleaned = _fold_text(re.sub(r"[\u2012-\u2015]", " - ", text))
+    cleaned = _SPORT_PREFIX_RE.sub("", cleaned)
+    cleaned = _BET_PREFIX_RE.sub("", cleaned)
+    if ":" in cleaned and re.search(r"\b(?:vs\.?|v\.?|at)\b", cleaned.split(":", 1)[1]):
+        cleaned = cleaned.split(":", 1)[1]
+    parts = _VS_RE.split(cleaned, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    keys = tuple(_participant_key(part, sport) for part in parts)
+    if not all(keys):
+        return None
+    return tuple(sorted(keys))
+
+
+def _extract_game_instance(market: Mapping | None) -> GameInstanceSignature | None:
+    """Extract a conservative sports game identity, or None when ambiguous."""
+    if not isinstance(market, Mapping):
+        return None
+    sport = _market_sport(market)
+    if not sport:
+        return None
+    game_date = _extract_game_date(market)
+    if not game_date:
+        return None
+    participants = _participants_from_text(_combined_text(market), sport)
+    if participants is None or len(participants) != 2:
+        return None
+    return GameInstanceSignature(sport, game_date, participants)
+
+
+def _game_instance_mismatch_reason(
+    left: GameInstanceSignature | None,
+    right: GameInstanceSignature | None,
+) -> str | None:
+    if left is None and right is None:
+        return None
+    if left is None or right is None:
+        return "game_instance_ambiguous"
+    if left != right:
+        return "game_instance_mismatch"
+    return None
+
+
 def _bet_type_mismatch_reason(left: BetTypeSignature, right: BetTypeSignature) -> str | None:
     if left.kind == "other" or right.kind == "other":
         return "bet_type_ambiguous"
@@ -437,6 +692,26 @@ def match_markets(
             delta_hours,
             False,
             time_reason,
+        )
+
+    k_game_instance = _extract_game_instance(kalshi_market)
+    p_game_instance = _extract_game_instance(polymarket_market)
+    game_instance_reason = _game_instance_mismatch_reason(k_game_instance, p_game_instance)
+    if game_instance_reason == "game_instance_mismatch":
+        return MatchDecision(
+            MatchResult.NO_MATCH,
+            score,
+            delta_hours,
+            False,
+            game_instance_reason,
+        )
+    if game_instance_reason == "game_instance_ambiguous":
+        return MatchDecision(
+            MatchResult.MATCH_NEEDS_REVIEW,
+            score,
+            delta_hours,
+            False,
+            game_instance_reason,
         )
 
     k_source = normalize_source(kalshi_market.get("resolution_source"))

@@ -138,8 +138,8 @@ def test_matcher_classifications_locked_against_codex_labels(tmp_path):
     """Regression guard against the S118-S121 labeled validation corpus.
 
     Locks the matcher's classification behavior on every Codex-labeled row in
-    bot/state/cross_platform_labeling_queue.jsonl. S121 found one fresh
-    holdout false positive, so the matcher is no longer live-arb-validated.
+    bot/state/cross_platform_labeling_queue.jsonl. S122's sports
+    game-instance gate fixes the S121 back-to-back false positive.
     """
     disagreements = tmp_path / "disagreements.jsonl"
     summary = validate_queue(PROD_QUEUE_PATH, disagreements, labeler="codex")
@@ -149,40 +149,41 @@ def test_matcher_classifications_locked_against_codex_labels(tmp_path):
         "expected 120 codex labels (80 S118-S120 + 40 S121 holdout), "
         f"got {validation['labeled_count']}"
     )
-    assert validation["false_positive_count"] == 1, (
-        "S121 holdout evidence should show exactly one high-confidence false positive; "
+    assert validation["false_positive_count"] == 0, (
+        "S122 should eliminate high-confidence false positives on the 120-label corpus; "
         f"got {validation['false_positive_count']}"
     )
     assert validation["false_negative_count"] == 0, (
         "matcher false-negative count drifted from S121 evidence (0); "
         f"got {validation['false_negative_count']}"
     )
-    assert validation["accuracy"] >= 0.95
+    assert validation["accuracy"] >= 0.97
     confusion = validation["confusion"]
-    assert confusion.get("NO_MATCH->no_match") == 69
-    assert confusion.get("NO_MATCH->match_needs_review") == 6
-    assert confusion.get("NO_MATCH->match_high_confidence") == 1
-    assert confusion.get("MATCH->match_high_confidence") == 28
-    assert confusion.get("MATCH->match_needs_review") == 1
-    assert confusion.get("NEEDS_REVIEW->match_high_confidence") == 2
-    assert confusion.get("NEEDS_REVIEW->match_needs_review") == 13
+    assert confusion.get("NO_MATCH->no_match") == 71
+    assert confusion.get("NO_MATCH->match_needs_review") == 5
+    assert confusion.get("NO_MATCH->match_high_confidence", 0) == 0
+    assert confusion.get("MATCH->match_high_confidence") == 27
+    assert confusion.get("MATCH->match_needs_review") == 2
+    assert confusion.get("NEEDS_REVIEW->match_high_confidence", 0) == 0
+    assert confusion.get("NEEDS_REVIEW->match_needs_review") == 14
+    assert confusion.get("NEEDS_REVIEW->no_match") == 1
 
 
-def test_matcher_holdout_validation_documents_residual_false_positive(tmp_path):
-    """S121 holdout validation is Outcome B: one boundary false positive."""
+def test_matcher_holdout_validation_documents_back_to_back_fix(tmp_path):
+    """S122 fixes the S121 boundary false positive without false negatives."""
     disagreements = tmp_path / "disagreements.jsonl"
     summary = validate_queue(PROD_QUEUE_PATH, disagreements, labeler="codex", labeling_session="S121")
 
     validation = summary["operator_validation"]
     assert validation["labeled_count"] == 40
-    assert validation["false_positive_count"] == 1
+    assert validation["false_positive_count"] == 0
     assert validation["false_negative_count"] == 0
     assert validation["accuracy"] == 0.95
-    assert validation["exact_accuracy"] == 0.925
-    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["labeled_count"] == 15
-    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["false_positive_count"] == 1
+    assert validation["exact_accuracy"] == 0.95
+    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["labeled_count"] == 13
+    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["false_positive_count"] == 0
     assert validation["per_bucket"]["MATCH_NEEDS_REVIEW"]["false_positive_count"] == 0
     assert validation["per_bucket"]["NO_MATCH"]["false_positive_count"] == 0
     assert validation["per_stratum"]["high_confidence_boundary"]["labeled_count"] == 8
-    assert validation["per_stratum"]["high_confidence_boundary"]["false_positive_count"] == 1
+    assert validation["per_stratum"]["high_confidence_boundary"]["false_positive_count"] == 0
     assert validation["per_stratum"]["high_confidence_interior"]["false_positive_count"] == 0

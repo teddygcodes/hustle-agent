@@ -42,6 +42,7 @@ def _queue_row_to_markets(row: dict) -> tuple[dict, dict]:
         "resolved_outcome": row.get("kalshi_result"),
         "category": row.get("kalshi_category"),
         "resolution_source": row.get("kalshi_resolution_source"),
+        "url": row.get("kalshi_url"),
     }
     polymarket = {
         "venue": "polymarket",
@@ -51,6 +52,7 @@ def _queue_row_to_markets(row: dict) -> tuple[dict, dict]:
         "resolved_outcome": row.get("polymarket_result"),
         "category": row.get("polymarket_category"),
         "resolution_source": row.get("polymarket_resolution_source"),
+        "url": row.get("polymarket_url"),
     }
     return kalshi, polymarket
 

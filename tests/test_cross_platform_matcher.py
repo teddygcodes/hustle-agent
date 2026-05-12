@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from bot.cross_platform_matcher import (
     BetTypeSignature,
+    GameInstanceSignature,
     MatchResult,
     TimeGranularity,
+    _extract_game_instance,
     dates_aligned,
     extract_bet_type,
     extract_time_granularity,
@@ -19,13 +21,17 @@ def _market(
     close_date: str | None = "2026-05-12T12:00:00Z",
     result: str | None = "yes",
     source: str | None = None,
+    url: str | None = None,
+    venue: str | None = None,
 ) -> dict:
     return {
+        "venue": venue,
         "ticker": ticker,
         "question_text": question,
         "close_date": close_date,
         "resolved_outcome": result,
         "resolution_source": source,
+        "url": url,
     }
 
 
@@ -116,6 +122,83 @@ class TestTimeGranularityExtraction:
 
     def test_extracts_indefinite(self):
         assert extract_time_granularity("Atlanta Dream vs. Minnesota Lynx") == TimeGranularity.INDEFINITE
+
+
+class TestGameInstanceExtraction:
+    def test_extracts_mlb_game_instance_from_ticker_and_question(self):
+        market = _market(
+            "KXMLBGAME-26MAY091805COLPHI-COL",
+            "Colorado vs Philadelphia",
+            venue="kalshi",
+        )
+
+        assert _extract_game_instance(market) == GameInstanceSignature(
+            "mlb",
+            "2026-05-09",
+            ("color", "phila"),
+        )
+
+    def test_extracts_polymarket_mlb_game_instance_from_url_date(self):
+        market = _market(
+            "2154818",
+            "Colorado Rockies vs. Philadelphia Phillies",
+            close_date="2026-05-11 00:37:02+00",
+            url="https://polymarket.com/market/mlb-col-phi-2026-05-10",
+            venue="polymarket",
+        )
+
+        assert _extract_game_instance(market) == GameInstanceSignature(
+            "mlb",
+            "2026-05-10",
+            ("color", "phila"),
+        )
+
+    def test_extracts_wnba_and_nhl_style_instances(self):
+        assert _extract_game_instance(
+            _market("KXWNBAGAME-26MAY09ATLMIN-ATL", "Atlanta vs Minnesota", venue="kalshi")
+        ) == GameInstanceSignature("wnba", "2026-05-09", ("atlan", "minne"))
+        assert _extract_game_instance(
+            _market("KXAHLGAME-26MAY092100COAONT-COA", "Coachella Valley Firebirds vs Ontario Reign", venue="kalshi")
+        ) == GameInstanceSignature("ahl", "2026-05-09", ("coach", "ontar"))
+
+    def test_extracts_tennis_instances_from_player_names(self):
+        kalshi = _market(
+            "KXATPSETWINNER-26MAY12KHAPRI-1-KHA",
+            "Karen Khachanov vs Dino Prizmic: Set 1 Winner",
+            venue="kalshi",
+        )
+        polymarket = _market(
+            "2208147",
+            "Set 1 Winner: Khachanov vs Prizmic",
+            close_date="2026-05-12T12:00:00Z",
+            url="https://polymarket.com/market/atp-khachan-prizmic-2026-05-12-first-set-winner-Khachanov-vs-Prizmic",
+            venue="polymarket",
+        )
+
+        assert _extract_game_instance(kalshi) == GameInstanceSignature("atp", "2026-05-12", ("khach", "prizm"))
+        assert _extract_game_instance(polymarket) == GameInstanceSignature("atp", "2026-05-12", ("khach", "prizm"))
+
+    def test_extracts_esports_map_instances(self):
+        market = _market(
+            "KXVALORANTMAP-26MAY120400VARTS-2-VAR",
+            "VARREL vs. Team Secret: Map 2",
+            venue="kalshi",
+        )
+
+        assert _extract_game_instance(market) == GameInstanceSignature("valorant", "2026-05-12", ("secre", "varre"))
+
+    def test_non_sports_markets_return_none(self):
+        assert _extract_game_instance(_market("KXHIGHMIA-26MAY10-B88.5", "Highest temperature in Miami on May 10?")) is None
+
+    def test_missing_polymarket_sport_date_returns_none(self):
+        market = _market(
+            "2154818",
+            "Colorado Rockies vs. Philadelphia Phillies",
+            close_date="2026-05-11 00:37:02+00",
+            venue="polymarket",
+        )
+
+        assert _extract_game_instance(market) is None
 
 
 class TestMatchResultSemantics:
@@ -210,6 +293,28 @@ class TestMatchResultSemantics:
         )
         assert decision.result == MatchResult.MATCH_HIGH_CONFIDENCE
         assert decision.reason == "date_aligned_and_keyword_high"
+
+    def test_sports_game_instance_mismatch_forces_no_match(self):
+        decision = match_markets(
+            _market(
+                "KXMLBGAME-26MAY091805COLPHI-COL",
+                "Colorado vs Philadelphia",
+                close_date="2026-05-10T01:10:14Z",
+                result="no",
+                venue="kalshi",
+            ),
+            _market(
+                "2154818",
+                "Colorado Rockies vs. Philadelphia Phillies",
+                close_date="2026-05-11 00:37:02+00",
+                result="no",
+                url="https://polymarket.com/market/mlb-col-phi-2026-05-10",
+                venue="polymarket",
+            ),
+        )
+
+        assert decision.result == MatchResult.NO_MATCH
+        assert decision.reason == "game_instance_mismatch"
 
 
 class TestManualOverrides:
