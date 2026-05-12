@@ -46,4 +46,6 @@ tools/strategy_lab/reports_out/*
 !tools/purge_clv_disabled.py
 !tools/build_cross_platform_corpus.py
 !tools/validate_cross_platform_matcher.py
+!tools/sample_match_high_confidence_for_codex.py
+!tools/apply_codex_labels_match_high_confidence.py
 output/

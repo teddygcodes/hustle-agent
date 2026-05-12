@@ -1,0 +1,242 @@
+[
+  {
+    "kalshi_ticker": "KXATPCHALLENGERMATCH-26MAY09PDARON-RON",
+    "polymarket_ticker": "2202776",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi asks who wins the Pucinelli de Almeida vs Roncadelli match (Roncadelli side), while Polymarket asks whether the match is completed. These are different settlement conditions: match winner vs match completion."
+  },
+  {
+    "kalshi_ticker": "KXATPCHALLENGERMATCH-26MAY11LAZEI-LA",
+    "polymarket_ticker": "2219522",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves on the match winner (La Serna side) of La Serna vs Zeitune. Polymarket resolves on whether the match was completed. Different bet types despite same match."
+  },
+  {
+    "kalshi_ticker": "KXATPSETWINNER-26MAY09AUGNAV-2-AUG",
+    "polymarket_ticker": "2185505",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Set 2 Winner for Auger-Aliassime vs Navone; Polymarket is Set 1 Winner for the same match. Different sets, different settlement conditions."
+  },
+  {
+    "kalshi_ticker": "KXATPSETWINNER-26MAY10KHAVAN-1-KHA",
+    "polymarket_ticker": "2190459",
+    "label": "MATCH",
+    "reasoning": "Both ask who wins Set 1 of Khachanov vs Van de Zandschulp, with the Khachanov side on Kalshi mirrored by the same Set 1 winner market on Polymarket. Same match, same set, same settlement criterion."
+  },
+  {
+    "kalshi_ticker": "KXBOLPDIVGAME-26MAY09REASAN-SAN",
+    "polymarket_ticker": "2192767",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a moneyline/team-winner market on Tomayapo vs San Antonio Bulo Bulo (San Antonio side). Polymarket asks for a specific exact score of 0-0. Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXBOLPDIVGAME-26MAY09REASAN-SAN",
+    "polymarket_ticker": "2192802",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves on match winner (San Antonio side); Polymarket resolves on an exact 1-1 score. Different settlement conditions."
+  },
+  {
+    "kalshi_ticker": "KXBOLPDIVGAME-26MAY09REASAN-SAN",
+    "polymarket_ticker": "2192843",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a match-winner market while Polymarket asks for the exact score 2-2. Different bet types despite the same fixture."
+  },
+  {
+    "kalshi_ticker": "KXBOLPDIVGAME-26MAY09REASAN-SAN",
+    "polymarket_ticker": "2192853",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a moneyline market; Polymarket is an exact-score 3-3 market. Different settlement conditions."
+  },
+  {
+    "kalshi_ticker": "KXBSLGAME-26MAY101100GSNBJK-BJK",
+    "polymarket_ticker": "2163382",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Both reference the Galatasaray vs Besiktas matchup but the Kalshi ticker suffix '-BJK' suggests a specific Besiktas side, while Polymarket text is just the fixture header without a clear side. Without seeing market metadata to confirm Polymarket is a Besiktas-win line vs a generic matchup market, it's ambiguous."
+  },
+  {
+    "kalshi_ticker": "KXBUNDESLIGABTTS-26MAY09RBLSTP",
+    "polymarket_ticker": "2083084",
+    "label": "MATCH",
+    "reasoning": "Both ask whether both teams will score in the Leipzig vs St. Pauli Bundesliga fixture. Same match and same BTTS settlement condition."
+  },
+  {
+    "kalshi_ticker": "KXCHNSLGAME-26MAY10QINDAL-DAL",
+    "polymarket_ticker": "1970421",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a match-winner market on Qingdao vs Dalian (Dalian side). Polymarket is a total goals Over/Under 4.5. Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXCHNSLGAME-26MAY10QINDAL-QIN",
+    "polymarket_ticker": "1970413",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a moneyline (Qingdao side); Polymarket is a totals O/U 1.5. Different settlement criteria."
+  },
+  {
+    "kalshi_ticker": "KXCHNSLGAME-26MAY10QINDAL-QIN",
+    "polymarket_ticker": "1970416",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves on the match winner (Qingdao side); Polymarket resolves on Over/Under 2.5 goals. Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXCHNSLGAME-26MAY10QINDAL-QIN",
+    "polymarket_ticker": "1970418",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is a match-winner market; Polymarket is a totals O/U 3.5 market on the same fixture. Different settlement conditions."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY091300UNITYMOUZN-1-MOUZN",
+    "polymarket_ticker": "2216229",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi asks who wins Map 1 of UNiTY vs MOUZ NXT (MOUZ NXT side). Polymarket is a -1.5/+1.5 series map handicap. Map winner vs series handicap are different bet types."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY091500ISGFDB-1-FDB",
+    "polymarket_ticker": "2216724",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 1 winner for Isurus vs Fake do Biru (FDB side); Polymarket is a series map handicap (ISG -1.5 / FDB +1.5). Single-map winner vs match handicap are different settlement conditions."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY101100ISGTDP-1-ISG",
+    "polymarket_ticker": "2222984",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves on Map 1 winner of Isurus vs Turma do Pagode (ISG side). Polymarket resolves on a series map handicap of ISG -1.5. Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY101100ISGTDP-1-TDP",
+    "polymarket_ticker": "2212119",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 1 of Isurus vs Turma do Pagode; Polymarket's handicap involves BHE vs TDP, a different fixture entirely. Different matches."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY101300INOXEXR-2-INOX",
+    "polymarket_ticker": "2224468",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 2 winner of INOX vs ex-RUBY (INOX side). Polymarket is a series map handicap (ex-RUBY -1.5). Single-map winner vs series handicap are different conditions."
+  },
+  {
+    "kalshi_ticker": "KXCS2MAP-26MAY111400BCGVIT-1-VIT",
+    "polymarket_ticker": "2138932",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 1 winner of BC.Game vs Vitality (Vitality side). Polymarket is a series map handicap (VIT -1.5). Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXPGATOP10-ONMBC26-BHOS",
+    "polymarket_ticker": "2156585",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Beau Hossler finishes in the Top 10 at the 2026 ONEflight Myrtle Beach Classic. Same golfer, same tournament, same finishing threshold."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1007-T79199.99",
+    "polymarket_ticker": "2221368",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $79,200 on May 10, 2026 at 7am ET. Same asset, same threshold, same date and hour."
+  },
+  {
+    "kalshi_ticker": "KXUFCFIGHT-26MAY09CAROCH-CAR",
+    "polymarket_ticker": "2017404",
+    "label": "NEEDS_REVIEW",
+    "reasoning": "Kalshi asks if Clayton Carpenter wins UFC 328 vs Ochoa. Polymarket text is just the fight title 'Clayton Carpenter vs. Jose Ochoa' without explicitly indicating which side or whether it's a winner market. Likely a Carpenter-side winner market but cannot confirm from text alone."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTMAP-26MAY120400ZETAGENG-2-ZETA",
+    "polymarket_ticker": "2234689",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 2 winner of ZETA vs Gen.G (ZETA side). Polymarket is Map 1 winner of the same match. Different maps, different settlement events."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1016-T2299.99",
+    "polymarket_ticker": "2224358",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Ethereum is above $2,300 on May 10, 2026 at 4pm ET. Same asset, same threshold, same date and hour."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1206-T81799.99",
+    "polymarket_ticker": "2239485",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $81,800 on May 12, 2026 at 6am ET. Same asset, threshold, date and hour."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1019-T80399.99",
+    "polymarket_ticker": "2225296",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $80,400 on May 10, 2026 at 7pm ET. Identical asset, threshold, date and hour."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1003-T80399.99",
+    "polymarket_ticker": "2220567",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $80,400 on May 10, 2026 at 3am ET. Same asset, threshold, date and hour."
+  },
+  {
+    "kalshi_ticker": "KXPGATOP5-ONMBC26-TKAN",
+    "polymarket_ticker": "2156489",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Takumi Kanaya finishes in the Top 5 at the 2026 ONEflight Myrtle Beach Classic. Same player, same tournament, same finishing position threshold."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1017-T1899.99",
+    "polymarket_ticker": "2148683",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves at a specific hour (5pm EDT) on May 10 for Ethereum above $1,900. Polymarket asks whether Ethereum is above $1,900 on May 10 with no specified hour, implying an end-of-day or different settlement window. Different resolution windows."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY0921-T78999.99",
+    "polymarket_ticker": "2218655",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $79,000 on May 9, 2026 at 9pm ET. Same asset, threshold, date, hour."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1110-T2199.99",
+    "polymarket_ticker": "2155807",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi specifies 10am EDT on May 11 for Ethereum above $2,200. Polymarket asks whether Ethereum is above $2,200 on May 11 without an hour window, suggesting a different settlement window (likely end of day). Different resolution conditions."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1013-T83999.99",
+    "polymarket_ticker": "2148789",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves at 1pm EDT on May 10 for Bitcoin above $84,000. Polymarket asks whether Bitcoin is above $84,000 on May 10 without an hourly window. Different settlement timing."
+  },
+  {
+    "kalshi_ticker": "KXWNBAGAME-26MAY09ATLMIN-ATL",
+    "polymarket_ticker": "2139311",
+    "label": "MATCH",
+    "reasoning": "Both reference the Atlanta vs Minnesota WNBA game. The Kalshi ticker indicates the Atlanta side as the YES, and Polymarket's market title is the fixture (typically a moneyline with both teams as options). Same fixture and same game-winner resolution criterion."
+  },
+  {
+    "kalshi_ticker": "KXVALORANTMAP-26MAY111100EPNAVIJ-1-NAVIJ",
+    "polymarket_ticker": "2232896",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi is Map 1 winner of Enterprise vs NAVI Junior (NAVI.J side). Polymarket is a series map handicap (NAVI.J -1.5). Different bet types."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY0923-T82199.99",
+    "polymarket_ticker": "2219033",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $82,200 on May 9, 2026 at 11pm ET. Same asset, threshold, date, hour."
+  },
+  {
+    "kalshi_ticker": "KXBTCD-26MAY1204-T82399.99",
+    "polymarket_ticker": "2238873",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Bitcoin is above $82,400 on May 12, 2026 at 4am ET. Same asset, threshold, date, hour."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY0916-T2389.99",
+    "polymarket_ticker": "2216559",
+    "label": "MATCH",
+    "reasoning": "Both ask whether Ethereum is above $2,390 on May 9, 2026 at 4pm ET. Same asset, threshold, date, hour."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1002-T1899.99",
+    "polymarket_ticker": "2148683",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi specifies 2am EDT on May 10 for Ethereum above $1,900. Polymarket asks whether Ethereum is above $1,900 on May 10 without an hourly window. Different resolution windows (hourly snapshot vs end-of-day)."
+  },
+  {
+    "kalshi_ticker": "KXETHD-26MAY1114-T2499.99",
+    "polymarket_ticker": "2155818",
+    "label": "NO_MATCH",
+    "reasoning": "Kalshi resolves at 2pm EDT on May 11 for Ethereum above $2,500. Polymarket asks whether Ethereum is above $2,500 on May 11 without a specific hour, indicating a different settlement window. Different resolution conditions."
+  }
+]
