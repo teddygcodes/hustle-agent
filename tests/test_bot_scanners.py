@@ -276,3 +276,47 @@ def test_odds_scraper_uses_logger_not_print(capsys):
 
     captured = capsys.readouterr()
     assert captured.out == "", f"odds_scraper printed to stdout: {captured.out!r}"
+
+
+# ---------------------------------------------------------------------------
+# Session 109: SCAN_INTERVAL_IDLE 1800→900 cadence increase (Outcome A-defensive)
+# Opens a 30-day post_event_reversion re-measurement window. Live and pregame
+# cadence are explicitly regression-locked here so any future tuning must touch
+# them deliberately.
+# ---------------------------------------------------------------------------
+
+def test_scan_interval_idle_is_15_min_post_s109():
+    """S109 pins SCAN_INTERVAL_IDLE to 900s (15 min) for denser non-live coverage."""
+    from bot.config import SCAN_INTERVAL_IDLE
+    assert SCAN_INTERVAL_IDLE == 900
+
+
+def test_scan_interval_live_unchanged_post_s109():
+    """Regression-lock: S109 must not change SCAN_INTERVAL_LIVE."""
+    from bot.config import SCAN_INTERVAL_LIVE
+    assert SCAN_INTERVAL_LIVE == 120
+
+
+def test_scan_interval_pregame_unchanged_post_s109():
+    """Regression-lock: S109 must not change SCAN_INTERVAL_PREGAME."""
+    from bot.config import SCAN_INTERVAL_PREGAME
+    assert SCAN_INTERVAL_PREGAME == 600
+
+
+def test_get_scan_interval_idle_returns_new_value():
+    """get_scan_interval with no live or imminent games returns the post-S109 IDLE value."""
+    from bot.scanner import get_scan_interval
+    assert get_scan_interval([]) == 900
+
+
+def test_get_scan_interval_live_path_unchanged():
+    """get_scan_interval with at least one live game still returns SCAN_INTERVAL_LIVE.
+
+    S109 is non-live-only — the live tick path must be untouched.
+    """
+    from datetime import datetime, timedelta, timezone
+    from bot.scanner import get_scan_interval
+
+    one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    live_game = {"commence_time": one_hour_ago}
+    assert get_scan_interval([live_game]) == 120

@@ -47,7 +47,7 @@ MIN_BET_DOLLARS = 1.00         # Not worth execution cost below this
 # ---------------------------------------------------------------------------
 # Scan Intervals (seconds)
 # ---------------------------------------------------------------------------
-SCAN_INTERVAL_IDLE = 1800      # 30 min — no live games
+SCAN_INTERVAL_IDLE = 900       # 15 min — no live games (S109: 1800→900 for denser non-live coverage; opens 30-day post_event_reversion re-measurement window)
 SCAN_INTERVAL_PREGAME = 600    # 10 min — games starting within 1 hour
 SCAN_INTERVAL_LIVE = 120       # 2 min — live games in progress
 ODDS_API_MONTHLY_LIMIT = 450   # Buffer from 500 free tier limit

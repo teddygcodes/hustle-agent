@@ -725,7 +725,7 @@ def scan_cycle(sports: Optional[list[str]] = None,
     interval_label = {
         SCAN_INTERVAL_LIVE: "LIVE (2 min)",
         SCAN_INTERVAL_PREGAME: "PREGAME (10 min)",
-        SCAN_INTERVAL_IDLE: "IDLE (30 min)",
+        SCAN_INTERVAL_IDLE: "IDLE (15 min)",
     }.get(scan_interval, f"{scan_interval}s")
 
     logger.info("SUMMARY: %d opportunities | %d line moves | next scan: %s",

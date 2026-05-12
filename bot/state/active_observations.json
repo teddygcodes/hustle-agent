@@ -338,5 +338,43 @@
         "last_updated": "2026-05-12T00:27:00+00:00"
       }
     ]
+  },
+  {
+    "session": 109,
+    "shipped_at": "2026-05-12T00:58:00+00:00",
+    "description": "Post-event reversion substrate (Outcome A-defensive): SCAN_INTERVAL_IDLE 1800s→900s for 2x denser non-live universe coverage. Conservative single-knob change; SCAN_INTERVAL_LIVE and SCAN_INTERVAL_PREGAME unchanged. Opens a 30-day re-measurement window: at 2026-06-11 OR when N>=50 observable >=5c events accumulate on KXCOPPERD+KXAAAGASD post-restart, re-run the S106 v1 heuristic measurement and decide promote vs. kill. Investigation 4 returned 16.6% reversion at 1c threshold on N=205 events with reversion decreasing as move size grew (2c=13.5%, 3c=12.3%); KXCOPPERD 33% (N=12) and KXAAAGASD 29% (N=21) were the borderline-evidence subfamilies that activated A-defensive instead of strict Outcome C.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "post-S109 non-live scan cycle p50 interval (sec)",
+        "expectation": "p50 between 800 and 950 (target 900s ± jitter). If sustained >=1100 over any 7-day window post-restart, investigate scheduler drift or scan-cycle bloat.",
+        "current_value": "pre-restart baseline: SCAN_INTERVAL_IDLE = 1800s (30 min)",
+        "last_updated": "2026-05-12T00:58:00+00:00"
+      },
+      {
+        "name": "snapshot density on KXCOPPERD + KXAAAGASD (rows/day per family, 14d rolling)",
+        "expectation": ">=1.5x pre-ship baseline within 7 days of restart; the borderline-signal commodity-spread families need denser coverage to support the 30-day re-measurement gate.",
+        "current_value": "pre-restart baseline TBD from bot/state/universe.jsonl",
+        "last_updated": "2026-05-12T00:58:00+00:00"
+      },
+      {
+        "name": "Kalshi 429 error count 24h",
+        "expectation": "0; if >0 in any single day post-restart, revert SCAN_INTERVAL_IDLE to 1800s in a follow-up tuning session. Current S101 per-request 30s daemon-thread guard wraps API calls but does not enforce a rate ceiling.",
+        "current_value": 0,
+        "last_updated": "2026-05-12T00:58:00+00:00"
+      },
+      {
+        "name": "snapshot_outer_timeout_count_24h",
+        "expectation": "unchanged from pre-ship baseline; S98 outer 600s asyncio.wait_for must still fit inside the new 900s loop period. >2 in any 24h post-restart is a regression and needs S98 retuning before further cadence increases.",
+        "current_value": "pre-ship baseline (typically 0)",
+        "last_updated": "2026-05-12T00:58:00+00:00"
+      },
+      {
+        "name": "post-S109 reversion re-measurement gate (fires 2026-06-11 OR N>=50 observable >=5c events on commodity-spread families)",
+        "expectation": "Re-run Investigation 4 methodology against post-restart universe data, restricted to event_threshold>=5c (S106 spec, not the 1c probe S109 used). If reversion rate >=40% on N>=50 events AND directional anomaly (larger moves revert less) reverses, promote to v1 heuristic session. If <40% OR directional finding persists, kill the strategy class (deferred Outcome C). Headline must include per-family N and the >=5c threshold explicitly to avoid the S103 fabrication trap.",
+        "current_value": "pre-restart: 0 events observed at denser cadence",
+        "last_updated": "2026-05-12T00:58:00+00:00"
+      }
+    ]
   }
 ]
