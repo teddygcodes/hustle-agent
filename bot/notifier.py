@@ -1006,6 +1006,8 @@ class TelegramNotifier:
 
     async def send_message_get_id(self, text: str) -> int | None:
         """Send a message and return its message_id (for live status card init)."""
+        if not LIVE_GAME_CARDS_ENABLED:
+            return None
         if not self.app or not TELEGRAM_CHAT_ID:
             return None
         if self._check_flood():

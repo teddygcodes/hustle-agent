@@ -188,6 +188,7 @@ def test_edit_dedup_skip_identical_content(monkeypatch, tmp_path):
 
     n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
     n._edit_throttle = notifier.EditThrottle(clock=lambda: 0.0)
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", True)
 
     assert asyncio.run(n.edit_message_by_id(100, "same text")) is True
     assert asyncio.run(n.edit_message_by_id(100, "same text")) is True
@@ -209,6 +210,7 @@ def test_edit_dedup_records_only_on_success(monkeypatch, tmp_path):
 
     n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
     n._edit_throttle = notifier.EditThrottle(clock=lambda: 0.0)
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", True)
 
     assert asyncio.run(n.edit_message_by_id(200, "retry me")) is False
     assert asyncio.run(n.edit_message_by_id(200, "retry me")) is True
@@ -238,6 +240,80 @@ def test_edit_message_by_id_noop_when_live_cards_disabled(monkeypatch, tmp_path)
 
     assert result is False
     assert calls == []
+
+
+def test_send_message_get_id_noop_when_live_cards_disabled(monkeypatch, tmp_path):
+    """Session 113: LIVE_GAME_CARDS_ENABLED=False makes send_message_get_id a no-op.
+
+    Initial card-creation send is suppressed too, so LiveGameWatcher.status_msg_id
+    stays None and the existing 'if self.status_msg_id:' guards at
+    live_watcher.py:2205 / 2633 cascade — per-tick edits naturally skip.
+    """
+    from bot import notifier
+
+    calls: list[dict] = []
+
+    class FakeBot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(message_id=99)
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", False)
+
+    result = asyncio.run(n.send_message_get_id("initial card"))
+
+    assert result is None
+    assert calls == []
+
+
+def test_edit_message_by_id_works_when_live_cards_enabled(monkeypatch, tmp_path):
+    """Session 113 regression-lock: flag=True path still makes the API call.
+
+    Protects against a future change accidentally breaking the flag=True path —
+    Session 113 explicitly leaves the option to flip back on.
+    """
+    from bot import notifier
+
+    calls: list[dict] = []
+
+    class FakeBot:
+        async def edit_message_text(self, **kwargs):
+            calls.append(kwargs)
+            return True
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+    n._edit_throttle = notifier.EditThrottle(clock=lambda: 0.0)
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", True)
+
+    result = asyncio.run(n.edit_message_by_id(42, "live text"))
+
+    assert result is True
+    assert len(calls) == 1
+
+
+def test_send_message_preserved_when_live_cards_disabled(monkeypatch, tmp_path):
+    """Session 113: event-driven send_message must work regardless of flag.
+
+    send_message is used by send_confirmation, send_resolution,
+    send_daily_summary, and slash command callbacks — Phase 0 finding that
+    event-driven Telegram paths do NOT route through the two disabled methods.
+    """
+    from bot import notifier
+
+    calls: list[dict] = []
+
+    class FakeBot:
+        async def send_message(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(message_id=7)
+
+    n, _state_file = _notifier_with_fake_app(monkeypatch, tmp_path, FakeBot())
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", False)
+
+    asyncio.run(n.send_message("trade confirmation"))
+
+    assert len(calls) == 1
 
 
 def test_bot_state_telegram_fields_forward_only(monkeypatch, tmp_path):
@@ -320,6 +396,7 @@ def test_high_edit_volume_does_not_exceed_throttle(monkeypatch, tmp_path):
         burst=5,
         clock=lambda: clock["t"],
     )
+    monkeypatch.setattr(notifier, "LIVE_GAME_CARDS_ENABLED", True)
 
     async def fake_sleep(seconds):
         clock["t"] += seconds
