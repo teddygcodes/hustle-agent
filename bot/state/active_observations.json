@@ -144,8 +144,8 @@
       {
         "name": "live_momentum paper_trades records carrying estimated_win_prob",
         "expectation": "rising forward on accepted live_momentum trades. paper_trades.json filter: type==live_momentum AND estimated_win_prob present. Pre-Session-99 trades won't carry the field (forward-only).",
-        "current_value": 0,
-        "last_updated": "2026-05-11T16:00:00+00:00"
+        "current_value": 2,
+        "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "tools/calibration_report.py renders live_momentum proxy section",
@@ -162,8 +162,8 @@
       {
         "name": "Brier score on resolved live_momentum proxy calibration (watch-list trigger)",
         "expectation": "re-evaluate proxy model after 14d (target 2026-05-25). If Brier <= 0.20 across >= 30 resolved trades, the proxy is calibrated enough to consider confidence-weighted sizing in a future session. Brier > 0.25 means worse-than-random \u2014 investigate the v1 math identity (likely a game_context.win_probability quality issue, not a proxy bug).",
-        "current_value": "n/a (no resolved trades yet)",
-        "last_updated": "2026-05-11T16:00:00+00:00"
+        "current_value": "S115 (2026-05-12) measurement: N=2, Brier=0.1434, Bias=0.1540 (PAPER-BAA84AF2 IPL pred=0.500 lost; PAPER-54CA70B8 NBA pred=0.808 won). Far below N>=30 threshold; no anomalies in proxy distribution. Re-eval 2026-05-25 unchanged.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
   },
@@ -206,8 +206,8 @@
       {
         "name": "KXHIGHAUS forecast-edge loss concentration (watch-list trigger)",
         "expectation": "re-evaluate after 14d (target 2026-05-25). If post-Session-100 KXHIGHAUS rows show N>=10 in the [-0.5, 0.5) forecast_distance bucket AND win_rate < 60%, surface as a candidate for Session 101 forecast-edge-aware floor/sizing decision. Pure observation; no action this session. Motivating evidence: two -$199 KXHIGHAUS B-bucket losses (B80.5, B89.5) on 2026-05-09/10 where the day's high landed inside the bucket.",
-        "current_value": "n/a (no resolved trades yet)",
-        "last_updated": "2026-05-11T18:00:00+00:00"
+        "current_value": "S115 (2026-05-12) measurement: N_in_bucket=0 of 0 settled KXHIGHAUS-B vig_stack rows with new S100 fields; only 2 post-S100 KXHIGHAUS rows exist total, both still open at forecast_bucket_distance>=3.0 (outside bucket). Motivating losses KXHIGHAUS-26MAY08-B80.5 (-$199.20) and KXHIGHAUS-26MAY09-B89.5 (-$199.87) confirmed in data with family=null AND forecast_bucket_distance=null — pre-S100 instrumentation, un-classifiable retroactively. Re-eval 2026-05-25 unchanged.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
   },
@@ -290,8 +290,8 @@
       {
         "name": "live_momentum decisions with context_available=true in decisions.jsonl.extra",
         "expectation": "materially higher forward after restart. Pre-ship all-history coverage was 43/1098 (3.9%) because S96 was forward-only; current May 11 watcher rows were already 43/48 (89.6%). The S107 lift should mainly show on executor all_gates_passed rows and future scan/no-entry context surfaces.",
-        "current_value": "pre-restart: all=43/1098, last500=43/500, May11=43/48; immediate post-restart pulse had 0 fresh live_momentum decisions by 00:05Z",
-        "last_updated": "2026-05-12T00:06:00+00:00"
+        "current_value": "S115 (2026-05-12) measurement on post-S107 window (ts>=2026-05-11T22:00Z): N=20 live_momentum decisions, coverage=100.0% (20/20). Per-sport: atp=11, atp_challenger=2, nba=6, wta_challenger=1 — all sport_disabled rejects being context-instrumented per S107's reachable-partial-context widening. Zero IPL/NHL/UFC decisions in window (no enabled-sport live games since ship). Sub-finding (not actionable today): atp/nba labels appear despite S97 disable set {atp, atp_challenger, nba_game, wta, wta_challenger} — likely a 'nba' vs 'nba_game' ticker-prefix vs ESPN-label discrepancy at sport-tagging site, not an enforcement regression (these are rejects, not accepts). Verify in 5min next sport-tagging investigation.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "executor all_gates_passed live_momentum rows carrying leader_price + dip_cents",
@@ -322,14 +322,14 @@
       {
         "name": "reentry_blocked shadow rows with sizing_status=available",
         "expectation": "forward rows should be available whenever the live_momentum sizer returns positive contracts from block-point inputs; unavailable rows must include explicit missing_sizing_fields / sizing_unavailable_reason.",
-        "current_value": "pre-ship historical rows remain unavailable; verify on next post-restart reentry_blocked event",
-        "last_updated": "2026-05-12T00:27:00+00:00"
+        "current_value": "S115 (2026-05-12) measurement: 2 reentry_blocked rows total post-S108 (both IPL KXIPLGAME-26MAY11DCPBKS-PBKS, yes-side @0.68/0.67), both with sizing_status='unavailable' and null would_contracts/would_notional. Sub-finding (not actionable today): S108 sizer wire-up did not populate on these IPL rows; verify next reentry_blocked fire whether extra.missing_sizing_fields/sizing_unavailable_reason annotations are present per Schema spec — if structurally missing, ship a small follow-on instrumentation patch. 0d since S108 ship; explicit 'very early after ship' case.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "settled-and-sized reentry_blocked rows for S90 threshold analysis",
         "expectation": "when N >= 10 rows have sizing_status=available and settled market_result, compute aggregate would-have-traded P&L to evaluate S90 N=1 vs N=2.",
-        "current_value": 0,
-        "last_updated": "2026-05-12T00:27:00+00:00"
+        "current_value": "S115 (2026-05-12) measurement: N_settled=0; total_would_pnl=$0.00. Zero sizing-available reentry_blocked rows exist (see prior metric); even if they existed, the only 2 reentry_blocked tickers have close_ts 2026-05-14 — un-settled at measurement time. 14d window opens ~2026-05-26.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "reentry_blocked unavailable rows without explicit reason",
@@ -372,8 +372,8 @@
       {
         "name": "post-S109 reversion re-measurement gate (fires 2026-06-11 OR N>=50 observable >=5c events on commodity-spread families)",
         "expectation": "Re-run Investigation 4 methodology against post-restart universe data, restricted to event_threshold>=5c (S106 spec, not the 1c probe S109 used). If reversion rate >=40% on N>=50 events AND directional anomaly (larger moves revert less) reverses, promote to v1 heuristic session. If <40% OR directional finding persists, kill the strategy class (deferred Outcome C). Headline must include per-family N and the >=5c threshold explicitly to avoid the S103 fabrication trap.",
-        "current_value": "pre-restart: 0 events observed at denser cadence",
-        "last_updated": "2026-05-12T00:58:00+00:00"
+        "current_value": "S115 (2026-05-12) hour-3 of 30d window: target-families KXCOPPERD+KXAAAGASD >=5c events = 0 (universe coverage for these tickers ended pre-S109 ship; awaiting next surfacing). Supplementary all-families >=5c events = 395 (eligible 292) with 43.5% reversion of eligible / 32.2% of all — above 40% bar on eligible-only read. NOT actionable: watch-list is scoped to KXCOPPERD+KXAAAGASD per S106 design rationale; do NOT widen unilaterally. Calendar trigger 2026-06-11 remains authoritative; re-examine then if target-family pattern still N-thin and all-families pattern persists.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
   },
@@ -456,8 +456,8 @@
       {
         "name": "14d cohort re-measurement (fires 2026-05-25 OR N>=20 IPL rows with over_count populated)",
         "expectation": "At 2026-05-25 OR when >=20 IPL decisions.jsonl rows have carried over_count, re-measure (a) ESPN cricket call success rate during the observed live IPL windows; (b) match_phase distribution across powerplay / middle / death; (c) whether IPL cohort-N \u00d7 match_phase \u00d7 leader_strength buckets are now thick enough for the S102 IPL-profitability analysis to slice by phase. If (a) <90% or (c) every match_phase bucket remains N<5, surface as a follow-on operational-hygiene candidate.",
-        "current_value": "not yet fired (S112 ship time)",
-        "last_updated": "2026-05-12T02:38:20+00:00"
+        "current_value": "S115 (2026-05-12) measurement: 0 IPL live_momentum decisions post-S112 ship (22:00Z cutoff). All 11 IPL rows in decisions.jsonl are pre-cutoff (2026-05-10T16:19 \u2192 2026-05-11T17:27). Bot is actively logging post-cutoff for non-IPL sports; no live IPL match window since ship. Joint per-IPL-phase analysis with S107 IPL slice blocked until window arrives. Re-measure 2026-05-25 OR at next live IPL window.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
   },
@@ -476,8 +476,8 @@
       {
         "name": "Telegram 'Message is not modified' error count per 24h",
         "expectation": "0 with flag False (errors only fired when editMessageText fired, so calls=0 implies errors=0). Pre-restart baseline was ~0.6/hour in bot/logs/bot.log.1 (Phase 0 measured 42 raw lines / 70.3h window). NOT the 236/hour the CLAUDE.md Open Loops entry framed — that framing was wrong by ~three orders of magnitude. Do not claim the dedup logic was 'fixed' — it was bypassed; the bug at bot/notifier.py:993 (hash store only after success) is unchanged.",
-        "current_value": "0 — verified at ship time",
-        "last_updated": "2026-05-12T03:10:05+00:00"
+        "current_value": "S115 (2026-05-12) verified ~5h post-ship: 0 errors in bot/logs/bot.log post-ship (rate 0.00/hr vs corrected baseline ~0.6/hr). editMessageText calls continued 12 min post-ship (236 calls 22:54:14→23:05:59, all HTTP 200) then ceased fully — consistent with flag taking effect on next live-card render cycle. No residual call site to chase. HEALTHY.",
+        "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "Event-driven Telegram path liveness (send_confirmation / send_resolution / send_daily_summary / slash commands)",
