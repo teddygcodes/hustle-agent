@@ -1087,8 +1087,6 @@ Items where Outcome B was filed but no data accumulates passively.
 
 Items observed during operation but not prioritized for a session. No calendar trigger.
 
-- **Telegram `edit_message_text` "Message is not modified" dedup spam.** Error rate has been ~236/hour and escalating since 2026-05-10. Not bot-killing but heading toward 429 throttle territory (Battle Scar #15 lineage but different shape — not throttled yet). **Unblocks:** investigate per-message dedup hash logic in `bot/notifier.py`; likely missing duplicate-content detection on identical-state edits (live game cards re-rendered with no actual data change still trigger Telegram edit attempts).
-
 - **MOMENTUM_LEADER_MIN dead-zone filter (Session 2 historical).** Currently `MOMENTUM_LEADER_MIN = 0.70` admits the negative-EV `[75-80¢)` zone. **Unblocks:** explicit `[75-80¢)` exclusion in `is_leader()` rather than tightening the MIN floor (which would surrender the positive `[70-75¢)` bucket). Original mention narrative in this file's "Money" section (~line 513).
 
 ### S101 Layer 2 — borderline (in this section but with auto-trigger)
