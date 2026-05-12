@@ -45,4 +45,5 @@ tools/strategy_lab/reports_out/*
 !tools/clean_stale_state.py
 !tools/purge_clv_disabled.py
 !tools/build_cross_platform_corpus.py
+!tools/validate_cross_platform_matcher.py
 output/
