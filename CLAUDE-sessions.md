@@ -6368,3 +6368,36 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 - No bot restart; PID 37978 intentionally untouched.
 
 **Open loop update.** CLAUDE.md S105 now records: matcher v2 has residual FPs on holdout; further tuning required in S122 before any live-arb validation claim.
+
+### ☑ Session 122 — Matcher v3 sports game-instance gate (2026-05-12, Outcome A — ship offline)
+
+**Trigger.** S121 found one matcher v2 high-confidence false positive in the fresh holdout: `KXMLBGAME-26MAY091805COLPHI-COL` (Kalshi May 9 Rockies-Phillies) matched Polymarket `2154818` (May 10 Rockies-Phillies). Same teams, same full-game winner bet type, same resolved outcome, and close times inside ±24h made v2's Jaccard/date gate insufficient.
+
+**Decision: Outcome A — matcher v3 ships offline with 0 FPs on the 120-label corpus.** No bot restart, no live arb wiring, and no Polymarket trading client work.
+
+**Implementation.**
+- [bot/cross_platform_matcher.py](bot/cross_platform_matcher.py) now defines `GameInstanceSignature(sport, date, participants)` plus `_extract_game_instance()`.
+- The extractor parses Kalshi sports dates from ticker date fragments, Polymarket dates from market URL slugs first, explicit text dates second, and close-date fallback only when stronger structural dates are absent.
+- Participants are normalized from `vs`/`at` question text using deterministic sport-aware keys; ambiguous or non-sports rows return `None` rather than fabricating identity.
+- `match_markets()` now applies the game-instance gate after bet-type and time-granularity checks: exact mismatch -> `NO_MATCH`; one-sided extraction -> `MATCH_NEEDS_REVIEW`; equal or absent instances proceed to the existing Jaccard/source/family logic.
+- [tools/validate_cross_platform_matcher.py](tools/validate_cross_platform_matcher.py) now passes queue URLs into matcher market dictionaries so Polymarket slug dates are available.
+
+**Validation result.**
+- Combined 120 Codex labels (`python3 tools/validate_cross_platform_matcher.py --labeler codex --json --disagreement-path /tmp/s122_matcher_disagreements.jsonl`): `accuracy=97.5%`, `exact_accuracy=93.3%`, `false_positives=0`, `false_negatives=0`; confusion `{MATCH->match_high_confidence: 27, MATCH->match_needs_review: 2, NEEDS_REVIEW->match_needs_review: 14, NEEDS_REVIEW->no_match: 1, NO_MATCH->match_needs_review: 5, NO_MATCH->no_match: 71}`.
+- S121 holdout only (`--labeler codex --labeling-session S121`): `accuracy=95.0%`, `exact_accuracy=95.0%`, `false_positives=0`, `false_negatives=0`; the Rockies-Phillies back-to-back row is now `NO_MATCH` via `game_instance_mismatch`.
+- Full 5,000-row distribution shifted from v2 `MATCH_HIGH_CONFIDENCE=1,590 / MATCH_NEEDS_REVIEW=1,558 / NO_MATCH=1,852` to v3 `MATCH_HIGH_CONFIDENCE=1,512 / MATCH_NEEDS_REVIEW=1,511 / NO_MATCH=1,977`.
+- Inventory follow-up: v2 had 302 high-confidence sports/esports rows by ticker regex and 27 same-family structural date mismatches within one day. v3 leaves 251 high-confidence sports/esports rows and 0 remaining high-confidence structural date mismatches in that probe. Across all rows, 125 classify via `game_instance_mismatch` and 46 via `game_instance_ambiguous`.
+
+**Tests and verification.**
+- Focused tests: `python3 -m pytest tests/test_cross_platform_matcher.py tests/test_validate_cross_platform_matcher.py -q` -> **47/0**.
+- Full pytest: `python3 -m pytest tests/ --tb=short -q` -> **1754/0**.
+- Regression guard now locks the 120-label corpus at FP=0/FN=0 and updates the S121 holdout test from residual-FP documentation to back-to-back fix documentation.
+- `bot/state/active_observations.json` force-added with S122 validation status and the S123 holdout-2 follow-on.
+
+**What did NOT change.**
+- No bet-type or time-granularity extractor redesign.
+- No Jaccard threshold/math changes.
+- No outcome-conflict relaxation.
+- No bot restart; PID 37978 intentionally untouched.
+
+**Open loop update.** CLAUDE.md S105 now records: matcher v3 fixes the back-to-back FP and is validated against the 120-label corpus with 0 FPs / 0 FNs. Holdout-2 (S123) remains needed to confirm generalization on fresh back-to-back sports patterns before live-arb trust.
