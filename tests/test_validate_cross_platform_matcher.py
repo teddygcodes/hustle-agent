@@ -102,16 +102,13 @@ def test_validate_queue_can_filter_codex_labels_from_other_labels(tmp_path):
 
 
 def test_matcher_classifications_locked_against_codex_labels(tmp_path):
-    """S118+S119 regression guard against the labeled validation corpus.
+    """S118-S120 regression guard against the labeled validation corpus.
 
     Locks the matcher's classification behavior on every Codex-labeled row in
     bot/state/cross_platform_labeling_queue.jsonl. False-positive count is the
-    load-bearing metric for live cross-platform arb safety (each FP = ~$1 of
-    expected loss per attempted arb trade). S119 shipped with 24 FPs documented
-    as Outcome B; matcher tuning is queued as S120 per Open Loops S105.
-
-    If matcher changes shift either count, update both the matcher AND the
-    expected value here, with the new evidence cited in the next session block.
+    load-bearing metric for live cross-platform arb safety. S120 accepts
+    NO_MATCH-labeled rows downgraded to NEEDS_REVIEW as safe; only
+    MATCH_HIGH_CONFIDENCE on a NO_MATCH label is a false positive.
     """
     disagreements = tmp_path / "disagreements.jsonl"
     summary = validate_queue(PROD_QUEUE_PATH, disagreements, labeler="codex")
@@ -121,18 +118,22 @@ def test_matcher_classifications_locked_against_codex_labels(tmp_path):
         "expected 80 codex labels (40 S118 NO_MATCH + 40 S119), "
         f"got {validation['labeled_count']}"
     )
-    assert validation["false_positive_count"] == 24, (
-        "matcher false-positive count drifted from S119 baseline (24); "
+    assert validation["false_positive_count"] == 0, (
+        "matcher false-positive count drifted from S120 target (0); "
         f"got {validation['false_positive_count']}"
     )
     assert validation["false_negative_count"] == 0, (
-        "matcher false-negative count drifted from S119 baseline (0); "
+        "matcher false-negative count drifted from S120 target (0); "
         f"got {validation['false_negative_count']}"
     )
+    assert validation["accuracy"] >= 0.95
     confusion = validation["confusion"]
-    # NO_MATCH labels split: 40 from S118 (matcher agrees -> no_match), 24 from S119 (matcher disagrees -> match_high_confidence).
-    assert confusion.get("NO_MATCH->no_match") == 40
-    assert confusion.get("NO_MATCH->match_high_confidence") == 24
-    # S119 positive labels: 14 MATCH (matcher correct), 2 NEEDS_REVIEW (matcher over-confident but not FP/FN).
+    # S120: all NO_MATCH labels are kept out of high-confidence; 5 time-window
+    # mismatches intentionally downgrade to review per the v2 policy.
+    assert confusion.get("NO_MATCH->no_match") == 59
+    assert confusion.get("NO_MATCH->match_needs_review") == 5
+    assert confusion.get("NO_MATCH->match_high_confidence", 0) == 0
+    # S119 positive labels remain high-confidence; the two ambiguous labels
+    # are still high-confidence under fixture-only moneyline semantics.
     assert confusion.get("MATCH->match_high_confidence") == 14
     assert confusion.get("NEEDS_REVIEW->match_high_confidence") == 2

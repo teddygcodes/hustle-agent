@@ -105,6 +105,7 @@ def validate_queue(
     heuristic_disagree = 0
     labeled_count = 0
     labeled_exact = 0
+    labeled_safe = 0
     false_positive_count = 0
     false_negative_count = 0
     confusion: Counter[str] = Counter()
@@ -144,6 +145,8 @@ def validate_queue(
             confusion[f"{label}->{result_value}"] += 1
             if matcher_label == label:
                 labeled_exact += 1
+            if matcher_label == label or (label == "NO_MATCH" and matcher_label == "NEEDS_REVIEW"):
+                labeled_safe += 1
             if decision.result == MatchResult.MATCH_HIGH_CONFIDENCE and label == "NO_MATCH":
                 false_positive_count += 1
             if decision.result == MatchResult.NO_MATCH and label == "MATCH":
@@ -168,7 +171,8 @@ def validate_queue(
         "operator_validation": {
             "labeler_filter": labeler,
             "labeled_count": labeled_count,
-            "accuracy": labeled_exact / labeled_count if labeled_count else None,
+            "accuracy": labeled_safe / labeled_count if labeled_count else None,
+            "exact_accuracy": labeled_exact / labeled_count if labeled_count else None,
             "false_positive_count": false_positive_count,
             "false_negative_count": false_negative_count,
             "confusion": dict(confusion),
@@ -210,6 +214,7 @@ def print_summary(summary: dict) -> None:
         print(
             "Operator-label validation: "
             f"accuracy={validation['accuracy']:.1%}, "
+            f"exact_accuracy={validation['exact_accuracy']:.1%}, "
             f"false_positives={validation['false_positive_count']}, "
             f"false_negatives={validation['false_negative_count']}"
         )
