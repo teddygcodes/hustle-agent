@@ -8,6 +8,19 @@
 
 ---
 
+## Network Call Policy
+
+The bot's live decision path makes external HTTP calls to a curated set of endpoints (Kalshi, ESPN team-sport scoreboards, NWS, TheRundown). Adding NEW external endpoints to the decision path requires explicit operator approval per session — see the "no new network calls" lineage from S96 / S107.
+
+Current approved endpoints (each shipped with its own session and discipline):
+
+- ESPN team sports (NBA / MLB / NHL / NFL / NCAAB) — pre-existing.
+- ESPN cricket `cricket/8048/scoreboard` for IPL — **Session 112 (2026-05-11)**, scoped to IPL only. Rationale: IPL was the second still-profitable live_momentum cohort post-S97 (+$53.71 / 13 settled) and cohort observability stayed N-thin without rich `match_phase` state; S110 design-doc'd the integration and S112 shipped it under explicit operator relaxation.
+
+Tennis match-level state, UFC live state, NHL `match_phase` source, and any future sport addition still require their own approved exception. **Do not infer general permission from any single approved case.** The "no new network calls" rule continues to apply by default; relaxations are one-off and named.
+
+---
+
 ## What Glint Is
 
 Glint is an autonomous prediction-market trading bot that runs 24/7 against **Kalshi** and takes edge across four active strategies. It's a pure Python `asyncio` application — one process, one Telegram bot interface, one orchestrator class (`GlintBot` in `bot/main.py`). No LLM in the trading loop. Every decision is deterministic math + safety checks + Kelly sizing.
@@ -717,6 +730,19 @@ allowlisted no-entry/entry context:
   "estimated_win_prob": float | None,  # clamp(wp_edge + leader_price/100, 0.05, 0.95)
   "model_source": str,                 # "game_context_win_probability_v1"
   "confidence_components": dict,       # {wp_edge, market_implied, pre_clamp_raw, clamped}
+  # Session 112 forward-only — IPL cricket state. Populated only when
+  # sport == "ipl" AND ESPN cricket/8048 fetch returned a current-batting
+  # linescore (isBatting AND isCurrent). Absent on all non-IPL sports and on
+  # IPL rows where cricket fetch failed, was throttled, or returned no
+  # current-innings row (e.g. between innings). Source:
+  # bot/live_watcher.py _fetch_espn_score cricket branch + threaded by
+  # _build_live_momentum_decision_context. match_phase resolves to
+  # powerplay / middle / death via bot.regime._match_phase("ipl", ...) when
+  # over_count is present.
+  "over_count": int,                   # 1..20 — cricket over of the current batting innings
+  "innings": int,                      # 1 or 2 — current batting innings (T20 has two)
+  "wickets": int,                      # 0..10 — wickets lost by current batting team
+  "runs_scored": int,                  # runs in the current innings
 }
 ```
 
@@ -730,9 +756,16 @@ scan-time `scan_found.extra` rows for `not_today`, `settled`,
 `bad_event_shape` now use the higher-priced available side as
 `leader_side="scan"` context, and live_momentum executor direct logs
 (`all_gates_passed`, `self_check_failed`) merge the watcher-built
-`decision_context`. This is still forward-only and partial: IPL
-`match_phase` remains `None` until a future session sources `over_count`
-or equivalent rich cricket state.
+`decision_context`.
+
+Session 112 closed the IPL `match_phase` gap that S107 noted: with
+`"ipl": "cricket/8048"` in `ESPN_SPORT_PATHS`, the per-tick ESPN call now
+sources `over_count` and `match_phase` resolves on IPL rows during live
+matches. Pre-S112 IPL rows do NOT carry `over_count` / `innings` /
+`wickets` / `runs_scored` keys; readers must treat absence as null
+(forward-only). Cricket fetches outside IPL match windows still return
+empty, so off-season IPL rows continue to have `match_phase = None` and
+the four cricket fields absent.
 
 ### `bot/state/live_journal.json` live_momentum scan context
 
@@ -1044,7 +1077,7 @@ When a new session ships an Outcome B (design doc) or Outcome C with deferred wo
 
 Items where Outcome B was filed but no data accumulates passively.
 
-- **S107 follow-on — rich live_momentum match-phase state.** Session 110 (Outcome B) confirmed via Phase 0 probing that ESPN cricket data IS reachable at `cricket/8048/scoreboard` (full innings + over_count + wickets schema), but the bot does NOT currently call ESPN for IPL — `ESPN_SPORT_PATHS` lacks the mapping. Enabling it requires a per-tick HTTP fetch the bot has never made, which violates S96/S107 "no new network calls" and the S110 brief's "no ESPN integration, no cricket API." Source: [docs/superpowers/specs/2026-05-12-live-momentum-rich-match-phase-design.md](docs/superpowers/specs/2026-05-12-live-momentum-rich-match-phase-design.md) — full implementation blueprint inside. **Unblocks:** scope a dedicated follow-on session that adds `"ipl": "cricket/8048"` to `ESPN_SPORT_PATHS`, extends `_fetch_espn_score` cricket branch, threads `over_count` through `mom_ctx` (TODO marker at [bot/live_watcher.py:1502-1510](bot/live_watcher.py:1502)), and re-measures cohort N after 14 days. Tennis remains deferred (per-match drill-down + ATP/WTA re-enable). **Why it matters:** S102 IPL profitability (+$53.71 / 13 settled) is currently un-attributable by match phase because both `regime.match_phase` and `extra.match_phase` are null on every IPL row.
+- **(Resolved by S112, 2026-05-11)** — IPL ESPN integration shipped. `"ipl": "cricket/8048"` added to `ESPN_SPORT_PATHS`; `_fetch_espn_score` now extracts `over_count` / `innings` / `wickets` / `runs_scored` from the current-batting linescore for sport=ipl; `_build_live_momentum_decision_context` threads those onto `decisions.jsonl.extra`; `_context_match_phase` delegates to `regime._match_phase("ipl", ...)` so `match_phase` resolves to powerplay / middle / death from over_count. **Constraint relaxation is IPL-specific** — the S96 / S107 "no new network calls" rule still holds for tennis, UFC, NHL match_phase, and future sport additions; see "Network Call Policy" above. Tennis match-level state remains deferred (per-tournament drill-down + ATP/WTA re-enable). 14-day cohort N re-measurement tracked in `bot/state/active_observations.json` (Session 112 entry).
 
 - **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **Unblocks:** build a manual labeled Kalshi↔Polymarket pair corpus (~50-100 pairs) by hand-labeling against historical settled markets, OR locate an emerging public dataset. **Why it matters:** without a validation corpus, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
 
