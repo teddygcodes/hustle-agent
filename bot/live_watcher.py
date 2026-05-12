@@ -72,6 +72,9 @@ _LIVE_MOMENTUM_CONTEXT_FIELDS: tuple[str, ...] = (
     "recent_high", "dip_cents", "dqs", "momentum", "wp_edge", "completion",
     "score_state", "match_phase", "time_remaining", "game_clock", "period",
     "skip_reason", "entry_gate", "source",
+    # Session 112 — IPL cricket fields. Forward-only; populated on IPL rows only,
+    # sourced from ESPN cricket/8048 scoreboard. Absent for non-IPL sports.
+    "over_count", "innings", "wickets", "runs_scored",
 )
 
 
@@ -105,11 +108,22 @@ def _market_volume_24h(leader_market: dict | None, opponent_market: dict | None)
     return sum(values)
 
 
-def _context_match_phase(sport: str | None, elapsed_seconds) -> str | None:
+def _context_match_phase(
+    sport: str | None,
+    elapsed_seconds,
+    over_count: int | None = None,
+) -> str | None:
+    sport_lc = (sport or "").lower()
+    # Session 112 — IPL state path delegates to regime._match_phase so the
+    # powerplay / middle / death bucket boundaries live in one place
+    # (bot/regime.py:236-244). No elapsed-time fallback for IPL (overs don't
+    # map cleanly to wall-clock during stoppages).
+    if sport_lc == "ipl":
+        from bot.regime import _match_phase as _regime_match_phase
+        return _regime_match_phase("ipl", {"over_count": over_count})
     elapsed = _compact_number(elapsed_seconds, ndigits=0)
     if elapsed is None or elapsed < 0:
         return None
-    sport_lc = (sport or "").lower()
     if sport_lc in {"atp", "atp_challenger", "wta", "wta_challenger"}:
         if elapsed < 1800:
             return "early"
@@ -213,11 +227,22 @@ def _build_live_momentum_decision_context(
             score_state = None
             period = None
 
+    over_count = None
+    innings = None
+    wickets = None
+    runs_scored = None
     if espn_data:
         if score_state is None and espn_data.get("home_score") is not None and espn_data.get("away_score") is not None:
             score_state = f"{espn_data.get('away_score')}-{espn_data.get('home_score')}"
         if period is None:
             period = espn_data.get("period")
+        # Session 112 — IPL cricket state. Sourced from _fetch_espn_score's
+        # cricket branch when sport=ipl AND the ESPN response carries an
+        # isBatting+isCurrent linescore. Absent on non-IPL sports.
+        over_count = espn_data.get("over_count")
+        innings = espn_data.get("innings")
+        wickets = espn_data.get("wickets")
+        runs_scored = espn_data.get("runs_scored")
 
     context = {
         "sport": (sport or "").lower() if sport else None,
@@ -237,13 +262,21 @@ def _build_live_momentum_decision_context(
         "wp_edge": wp_edge,
         "completion": completion,
         "score_state": score_state,
-        "match_phase": _context_match_phase(sport, elapsed_seconds),
+        "match_phase": _context_match_phase(sport, elapsed_seconds, over_count=over_count),
         "time_remaining": time_remaining,
         "game_clock": espn_data.get("clock") if espn_data else None,
         "period": period,
         "skip_reason": skip_reason,
         "entry_gate": entry_gate,
         "source": source,
+        # Session 112 — IPL cricket fields. None on non-IPL sports and on IPL
+        # rows where ESPN cricket fetch failed or returned no current-innings
+        # linescore. Compact filter at the next line drops None values, so
+        # these stay absent from non-IPL rows.
+        "over_count": over_count,
+        "innings": innings,
+        "wickets": wickets,
+        "runs_scored": runs_scored,
     }
     compact = {k: v for k, v in context.items() if v is not None}
     missing = [k for k in _LIVE_MOMENTUM_CONTEXT_FIELDS if k not in compact]
@@ -1499,14 +1532,14 @@ class LiveGameWatcher:
             "kalshi_price": yes_ask,
             "dip_cents": dip_cents,
             "dqs": None,  # filled at sites where DQS was actually computed
-            # Session 34: thread elapsed-time so bot.regime.tag can populate
-            # match_phase on tennis/UFC/IPL live_momentum decisions. ESPN/Kalshi
-            # don't expose set/round/over for these sports today, so the
-            # elapsed-time fallback is the practical v1. Forward-compatible:
-            # if a future session sources rich state (set_number/round_num/
-            # over_count), thread those keys here too — regime.tag prefers
-            # state path over time path.
+            # Session 34 + Session 112: elapsed_seconds drives the time-path
+            # match_phase for tennis/UFC; over_count drives the IPL state-path
+            # (sourced from ESPN cricket/8048 via _fetch_espn_score's cricket
+            # branch). regime.tag prefers state over time when both are
+            # present. Set_number / round_num remain unreached today — when a
+            # future session sources them, thread them here similarly.
             "elapsed_seconds": elapsed,
+            "over_count": (espn_data or {}).get("over_count"),
         }
         primary_context = _build_live_momentum_decision_context(
             sport=self.sport,
@@ -2769,6 +2802,44 @@ class LiveGameWatcher:
                     clock_str = sb.get("displayClock", "")
                     detail = sb.get("type", {}).get("detail", "")
 
+                    # Session 112 — cricket-specific extraction. The current-
+                    # batting linescore (isBatting AND isCurrent) uniquely
+                    # identifies the team batting in the active innings. We
+                    # extract over_count / innings / wickets / runs_scored
+                    # from that row. Non-IPL sports skip this entirely so
+                    # their return shape is bit-for-bit unchanged.
+                    cricket_fields: dict = {}
+                    if self.sport == "ipl":
+                        current_ls = None
+                        for ls_list in (home_linescores, away_linescores):
+                            if not isinstance(ls_list, list):
+                                continue
+                            for entry in ls_list:
+                                if not isinstance(entry, dict):
+                                    continue
+                                if entry.get("isBatting") and entry.get("isCurrent"):
+                                    current_ls = entry
+                                    break
+                            if current_ls is not None:
+                                break
+                        if current_ls is not None:
+                            overs_raw = current_ls.get("overs")
+                            if overs_raw is not None:
+                                try:
+                                    overs_int = int(float(overs_raw))
+                                    cricket_fields["over_count"] = max(1, min(20, overs_int + 1))
+                                except (TypeError, ValueError):
+                                    pass
+                            innings_val = current_ls.get("period")
+                            if isinstance(innings_val, int) and not isinstance(innings_val, bool):
+                                cricket_fields["innings"] = innings_val
+                            wickets_val = current_ls.get("wickets")
+                            if isinstance(wickets_val, int) and not isinstance(wickets_val, bool):
+                                cricket_fields["wickets"] = wickets_val
+                            runs_val = current_ls.get("runs")
+                            if isinstance(runs_val, int) and not isinstance(runs_val, bool):
+                                cricket_fields["runs_scored"] = runs_val
+
                     return {
                         "home_score": home_score,
                         "away_score": away_score,
@@ -2782,6 +2853,9 @@ class LiveGameWatcher:
                         "away_linescores": away_linescores,
                         "situation": situation,
                         "last_play": last_play,
+                        # cricket_fields is {} for all non-IPL sports — empty
+                        # spread leaves the dict shape bit-for-bit unchanged.
+                        **cricket_fields,
                     }
             # Loop finished with no match — the query doesn't hit any competitor.
             # Log once per watcher so we can see when team-name/query drift breaks matching.

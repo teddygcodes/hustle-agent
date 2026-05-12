@@ -144,6 +144,374 @@ def test_live_momentum_context_helper_does_not_leak_blobs():
 
 
 # ---------------------------------------------------------------------------
+# Session 112: IPL ESPN cricket integration
+# ---------------------------------------------------------------------------
+#
+# Phase 0 (2026-05-11) re-verified that
+# https://site.api.espn.com/apis/site/v2/sports/cricket/8048/scoreboard returns
+# a full cricket linescore schema. These tests stub urllib.request.urlopen with
+# fixtures shaped per the S110 design doc CSK-vs-LSG sample so we can exercise
+# the parser branch + context plumbing offline.
+#
+# The cricket-specific fields the parser extracts and the context helper
+# threads through are: over_count, innings, wickets, runs_scored.
+# match_phase delegates to bot.regime._match_phase for IPL (powerplay /
+# middle / death) — see regime.py:236-244 for canonical bucket boundaries.
+
+import json as _json112  # avoid shadowing 'json' if imported in other tests
+
+
+def _make_urlopen_response(payload: dict):
+    """Build a context-manager mock urlopen yields a .read() that returns JSON bytes."""
+    resp_mock = MagicMock()
+    resp_mock.read.return_value = _json112.dumps(payload).encode()
+    cm = MagicMock()
+    cm.__enter__.return_value = resp_mock
+    cm.__exit__.return_value = None
+    return cm
+
+
+def _make_ipl_watcher(query: str = "chennai", ticker: str = "KXIPLGAME-26MAY10CSKLSG-CHENNAI"):
+    """Construct a bare LiveGameWatcher with attributes _fetch_espn_score needs."""
+    from bot.live_watcher import LiveGameWatcher
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.query = query
+    w.sport = "ipl"
+    w.ticker = ticker
+    w._espn_unsupported_logged = False
+    w._espn_success_logged = False
+    w._espn_nomatch_logged = False
+    return w
+
+
+def _ipl_event_payload(*, overs: float = 19.2, period: int = 2, runs: int = 208,
+                       wickets: int = 5, home: str = "Chennai Super Kings",
+                       away: str = "Lucknow Super Giants",
+                       innings1_runs_away: int = 203,
+                       innings1_wickets_away: int = 8) -> dict:
+    """Build an ESPN cricket scoreboard payload (one event) shaped per S110 design doc.
+
+    When period==2: models the chase — away team batted innings 1 (complete),
+    home team batting innings 2 (current) with `overs` / `runs` / `wickets`.
+    When period==1: home team batting innings 1 (current) with `overs` / `runs`
+    / `wickets`; away team's innings 2 row is `isCurrent=0` (future innings).
+    The linescore where `isBatting AND isCurrent` always reflects the team
+    currently batting in the active innings, matching ESPN's real schema.
+    """
+    if period == 1:
+        home_linescores = [
+            {"period": 1, "runs": runs, "wickets": wickets, "overs": overs,
+             "isBatting": True, "isCurrent": 1, "description": "in progress"},
+            {"period": 2, "runs": 0, "wickets": 0, "overs": 0.0,
+             "isBatting": False, "isCurrent": 0, "description": "not started"},
+        ]
+        away_linescores = [
+            {"period": 1, "runs": 0, "wickets": 0, "overs": 0.0,
+             "isBatting": False, "isCurrent": 1, "description": "in progress"},
+            {"period": 2, "runs": 0, "wickets": 0, "overs": 0.0,
+             "isBatting": False, "isCurrent": 0, "description": "not started"},
+        ]
+    else:  # period == 2 (chase) — original CSK-LSG shape
+        home_linescores = [
+            {"period": 1, "runs": 0, "wickets": 0, "overs": 20.0,
+             "isBatting": False, "isCurrent": 0, "description": "complete"},
+            {"period": 2, "runs": runs, "wickets": wickets, "overs": overs,
+             "isBatting": True, "isCurrent": 1, "description": "in progress"},
+        ]
+        away_linescores = [
+            {"period": 1, "runs": innings1_runs_away,
+             "wickets": innings1_wickets_away, "overs": 20.0,
+             "isBatting": True, "isCurrent": 0, "description": "complete"},
+            {"period": 2, "runs": 0, "wickets": 0, "overs": overs,
+             "isBatting": False, "isCurrent": 1, "description": "in progress"},
+        ]
+    return {
+        "events": [{
+            "name": f"{home} v {away}",
+            "status": {"type": {"state": "in", "detail": "In Progress"}},
+            "competitions": [{
+                "status": {"period": period, "displayClock": "0'",
+                           "type": {"detail": "In Progress"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": home},
+                     "score": f"{runs}/{wickets}", "linescores": home_linescores},
+                    {"homeAway": "away", "team": {"displayName": away},
+                     "score": f"{innings1_runs_away}/{innings1_wickets_away}",
+                     "linescores": away_linescores},
+                ],
+            }],
+        }],
+    }
+
+
+def test_fetch_espn_score_cricket_parses_current_linescore():
+    """S112: cricket branch extracts over_count, innings, wickets, runs_scored."""
+    w = _make_ipl_watcher()
+    payload = _ipl_event_payload(overs=19.2, period=2, runs=208, wickets=5)
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(payload)):
+        result = w._fetch_espn_score()
+
+    # Cricket fields populated from the linescore where isBatting AND isCurrent
+    # (home / innings 2 in our fixture). overs=19.2 → int(19.2)+1=20, clamped [1,20].
+    assert result.get("over_count") == 20
+    assert result.get("innings") == 2
+    assert result.get("wickets") == 5
+    assert result.get("runs_scored") == 208
+    # Existing fields still present (regression).
+    assert result.get("home_name") == "chennai super kings"
+    assert result.get("away_name") == "lucknow super giants"
+    assert result.get("period") == 2
+
+
+def test_fetch_espn_score_cricket_powerplay_over_count_clamp():
+    """S112: over_count clamps to 1 when overs=0.0 (very start of an innings)."""
+    w = _make_ipl_watcher()
+    payload = _ipl_event_payload(overs=0.0, period=1, runs=0, wickets=0)
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(payload)):
+        result = w._fetch_espn_score()
+    # int(0.0)+1 = 1 → clamps to 1.
+    assert result.get("over_count") == 1
+
+
+def test_fetch_espn_score_cricket_missing_linescores_keeps_basics():
+    """S112: empty linescores arrays → cricket fields absent, no crash, basics present."""
+    w = _make_ipl_watcher()
+    payload = {
+        "events": [{
+            "name": "Chennai Super Kings v Lucknow Super Giants",
+            "competitions": [{
+                "status": {"period": 0, "displayClock": "0'",
+                           "type": {"detail": "Scheduled"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "Chennai Super Kings"},
+                     "score": "0", "linescores": []},
+                    {"homeAway": "away", "team": {"displayName": "Lucknow Super Giants"},
+                     "score": "0", "linescores": []},
+                ],
+            }],
+        }],
+    }
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(payload)):
+        result = w._fetch_espn_score()
+    # Match found (query="chennai" matches "chennai super kings") but no current linescore.
+    assert "over_count" not in result
+    assert "innings" not in result
+    assert "wickets" not in result
+    assert "runs_scored" not in result
+    # Basics still present (regression).
+    assert result.get("home_name") == "chennai super kings"
+    assert result.get("period") == 0
+
+
+def test_fetch_espn_score_cricket_no_current_innings_returns_basics():
+    """S112: response between innings (no isBatting+isCurrent line) → cricket fields absent."""
+    w = _make_ipl_watcher()
+    payload = _ipl_event_payload()
+    # Flip isCurrent off on every linescore to simulate "between innings".
+    for c in payload["events"][0]["competitions"][0]["competitors"]:
+        for ls in c["linescores"]:
+            ls["isCurrent"] = 0
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(payload)):
+        result = w._fetch_espn_score()
+    assert "over_count" not in result
+    # But existing fields stay populated.
+    assert result.get("home_name") == "chennai super kings"
+
+
+def test_fetch_espn_score_cricket_partial_linescore_extracts_what_it_can():
+    """S112 no-fabrication: partial cricket linescore extracts only the fields present."""
+    w = _make_ipl_watcher()
+    payload = _ipl_event_payload(overs=8.3, period=1, runs=64, wickets=2)
+    # period=1 → home's innings-1 linescore (index 0) is the active row.
+    # Drop wickets + runs from it to simulate partial data.
+    current_ls = payload["events"][0]["competitions"][0]["competitors"][0]["linescores"][0]
+    assert current_ls.get("isBatting") and current_ls.get("isCurrent")  # fixture sanity
+    current_ls.pop("wickets")
+    current_ls.pop("runs")
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(payload)):
+        result = w._fetch_espn_score()
+    # over_count + innings present; wickets + runs_scored absent (not None — absent).
+    assert result.get("over_count") == 9      # int(8.3)+1 = 9
+    assert result.get("innings") == 1
+    assert "wickets" not in result
+    assert "runs_scored" not in result
+
+
+def test_fetch_espn_score_unsupported_sport_returns_empty():
+    """Regression: sport NOT in ESPN_SPORT_PATHS (post-S112) still returns {}."""
+    from bot.live_watcher import LiveGameWatcher
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.query = "verstappen"
+    w.sport = "f1"   # not in ESPN_SPORT_PATHS even post-S112
+    w.ticker = "KXF1RACE-26MAY10MONACO-VER"
+    w._espn_unsupported_logged = False
+    result = w._fetch_espn_score()
+    assert result == {}
+    assert w._espn_unsupported_logged is True
+
+
+def test_fetch_espn_score_nba_unchanged_shape():
+    """Spillover regression-lock: NBA parse must NOT leak cricket fields into NBA rows."""
+    from bot.live_watcher import LiveGameWatcher
+    w = LiveGameWatcher.__new__(LiveGameWatcher)
+    w.query = "lakers"
+    w.sport = "nba"
+    w.ticker = "KXNBAGAME-26MAY10LALDEN-LAL"
+    w._espn_success_logged = False
+    w._espn_nomatch_logged = False
+    nba_payload = {
+        "events": [{
+            "name": "Los Angeles Lakers @ Denver Nuggets",
+            "competitions": [{
+                "status": {"period": 3, "displayClock": "5:32",
+                           "type": {"detail": "In Progress"}},
+                "competitors": [
+                    {"homeAway": "home", "team": {"displayName": "Denver Nuggets"},
+                     "score": 79, "linescores": [{"value": 28}, {"value": 24}, {"value": 27}]},
+                    {"homeAway": "away", "team": {"displayName": "Los Angeles Lakers"},
+                     "score": 87, "linescores": [{"value": 30}, {"value": 29}, {"value": 28}]},
+                ],
+                "situation": {"lastPlay": {"text": "James 3PT made"}},
+            }],
+        }],
+    }
+    with patch("bot.live_watcher.urllib.request.urlopen",
+               return_value=_make_urlopen_response(nba_payload)):
+        result = w._fetch_espn_score()
+    # Existing NBA shape (regression).
+    assert result.get("period_label") == "Q3"
+    assert result.get("home_score") == 79
+    assert result.get("away_score") == 87
+    assert result.get("clock") == "5:32"
+    # No cricket spillover — these MUST NOT be present on the NBA path.
+    assert "over_count" not in result
+    assert "innings" not in result
+    assert "wickets" not in result
+    assert "runs_scored" not in result
+
+
+# --- Context-helper tests (S112 cricket fields + match_phase delegation) ---
+
+def test_live_momentum_context_helper_ipl_with_cricket_populates_match_phase():
+    """S112: ipl + over_count → match_phase=powerplay, cricket fields populated."""
+    from bot.live_watcher import _build_live_momentum_decision_context
+    ctx = _build_live_momentum_decision_context(
+        sport="ipl",
+        ticker="KXIPLGAME-26MAY10CSKLSG-CHENNAI",
+        leader_market={"ticker": "KXIPLGAME-26MAY10CSKLSG-CHENNAI",
+                       "yes_ask": 62, "yes_bid": 60, "volume_24h": 1500},
+        leader_side="primary",
+        espn_data={
+            "home_score": 24, "away_score": 0,
+            "period": 1, "clock": "3.0 ov",
+            "over_count": 3, "innings": 1, "wickets": 1, "runs_scored": 24,
+        },
+        source="watcher",
+    )
+    assert ctx["over_count"] == 3
+    assert ctx["innings"] == 1
+    assert ctx["wickets"] == 1
+    assert ctx["runs_scored"] == 24
+    assert ctx["match_phase"] == "powerplay"
+    # The new fields are NOT listed as missing.
+    missing = ctx["missing_context_fields"]
+    assert "over_count" not in missing
+    assert "match_phase" not in missing
+
+
+def test_live_momentum_context_helper_ipl_middle_phase():
+    from bot.live_watcher import _build_live_momentum_decision_context
+    ctx = _build_live_momentum_decision_context(
+        sport="ipl",
+        ticker="KXIPLGAME-X",
+        espn_data={"over_count": 10, "innings": 1, "wickets": 3, "runs_scored": 78},
+        source="watcher",
+    )
+    assert ctx["match_phase"] == "middle"
+
+
+def test_live_momentum_context_helper_ipl_death_phase():
+    from bot.live_watcher import _build_live_momentum_decision_context
+    ctx = _build_live_momentum_decision_context(
+        sport="ipl",
+        ticker="KXIPLGAME-X",
+        espn_data={"over_count": 18, "innings": 2, "wickets": 4, "runs_scored": 178},
+        source="watcher",
+    )
+    assert ctx["match_phase"] == "death"
+
+
+def test_live_momentum_context_helper_ipl_without_cricket_data_annotates_missing():
+    """S112 no-fabrication: ipl + no espn_data → cricket fields in missing list, match_phase=None."""
+    from bot.live_watcher import _build_live_momentum_decision_context
+    ctx = _build_live_momentum_decision_context(
+        sport="ipl",
+        ticker="KXIPLGAME-26MAY10CSKLSG-CHENNAI",
+        source="watcher",
+    )
+    missing = ctx["missing_context_fields"]
+    assert "over_count" in missing
+    assert "innings" in missing
+    assert "wickets" in missing
+    assert "runs_scored" in missing
+    assert "match_phase" in missing  # delegated to regime, returns None on missing over_count
+    # Cricket fields should be absent from the compact dict (not present as None).
+    assert "over_count" not in ctx
+    assert "innings" not in ctx
+
+
+def test_live_momentum_context_helper_nba_no_cricket_spillover():
+    """Spillover regression: sport=nba with NBA espn_data → cricket fields stay absent."""
+    from bot.live_watcher import _build_live_momentum_decision_context
+    ctx = _build_live_momentum_decision_context(
+        sport="nba",
+        ticker="KXNBAGAME-26MAY10LALDEN-LAL",
+        leader_market={"ticker": "KXNBAGAME-26MAY10LALDEN-LAL",
+                       "yes_ask": 65, "yes_bid": 63},
+        espn_data={"home_score": 79, "away_score": 87, "period": 3, "clock": "5:32"},
+        source="watcher",
+    )
+    # Cricket fields are not populated for NBA — absent from compact ctx.
+    assert "over_count" not in ctx
+    assert "innings" not in ctx
+    assert "wickets" not in ctx
+    assert "runs_scored" not in ctx
+    # NBA-relevant fields still populate.
+    assert ctx.get("period") == 3
+    assert ctx.get("game_clock") == "5:32"
+
+
+def test_context_match_phase_ipl_via_regime_delegation():
+    """S112: _context_match_phase delegates to regime._match_phase for IPL."""
+    from bot.live_watcher import _context_match_phase
+    assert _context_match_phase("ipl", elapsed_seconds=None, over_count=5) == "powerplay"
+    assert _context_match_phase("ipl", elapsed_seconds=None, over_count=12) == "middle"
+    assert _context_match_phase("ipl", elapsed_seconds=None, over_count=19) == "death"
+    # Out-of-range over_count → None.
+    assert _context_match_phase("ipl", elapsed_seconds=None, over_count=0) is None
+    assert _context_match_phase("ipl", elapsed_seconds=None, over_count=21) is None
+    # Missing over_count + ipl → None (no elapsed-time fallback for IPL).
+    assert _context_match_phase("ipl", elapsed_seconds=1800, over_count=None) is None
+
+
+def test_context_match_phase_non_ipl_paths_unchanged_by_over_count_kwarg():
+    """S112 regression: tennis/UFC time-path unaffected by over_count kwarg."""
+    from bot.live_watcher import _context_match_phase
+    # ATP early window — over_count param accepted but ignored.
+    assert _context_match_phase("atp", elapsed_seconds=600, over_count=99) == "early"
+    assert _context_match_phase("atp", elapsed_seconds=600) == "early"
+    # UFC round_2 window.
+    assert _context_match_phase("ufc", elapsed_seconds=420, over_count=12) == "round_2"
+    # NBA still returns None (no match_phase support).
+    assert _context_match_phase("nba", elapsed_seconds=900, over_count=5) is None
+
+
+# ---------------------------------------------------------------------------
 # Task 2: Notifier methods
 # ---------------------------------------------------------------------------
 

@@ -768,6 +768,14 @@ ESPN_SPORT_PATHS = {
     "nhl": "hockey/nhl",
     "nfl": "football/nfl",
     "ncaab": "basketball/mens-college-basketball",
+    # Session 112 (2026-05-11): IPL cricket scoreboard. Numeric league ID 8048
+    # is required — slug "cricket/indian-premier-league" returns HTTP 404.
+    # Adds a per-tick HTTP fetch the bot has never made before for sport=ipl;
+    # ship under explicit operator relaxation of the S96/S107 "no new network
+    # calls" rule, scoped to IPL only. Future sport additions (tennis match-
+    # level, UFC, NHL match_phase) still require their own approved exception.
+    # See CLAUDE.md "Network Call Policy" and the S112 ☑ block.
+    "ipl": "cricket/8048",
 }
 
 # ---------------------------------------------------------------------------
