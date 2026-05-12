@@ -706,8 +706,34 @@
       {
         "name": "s123_holdout_2_needed",
         "expectation": "Fresh holdout should target same-participant/different-game-date sports patterns before treating MATCH_HIGH_CONFIDENCE as live-arb-validated.",
-        "current_value": "pending; v3 fixes known 120-label FP but remains offline-only and not live-arb-validated",
-        "last_updated": "2026-05-12T19:20:09Z"
+        "current_value": "satisfied by S123 \u2014 see Session 123 entry. Holdout-2 (40 fresh codex labels, seed=123) confirmed 0 FPs on combined 160-pair corpus and 0 FPs on the 40-pair holdout-2 subset. v3 is now operator-trusted across 3 independent samples; live-arb-ready pending operator final spot-check.",
+        "last_updated": "2026-05-12T20:30:00Z"
+      }
+    ]
+  },
+  {
+    "session": 123,
+    "shipped_at": "2026-05-12T20:30:00Z",
+    "description": "Holdout-2 validation for matcher v3. Stratified-sampled 40 fresh codex labels (seed=123) from the 4,880 unlabeled rows, disjoint from the 120 prior codex labels (S118 + S119 design + S121 holdout-1). Outcome A: 0 false positives on the combined 160-pair corpus AND 0 false positives on the 40-pair holdout-2 subset. The 8 boundary HIGH_CONFIDENCE picks (including a Rockies-Phillies analog on 2026-05-10) all hold up as true MATCHes \u2014 v3's three gates (bet-type, time-granularity, game-instance) generalize beyond the design corpus. Matcher v3 is live-arb-ready pending operator final spot-check. No bot restart; matcher remains offline.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "matcher_v3_codex_validation_160_corpus",
+        "expectation": "S123 regression gate remains at 0 false positives and 0 false negatives on the combined 160-Codex-labeled corpus (80 S118-S120 design + 40 S121 holdout-1 + 40 S123 holdout-2). Re-run: python3 tools/validate_cross_platform_matcher.py --labeler codex --json",
+        "current_value": "labeled=160; false_positives=0; false_negatives=0; accuracy=92.5%; exact_accuracy=83.1%; confusion={MATCH->match_high_confidence: 42, MATCH->match_needs_review: 7, NEEDS_REVIEW->match_needs_review: 14, NEEDS_REVIEW->no_match: 5, NO_MATCH->match_needs_review: 15, NO_MATCH->no_match: 77}",
+        "last_updated": "2026-05-12T20:30:00Z"
+      },
+      {
+        "name": "matcher_v3_holdout_2_validation",
+        "expectation": "Holdout-2 subset (labeling_session=S123) remains at 0 false positives and 0 false negatives. HIGH_CONFIDENCE bucket on the 15 holdout-2 picks remains at 100% exact accuracy (the load-bearing live-arb signal). Re-run: python3 tools/validate_cross_platform_matcher.py --labeler codex --labeling-session S123 --json",
+        "current_value": "labeled=40; false_positives=0; false_negatives=0; accuracy=77.5%; exact_accuracy=52.5%; per_bucket HIGH_CONFIDENCE labeled=15 fps=0 exact_accuracy=100%; per_bucket NEEDS_REVIEW labeled=15 fps=0; per_bucket NO_MATCH labeled=10 fps=0",
+        "last_updated": "2026-05-12T20:30:00Z"
+      },
+      {
+        "name": "matcher_v3_boundary_high_confidence_clean",
+        "expectation": "The 8 lowest-Jaccard HIGH_CONFIDENCE picks (the most informative subset for surfacing residual FPs, including back-to-back same-team-different-date patterns) remain at 0 FPs and 100% exact accuracy. This is the cleanest generalization evidence the holdout can produce. Re-run via per_stratum in the holdout-2 harness output.",
+        "current_value": "boundary_labeled=8; false_positives=0; false_negatives=0; exact_accuracy=100%; interior_labeled=7; interior_fps=0; interior_exact_accuracy=100%",
+        "last_updated": "2026-05-12T20:30:00Z"
       }
     ]
   }
