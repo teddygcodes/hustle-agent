@@ -6331,3 +6331,40 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 - No bot restart; PID 37978 intentionally untouched.
 
 **Open loop update.** CLAUDE.md S105 now records: matcher v2 shipped in S120 with 0 false positives on the 80-label corpus; operator final spot-check via Claude review remains pending before live-arb trust.
+
+### ☑ Session 121 — Holdout validation finds 1 v2 false positive (2026-05-12, Outcome B — tuning required)
+
+**Trigger.** S120 eliminated the 24 S119 false positives on the 80-pair design corpus, but that corpus was no longer independent evidence. S121 tests whether matcher v2 generalizes on unseen rows by sampling fresh pairs from `bot/state/cross_platform_labeling_queue.jsonl`, explicitly excluding the 80 rows labeled in S118/S119.
+
+**Decision: Outcome B — partial generalization, residual high-confidence FP.** Matcher v2 is safer than v1, but is **NOT live-arb-validated**. One false positive surfaced in the fresh holdout, in a new failure mode: same teams in a back-to-back MLB series where close timestamps fall inside the ±24h date gate but the game dates differ.
+
+**Implementation.**
+- New [tools/sample_matcher_holdout_for_codex_s121.py](tools/sample_matcher_holdout_for_codex_s121.py) stamps all 5,000 queue rows with current v2 `matcher_classification`, `matcher_jaccard`, and `matcher_reason`, then samples 40 unlabeled rows with seed 121: 8 high-confidence boundary, 7 high-confidence interior, 15 needs-review random, and 10 no-match random.
+- New [tools/apply_codex_labels_matcher_holdout_s121.py](tools/apply_codex_labels_matcher_holdout_s121.py) applies the 40 raw labels, refuses to overwrite existing labels, enforces `DIVERGED + MATCH -> NO_MATCH`, and requires high-confidence reasoning to mention bet-type and time granularity.
+- [tools/validate_cross_platform_matcher.py](tools/validate_cross_platform_matcher.py) now supports `--labeling-session S121` plus JSON `per_bucket` and `per_stratum` metrics.
+
+**Sampling and labels.**
+- Queue integrity after stamping: 5,000 rows total; `MATCH_HIGH_CONFIDENCE=1,590`, `MATCH_NEEDS_REVIEW=1,558`, `NO_MATCH=1,852`.
+- Labeled rows: 120 Codex total; 40 S121 holdout rows; 4,880 remain `operator_label=null`.
+- S121 labels: `MATCH=15`, `NO_MATCH=12`, `NEEDS_REVIEW=13`.
+- Outcome cross-check: `BOTH_YES=14`, `BOTH_NO=20`, `DIVERGED=6`; hard-rule override fired 0 times.
+
+**Validation result.**
+- Holdout only (`python3 tools/validate_cross_platform_matcher.py --labeler codex --labeling-session S121 --json`): `accuracy=95.0%`, `exact_accuracy=92.5%`, `false_positives=1`, `false_negatives=0`; confusion `{MATCH->match_high_confidence: 14, MATCH->match_needs_review: 1, NEEDS_REVIEW->match_needs_review: 13, NO_MATCH->match_high_confidence: 1, NO_MATCH->match_needs_review: 1, NO_MATCH->no_match: 10}`.
+- Combined 120-label corpus (`--labeler codex`): `accuracy=96.7%`, `exact_accuracy=91.7%`, `false_positives=1`, `false_negatives=0`; confusion `{MATCH->match_high_confidence: 28, MATCH->match_needs_review: 1, NEEDS_REVIEW->match_high_confidence: 2, NEEDS_REVIEW->match_needs_review: 13, NO_MATCH->match_high_confidence: 1, NO_MATCH->match_needs_review: 6, NO_MATCH->no_match: 69}`.
+- Per-stratum holdout: high-confidence boundary `1/8` FP, high-confidence interior `0/7` FP, needs-review random `0/15` FP, no-match random `0/10` FP.
+
+**Failure pattern.** The sole FP is `KXMLBGAME-26MAY091805COLPHI-COL` vs Polymarket `2154818`: Kalshi is Colorado vs Philadelphia for the May 9 game, while Polymarket URL/close time indicate the May 10 game. Both resolved no and both are full-game winner markets, so the S120 outcome, bet-type, and time-granularity gates all pass; the missing criterion is same-teams/different-game-date disambiguation inside repeated sports series. Queue S122 for targeted tuning; do not wire live arb before this is addressed and revalidated.
+
+**Tests and verification.**
+- Focused tests: `python3 -m pytest tests/test_validate_cross_platform_matcher.py tests/test_cross_platform_matcher.py -q` -> **39/0**.
+- Full pytest: `python3 -m pytest tests/ --tb=short -q` -> **1746/0**.
+- Regression guard now locks S121 evidence: 120 Codex labels, combined FP=1/FN=0, holdout FP=1/FN=0, and the boundary-vs-interior breakdown.
+- Force-added state artifacts: `bot/state/cross_platform_labeling_queue.jsonl`, `bot/state/codex_sampling_matcher_holdout_s121.jsonl`, `bot/state/codex_labels_matcher_holdout_s121_raw.json`, and `bot/state/active_observations.json`.
+
+**What did NOT change.**
+- No matcher v2 tuning in this session.
+- No scanner / executor / strategy / Polymarket trading-client wiring.
+- No bot restart; PID 37978 intentionally untouched.
+
+**Open loop update.** CLAUDE.md S105 now records: matcher v2 has residual FPs on holdout; further tuning required in S122 before any live-arb validation claim.

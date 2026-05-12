@@ -652,5 +652,37 @@
         "last_updated": "2026-05-12T18:17:31Z"
       }
     ]
+  },
+  {
+    "session": 121,
+    "shipped_at": "2026-05-12T19:45:00Z",
+    "description": "Holdout validation for matcher v2. Sampled 40 fresh rows excluding the 80 S118/S119 design labels after stamping all 5,000 queue rows with current matcher_classification. Outcome B: one high-confidence false positive surfaced on unseen data, so matcher v2 is not live-arb-validated and S122 tuning is required.",
+    "observation_window_days": 0,
+    "metrics": [
+      {
+        "name": "s121_holdout_sample_shape",
+        "expectation": "40 fresh rows excluding all existing Codex labels: 15 MATCH_HIGH_CONFIDENCE (8 boundary + 7 interior), 15 MATCH_NEEDS_REVIEW, 10 NO_MATCH.",
+        "current_value": "40 fresh labels applied; 120 total Codex labels; 4,880 queue rows remain operator_label=null",
+        "last_updated": "2026-05-12T19:45:00Z"
+      },
+      {
+        "name": "s121_holdout_validation",
+        "expectation": "Generalization claim required 0 false positives on holdout and combined corpus. Outcome B if 1-3 new-pattern FPs surface.",
+        "current_value": "holdout accuracy=95.0%; exact_accuracy=92.5%; false_positives=1; false_negatives=0; combined 120-label corpus false_positives=1; false_negatives=0",
+        "last_updated": "2026-05-12T19:45:00Z"
+      },
+      {
+        "name": "s121_failure_pattern",
+        "expectation": "Any holdout FP must be documented as new vs recurring. Same S119 bet-type/time-granularity failure would imply Outcome C.",
+        "current_value": "new pattern: same teams in back-to-back MLB series. Kalshi May 9 Rockies-Phillies game matched Polymarket May 10 Rockies-Phillies game because close times were within the +/-24h gate; bet-type and outcome both converged.",
+        "last_updated": "2026-05-12T19:45:00Z"
+      },
+      {
+        "name": "s122_tuning_required",
+        "expectation": "Before live-arb validation, add a targeted criterion for same-teams/different-game-date boundary cases and re-run the 120-label corpus plus a fresh holdout if materially changed.",
+        "current_value": "queued; matcher remains offline-only and not live-arb-validated",
+        "last_updated": "2026-05-12T19:45:00Z"
+      }
+    ]
   }
 ]
