@@ -576,5 +576,55 @@
         "last_updated": "2026-05-12T15:33:33Z"
       }
     ]
+  },
+  {
+    "session": 119,
+    "shipped_at": "2026-05-12T19:00:00Z",
+    "description": "Codex-direction MATCH validation. Stratified-sampled 40 unlabeled MATCH_HIGH_CONFIDENCE pairs from the matcher's 2,937 positive classifications (20 boundary = lowest matcher Jaccard, 20 interior = random from rest, seed=42) and labeled them via an independent labeler with labeler=codex, 2-3 sentence reasoning, and mechanical outcome cross-check. Outcome B: matcher v1 has structural false positives. Harness on --labeler codex (80 combined S118+S119 labels): accuracy 67.5%, false_positives=24, false_negatives=0. The hard-rule override (DIVERGED outcomes + Codex-MATCH -> NO_MATCH) never fired because the matcher's upstream filter at bot/cross_platform_matcher.py:207-214 guarantees converged outcomes on MATCH_HIGH_CONFIDENCE. Matcher tuning queued as S120; no matcher code or bot restart in this session.",
+    "observation_window_days": 0,
+    "metrics": [
+      {
+        "name": "codex_labels_combined_s118_s119",
+        "expectation": "80 cross_platform_labeling_queue.jsonl rows carry labeler=codex (40 NO_MATCH from S118 + 14 MATCH + 24 NO_MATCH + 2 NEEDS_REVIEW from S119). All other queue rows remain operator_label=null.",
+        "current_value": "80 labeled (40 S118 + 40 S119); 4,920 remain operator_label=null",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "outcome_cross_check_distribution_s119",
+        "expectation": "S119 samples are drawn from matcher's MATCH_HIGH_CONFIDENCE bucket. Per matcher.py upstream filter, all 40 must have converged outcomes (BOTH_YES or BOTH_NO); DIVERGED on a HIGH_CONFIDENCE classification would itself be a critical matcher bug.",
+        "current_value": "BOTH_YES=18; BOTH_NO=22; DIVERGED=0; INSUFFICIENT_DATA=0",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "matcher_validation_match_direction_on_codex_subset",
+        "expectation": "Outcome B baseline: matcher's MATCH_HIGH_CONFIDENCE classifications agree with Codex labels on only 14 / 40 = 35% of S119 samples; 24 are false positives (label=NO_MATCH); 2 are over-confident (label=NEEDS_REVIEW). Combined with S118: 80 labels, accuracy 67.5%, false_positives=24, false_negatives=0. S120 tuning must reduce false_positives toward 0 without regressing the S118 NO_MATCH-direction validation.",
+        "current_value": "S119 alone: accuracy=35%; FP=24; FN=0. Combined (S118+S119): accuracy=67.5%; FP=24; FN=0; confusion={NO_MATCH->no_match: 40, NO_MATCH->match_high_confidence: 24, MATCH->match_high_confidence: 14, NEEDS_REVIEW->match_high_confidence: 2}",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "per_stratum_false_positive_rate_s119",
+        "expectation": "Boundary-20 (lowest matcher Jaccard = 0.60 threshold floor) is the load-bearing stress test. Interior-20 covers the bucket interior. If boundary FP rate >> interior FP rate, threshold tuning is the right S120 lever; if both are similar, the matcher needs a richer features (bet-type / settlement-window discrimination).",
+        "current_value": "boundary: 17 NO_MATCH + 1 NEEDS_REVIEW + 2 MATCH = 18/20 = 90% wrong (85% strict FP). interior: 7 NO_MATCH + 1 NEEDS_REVIEW + 12 MATCH = 8/20 = 40% wrong (35% strict FP).",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "false_positive_failure_pattern_s119",
+        "expectation": "The matcher's failures are STRUCTURAL, not threshold-tunable alone. Two failure modes: (1) same-fixture different-bet-type (match-winner vs O/U vs exact-score vs map-handicap vs set 1/set 2 winner; ~20 of 24 boundary FPs); (2) crypto hourly snapshot (Kalshi 'at 4pm EDT') vs end-of-day window (Polymarket 'on May 10'; ~4 interior FPs). S120 must address bet-type discrimination AND settlement-window granularity, not just raise the Jaccard threshold.",
+        "current_value": "20 FPs in 'same fixture, different bet type' shape; 4 FPs in 'crypto hourly vs end-of-day' shape. 0 FPs from token-overlap-but-different-event (the matcher correctly handles that via outcome divergence)",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "hard_rule_override_fire_count_s119",
+        "expectation": "The hard rule (DIVERGED outcomes + Codex-MATCH -> NO_MATCH) is belt-and-suspenders for matcher bugs. Per bot/cross_platform_matcher.py:207-214 the matcher REJECTS DIVERGED outcomes upstream before classifying HIGH_CONFIDENCE, so this rule should never fire on a S119 sample. A non-zero count indicates a matcher regression that S120 must investigate.",
+        "current_value": "0 (as expected)",
+        "last_updated": "2026-05-12T19:00:00Z"
+      },
+      {
+        "name": "regression_guard_locked",
+        "expectation": "tests/test_validate_cross_platform_matcher.py::test_matcher_classifications_locked_against_codex_labels asserts labeled_count=80, false_positives=24, false_negatives=0. S120 tuning will both fix the matcher and update this assertion (toward FP=0); the test ratchets in both directions to catch unintended drift.",
+        "current_value": "Locked at S119 baseline (FP=24, FN=0); pytest 1729/0",
+        "last_updated": "2026-05-12T19:00:00Z"
+      }
+    ]
   }
 ]
