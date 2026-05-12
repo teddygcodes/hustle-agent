@@ -428,5 +428,37 @@
         "last_updated": "2026-05-12T02:30:00+00:00"
       }
     ]
+  },
+  {
+    "session": 112,
+    "shipped_at": "2026-05-12T02:38:20+00:00",
+    "description": "Ship IPL ESPN integration (S107 follow-on resolved). Outcome A \u2014 operator-approved relaxation of the S96/S107 'no new network calls' rule scoped to IPL only. Added \"ipl\": \"cricket/8048\" to ESPN_SPORT_PATHS; extended _fetch_espn_score with an IPL-only extraction block for over_count / innings / wickets / runs_scored from the current-batting linescore (isBatting AND isCurrent); threaded those fields through _build_live_momentum_decision_context onto decisions.jsonl.extra; _context_match_phase now delegates to bot.regime._match_phase for IPL so the canonical powerplay / middle / death buckets stay single-sourced at regime.py:236-244. Spillover regression-locked at parser-layer (NBA fixture) and context-layer (NBA helper). 14 new tests; pytest 1654/0. CLAUDE.md now carries a Network Call Policy section that explicitly bounds this relaxation to IPL \u2014 tennis, UFC, NHL match_phase, and future sport additions still require their own approved exception.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "ESPN cricket call success rate during live IPL windows",
+        "expectation": "ESPN fetches for sport=ipl return non-empty result on >=90% of attempts during a live IPL match window. Tail bot.log for the 'ESPN fetch OK (ticker=KXIPLGAME-... sport=ipl)' line; absence of that line during a live IPL window for >2 consecutive ticks is the failure signature. If <90% over a match window, investigate ESPN endpoint stability (likely league ID rotation \u2014 Phase 0 re-probe required before any fix).",
+        "current_value": "TBD (no live IPL window post-restart at ship time)",
+        "last_updated": "2026-05-12T02:38:20+00:00"
+      },
+      {
+        "name": "IPL decisions.jsonl rows carrying over_count during live IPL windows",
+        "expectation": ">=80% of IPL rows during live IPL match windows carry an integer over_count in extra. Spot-check via: `tail -200 bot/state/decisions.jsonl | python3 -c \"import sys, json; [print(r['ticker'], r['extra'].get('over_count'), r['extra'].get('match_phase')) for line in sys.stdin if (r := json.loads(line)).get('ticker','').startswith('KXIPLGAME')]\"`. If <80%, investigate parser team-name matching (Kalshi ticker suffix vs ESPN displayName). Off-season IPL rows are expected to have over_count absent and that is not a failure.",
+        "current_value": "TBD (forward-only; no IPL rows with over_count pre-S112)",
+        "last_updated": "2026-05-12T02:38:20+00:00"
+      },
+      {
+        "name": "Cricket-field spillover onto non-IPL decisions",
+        "expectation": "Zero non-IPL rows carry over_count / innings / wickets / runs_scored in extra. Spot-check via: `tail -500 bot/state/decisions.jsonl | python3 -c \"import sys, json; [print('SPILLOVER:', r['ticker']) for line in sys.stdin if (r := json.loads(line)) and not r.get('ticker','').startswith('KXIPLGAME') and 'over_count' in r.get('extra', {})]\"`. Any non-zero output means the cricket branch leaked into another sport's path \u2014 revert immediately and investigate. Parser-layer test_fetch_espn_score_nba_unchanged_shape + context-layer test_live_momentum_context_helper_nba_no_cricket_spillover regression-lock this at unit-test time.",
+        "current_value": "0 (regression-locked)",
+        "last_updated": "2026-05-12T02:38:20+00:00"
+      },
+      {
+        "name": "14d cohort re-measurement (fires 2026-05-25 OR N>=20 IPL rows with over_count populated)",
+        "expectation": "At 2026-05-25 OR when >=20 IPL decisions.jsonl rows have carried over_count, re-measure (a) ESPN cricket call success rate during the observed live IPL windows; (b) match_phase distribution across powerplay / middle / death; (c) whether IPL cohort-N \u00d7 match_phase \u00d7 leader_strength buckets are now thick enough for the S102 IPL-profitability analysis to slice by phase. If (a) <90% or (c) every match_phase bucket remains N<5, surface as a follow-on operational-hygiene candidate.",
+        "current_value": "not yet fired (S112 ship time)",
+        "last_updated": "2026-05-12T02:38:20+00:00"
+      }
+    ]
   }
 ]
