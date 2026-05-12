@@ -312,5 +312,31 @@
         "last_updated": "2026-05-12T00:02:00+00:00"
       }
     ]
+  },
+  {
+    "session": 108,
+    "shipped_at": "2026-05-12T00:27:00+00:00",
+    "description": "reentry_blocked shadow-row sizing substrate. Forward reentry_blocked shadow rows now call the shared live_momentum sizer at the block point and persist would_contracts / would_notional when computable; unavailable sizing is explicitly annotated instead of silent nulls. No re-entry threshold, entry logic, exit logic, disabled sport, vig_stack, or historical backfill changes.",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "reentry_blocked shadow rows with sizing_status=available",
+        "expectation": "forward rows should be available whenever the live_momentum sizer returns positive contracts from block-point inputs; unavailable rows must include explicit missing_sizing_fields / sizing_unavailable_reason.",
+        "current_value": "pre-ship historical rows remain unavailable; verify on next post-restart reentry_blocked event",
+        "last_updated": "2026-05-12T00:27:00+00:00"
+      },
+      {
+        "name": "settled-and-sized reentry_blocked rows for S90 threshold analysis",
+        "expectation": "when N >= 10 rows have sizing_status=available and settled market_result, compute aggregate would-have-traded P&L to evaluate S90 N=1 vs N=2.",
+        "current_value": 0,
+        "last_updated": "2026-05-12T00:27:00+00:00"
+      },
+      {
+        "name": "reentry_blocked unavailable rows without explicit reason",
+        "expectation": "0; any post-Session-108 unavailable row lacking sizing_unavailable_reason is a regression toward the S103 fabrication trap.",
+        "current_value": 0,
+        "last_updated": "2026-05-12T00:27:00+00:00"
+      }
+    ]
   }
 ]
