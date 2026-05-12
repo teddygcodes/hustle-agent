@@ -518,5 +518,31 @@
         "last_updated": "2026-05-12T14:49:18.147238+00:00"
       }
     ]
+  },
+  {
+    "session": 117,
+    "shipped_at": "2026-05-12T15:30:00+00:00",
+    "description": "S105 cross-platform Kalshi\u2194Polymarket matcher v1 + validation harness shipped as unvalidated infrastructure. bot/cross_platform_matcher.py is pure deterministic code (MatchResult enum, \u00b124h date alignment, token-set Jaccard, normalized resolution-source upgrade, empty ticker-family rules, manual override precedence, resolved-outcome conflict rule, insufficient-data handling). tools/validate_cross_platform_matcher.py runs the matcher over the S116 5,000-row queue and writes top matcher-vs-heuristic disagreements to bot/state/matcher_heuristic_disagreement_pairs.jsonl. Live S117 harness run: MATCH_HIGH_CONFIDENCE=2,937; MATCH_NEEDS_REVIEW=963; NO_MATCH=1,100; INSUFFICIENT_DATA=0; heuristic agreement 3,900/5,000 (78.0%); all 1,100 disagreements are NEEDS_REVIEW -> NO_MATCH due to resolved_outcome_conflict. Operator labels remain 0, so validation is pending operator review and no accuracy claim is made. 20 new tests; full pytest 1727/0. No labels edited, no LLM matching, no scanner/executor/strategy wiring, no bot restart.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "operator_pairs_labeled_for_matcher_validation",
+        "expectation": "\u226540 total labels with \u226520 MATCH + \u226520 NO_MATCH before trusting matcher for live arb. Operator owns operator_label edits; agent must not auto-label. Re-run `python3 tools/validate_cross_platform_matcher.py` after labels are added.",
+        "current_value": "0 labels available; validation pending operator review",
+        "last_updated": "2026-05-12T15:30:00+00:00"
+      },
+      {
+        "name": "matcher_false_positive_count_on_labeled_subset",
+        "expectation": "0 false positives where matcher emits MATCH_HIGH_CONFIDENCE and operator_label is NO_MATCH. Any non-zero value defaults to Outcome B threshold/rule tuning before any live arb trust.",
+        "current_value": "not measurable yet (0 labeled rows)",
+        "last_updated": "2026-05-12T15:30:00+00:00"
+      },
+      {
+        "name": "matcher_heuristic_disagreement_pairs",
+        "expectation": "Use bot/state/matcher_heuristic_disagreement_pairs.jsonl as priority labeling queue. These rows are more informative than random top-Jaccard rows because matcher and S116 heuristic disagree.",
+        "current_value": "40 priority rows written; all top-40 are resolved_outcome_conflict disagreements (heuristic NEEDS_REVIEW, matcher NO_MATCH)",
+        "last_updated": "2026-05-12T15:30:00+00:00"
+      }
+    ]
   }
 ]

@@ -1079,7 +1079,7 @@ Items where Outcome B was filed but no data accumulates passively.
 
 - **(Resolved by S112, 2026-05-11)** — IPL ESPN integration shipped. `"ipl": "cricket/8048"` added to `ESPN_SPORT_PATHS`; `_fetch_espn_score` now extracts `over_count` / `innings` / `wickets` / `runs_scored` from the current-batting linescore for sport=ipl; `_build_live_momentum_decision_context` threads those onto `decisions.jsonl.extra`; `_context_match_phase` delegates to `regime._match_phase("ipl", ...)` so `match_phase` resolves to powerplay / middle / death from over_count. **Constraint relaxation is IPL-specific** — the S96 / S107 "no new network calls" rule still holds for tennis, UFC, NHL match_phase, and future sport additions; see "Network Call Policy" above. Tennis match-level state remains deferred (per-tournament drill-down + ATP/WTA re-enable). 14-day cohort N re-measurement tracked in `bot/state/active_observations.json` (Session 112 entry).
 
-- **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **S116 (2026-05-12) shipped the scraping + candidate-generation infrastructure** — `tools/build_cross_platform_corpus.py` produces a labeling queue at `bot/state/cross_platform_labeling_queue.jsonl` (5,000 top-Jaccard pairs from a 3-day scrape: 2,937 suggested-MATCH + 2,063 suggested-NEEDS_REVIEW; full 604,603-pair corpus cached at `bot/state/cache/cross_platform_candidate_pairs_full.jsonl`, gitignored). Operator labeling protocol documented in CLAUDE.md "Cross-platform corpus labeling protocol". **Matcher implementation gated on operator hand-labeling completion** — S105 spec requires ≥20 labeled MATCH + ≥20 labeled NO_MATCH; sub-finding from S116: Polymarket's recent settled inventory is heavily esports/sports/crypto-micro (politics/econ markets settle slowly), so the corpus is dominated by per-game and per-hour-price-strike pairs rather than headline politics. **Why it matters:** without labeled pairs, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
+- **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **S116 (2026-05-12) shipped the scraping + candidate-generation infrastructure** — `tools/build_cross_platform_corpus.py` produces a labeling queue at `bot/state/cross_platform_labeling_queue.jsonl` (5,000 top-Jaccard pairs from a 3-day scrape: 2,937 suggested-MATCH + 2,063 suggested-NEEDS_REVIEW; full 604,603-pair corpus cached at `bot/state/cache/cross_platform_candidate_pairs_full.jsonl`, gitignored). **S117 (2026-05-12) shipped matcher v1 + validation harness** — `bot/cross_platform_matcher.py` is pure deterministic code; `tools/validate_cross_platform_matcher.py` evaluates the queue and writes priority heuristic-disagreement pairs to `bot/state/matcher_heuristic_disagreement_pairs.jsonl`. Current harness run: 2,937 `MATCH_HIGH_CONFIDENCE`, 963 `MATCH_NEEDS_REVIEW`, 1,100 `NO_MATCH`; 78.0% agreement with S116's heuristic; top 40 disagreements are all resolved-outcome conflicts. **Validation remains pending operator labeling** — current labeled rows: 0; S105 spec still requires ≥20 labeled MATCH + ≥20 labeled NO_MATCH and zero false positives before live arb trust. **Why it matters:** infrastructure exists, but without operator labels the matcher cannot make an accuracy claim.
 
 - **S106 — `post_event_reversion` discovery heuristic (partial unblock shipped in S109; on a 30-day re-measurement clock).** S109 (2026-05-12) shipped Outcome A-defensive: `SCAN_INTERVAL_IDLE 1800→900` for 2× denser non-live universe coverage. S106's unblock path (a) is partially addressed; (b) post-resolution retention and (c) ≥30 days of natural history are still pending. **Investigation 4 in S109 returned 16.6% reversion at 1¢ events on N=205, with reversion *decreasing* as move size grew** — directional anomaly contradicts mean-reversion theory broadly. **KXCOPPERD 33% (N=12)** and **KXAAAGASD 29% (N=21)** subfamily signals were the borderline-evidence basis for the defensive ship rather than strict Outcome C. Source: [`docs/superpowers/specs/2026-05-11-post-event-reversion-design.md`](docs/superpowers/specs/2026-05-11-post-event-reversion-design.md). **Auto-trigger:** at the earlier of **2026-06-11** (30 days post-S109) OR when N≥50 observable ≥5¢ events accumulate on KXCOPPERD+KXAAAGASD post-restart, re-run the S106 v1 measurement at event_threshold≥5¢. If reversion rate ≥40% on N≥50 AND directional anomaly reverses → promote to v1 heuristic session. If <40% OR directional finding persists → kill the strategy class (deferred Outcome C). **Why it matters:** still the only fundamentally different STRATEGY CLASS we've identified vs current vig_stack + live_momentum, but the S109 directional finding sets a high bar for the re-measurement to clear.
 
@@ -1102,14 +1102,17 @@ Items observed during operation but not prioritized for a session. No calendar t
 
 ---
 
-## Cross-platform corpus labeling protocol (S116)
+## Cross-platform corpus labeling protocol (S116/S117)
 
-The S105 cross-platform settlement matcher requires a hand-labeled validation corpus. S116 shipped the scraping + candidate-generation infrastructure that produces the labeling queue; this section is the operator's protocol for filling in `operator_label` on each row.
+The S105 cross-platform settlement matcher requires a hand-labeled validation corpus. S116 shipped the scraping + candidate-generation infrastructure that produces the labeling queue; S117 shipped the deterministic matcher + validation harness. This section is the operator's protocol for filling in `operator_label` on each row.
 
 ### Files
 
 - **Tool:** [`tools/build_cross_platform_corpus.py`](tools/build_cross_platform_corpus.py) — single-file CLI, no `agent/` deps, no bot restart needed. Scrapes Kalshi `/events?status=settled&with_nested_markets=true` (politics/econ/crypto/elections/world categories, filtered client-side because the API ignores the `category` param) + Polymarket Gamma `/markets?closed=true&order=closedTime&ascending=false`. Generates candidate pairs via token-set Jaccard + date alignment.
+- **Matcher:** [`bot/cross_platform_matcher.py`](bot/cross_platform_matcher.py) — pure deterministic S105 v1 matcher; no API or filesystem dependencies.
+- **Validation harness:** [`tools/validate_cross_platform_matcher.py`](tools/validate_cross_platform_matcher.py) — runs the matcher over the queue, reports operator-label accuracy when labels exist, reports heuristic agreement/disagreement always, and writes top priority disagreements to `bot/state/matcher_heuristic_disagreement_pairs.jsonl`.
 - **Queue (operator-facing):** [`bot/state/cross_platform_labeling_queue.jsonl`](bot/state/cross_platform_labeling_queue.jsonl) — top 5,000 candidates by Jaccard descending. Force-added per the `active_observations.json` precedent (state/ is gitignored otherwise).
+- **Priority disagreement queue:** `bot/state/matcher_heuristic_disagreement_pairs.jsonl` — S117 writes the top 40 matcher-vs-heuristic disagreements. These are high-value labeling targets because they distinguish deterministic matcher behavior from the S116 Jaccard/result heuristic.
 - **Full corpus (cached, gitignored):** `bot/state/cache/cross_platform_candidate_pairs_full.jsonl` — all 604K+ candidates from the latest 3-day scrape. Reference for advanced analysis only; do not commit.
 - **Raw caches (gitignored):** `bot/state/cache/kalshi_settled_markets.json` (~240 MB) + `bot/state/cache/polymarket_settled_markets.json` (~30 MB).
 
@@ -1182,12 +1185,18 @@ cp bot/state/cross_platform_labeling_queue.jsonl bot/state/cross_platform_labeli
 
 ### After labeling
 
-The labeled JSONL becomes the validation corpus for the S105 matcher implementation (separate session). The matcher will be required to:
+The labeled JSONL becomes the validation corpus for the S105 matcher implementation. Run the S117 harness after edits:
+
+```bash
+python3 tools/validate_cross_platform_matcher.py
+```
+
+As of S117, the harness reports `0 labels available, awaiting operator review.` That is honest status, not a failure. Once labels exist, the matcher will be required to:
 - Achieve **zero false positives** on labeled-MATCH pairs.
 - Flag labeled-NEEDS_REVIEW pairs as ambiguous (not silently emit as MATCH).
 - Recover ≥30% of labeled MATCH pairs at high confidence (per S105 spec).
 
-The matcher implementation is gated on this corpus reaching ≥20 MATCH + ≥20 NO_MATCH labels.
+Trusting the matcher for live arb is gated on this corpus reaching ≥20 MATCH + ≥20 NO_MATCH labels and preserving zero false positives.
 
 ---
 

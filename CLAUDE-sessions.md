@@ -6137,3 +6137,45 @@ If by 2026-06-11 the operator hasn't labeled ≥40 pairs, re-evaluate: corpus ma
 - The "no Polymarket category on recent markets" finding contradicts the S105 design doc assumption (category is exposed). Updated comment in `scrape_polymarket` and removed category filter. Token-set Jaccard alone is doing the heavy lifting for topical filtering — and the 2,937 MATCH suggestions at Jaccard ≥0.60 are well-calibrated by spot-check.
 - The user's "no cap" plan-mode answer was correct for the anticipated 200–500 candidate count but became unworkable at 604K. Capping the operator queue at 5,000 while preserving the full corpus in `bot/state/cache/` (with `--queue-top-n 0` flag to opt out) is the minimum-deviation resolution. Honest documentation of the deviation in this ☑ block + the CLAUDE.md operator protocol section.
 - Polymarket's RECENT-settled inventory (last 3 days) is dominated by per-game esports / hourly crypto-price-strikes — these legitimately match Kalshi equivalents and dominate the high-Jaccard tail. The S105 use-case (politics/econ cross-platform arb) will need the operator to pull a wider lookback (`--lookback-days 30+`) when explicit politics/econ pairs are sparse in the top-Jaccard slice.
+
+### ☑ Session 117 — Cross-platform settlement matcher v1 + validation harness (2026-05-12, Outcome A — ship unvalidated infrastructure)
+
+**Trigger.** S105 designed the deterministic Kalshi↔Polymarket settlement matcher but blocked shipping on the lack of a labeled public crosswalk. S116 built the operator labeling queue (`bot/state/cross_platform_labeling_queue.jsonl`, 5,000 top-Jaccard candidate pairs), but all 5,000 rows still have `operator_label: null`. Per the Session 117 brief, that means the correct ship is matcher infrastructure + validation harness with explicit unvalidated status, not an accuracy claim.
+
+**Decision: Outcome A — ship matcher infrastructure, validation pending operator labels.**
+
+**Artifacts shipped:**
+- [bot/cross_platform_matcher.py](bot/cross_platform_matcher.py) — pure deterministic matcher module. Implements `MatchResult` enum (`MATCH_HIGH_CONFIDENCE`, `MATCH_NEEDS_REVIEW`, `NO_MATCH`, `INSUFFICIENT_DATA`), date alignment at ±24h, token-set Jaccard, normalized resolution-source upgrade, empty ticker-family rules, manual override precedence, resolved-outcome conflict handling, and graceful insufficient-data paths. No Polymarket/Kalshi API dependency; no filesystem I/O.
+- [tools/validate_cross_platform_matcher.py](tools/validate_cross_platform_matcher.py) — CLI harness over the S116 JSONL queue. Reports MatchResult distribution, operator-label accuracy / false-positive / false-negative counts when labels exist, and matcher-vs-S116-heuristic agreement/disagreement always. Direct-run import bootstrap added so `python3 tools/validate_cross_platform_matcher.py` works from repo root.
+- [bot/state/matcher_heuristic_disagreement_pairs.jsonl](bot/state/matcher_heuristic_disagreement_pairs.jsonl) — force-added top 40 matcher-vs-heuristic disagreement rows, sorted by Jaccard descending. All top-40 rows are resolved-outcome conflicts where S116's heuristic suggested `NEEDS_REVIEW` and S117's matcher says `NO_MATCH`; these are high-value labeling targets because they test the matcher's conservative conflict rule.
+- [tests/test_cross_platform_matcher.py](tests/test_cross_platform_matcher.py) — 17 matcher unit tests covering date alignment edge cases, Jaccard math, enum semantics, source upgrade, manual override precedence, outcome conflict, and insufficient-data paths.
+- [tests/test_validate_cross_platform_matcher.py](tests/test_validate_cross_platform_matcher.py) — 3 harness tests covering zero-label pending status, false-positive counting against operator `NO_MATCH`, and disagreement JSONL output.
+- [CLAUDE.md](CLAUDE.md) + [README.md](README.md) — S105 Open Loops / operator protocol synced from "matcher gated" to "matcher v1 shipped; validation pending labels."
+- [bot/state/active_observations.json](bot/state/active_observations.json) — Session 117 observation entry tracks operator labeling status, harness validation status, and disagreement-pair count.
+
+**Live harness run against S116 queue (5,000 rows):**
+- MatchResult distribution: `MATCH_HIGH_CONFIDENCE=2,937`, `MATCH_NEEDS_REVIEW=963`, `NO_MATCH=1,100`, `INSUFFICIENT_DATA=0`.
+- Heuristic agreement with S116 `suggested_label`: `3,900/5,000` = **78.0% agree**, **22.0% disagree**.
+- All 1,100 disagreements are `NEEDS_REVIEW -> NO_MATCH`, reason `resolved_outcome_conflict`. The matcher is deliberately stricter than the candidate-builder heuristic when both sides resolved to opposite outcomes.
+- Operator-label validation: **0 labels available, awaiting operator review.** Accuracy, false-positive rate, and high-confidence recovery are intentionally not claimed.
+
+**What did NOT change.**
+- No `operator_label` edits. The queue remains operator-owned ground truth.
+- No LLM matching. Every classification rule is deterministic and explainable.
+- No scanner / executor / strategy / bot runtime wiring. Cross-platform arb remains inactive.
+- No Polymarket trading client.
+- No bot restart. PID 37978/S113-era runtime remains out of scope and untouched.
+- No S105 design-doc rewrite; implementation matched the design closely enough for Outcome A-infrastructure.
+
+**Tests:** `python3 -m pytest tests/ --tb=short -q` → **1727 passed, 0 failed** (1707 baseline + 20 new).
+
+**Verification.**
+- ✅ `python3 tools/validate_cross_platform_matcher.py` evaluates all 5,000 queue rows and prints the required pending-label message: `0 labels available, awaiting operator review.`
+- ✅ `bot/state/matcher_heuristic_disagreement_pairs.jsonl` contains exactly 40 JSONL rows.
+- ✅ Focused tests pass: `python3 -m pytest tests/test_cross_platform_matcher.py tests/test_validate_cross_platform_matcher.py -q` → 20/0.
+- ✅ Full pytest passes: 1727/0.
+- ✅ No live bot restart needed; matcher is offline infrastructure only.
+
+**Open loop / validation gate.** S105 remains blocked for live arb trust until the operator labels at least 20 `MATCH` and 20 `NO_MATCH` rows. Once labels exist, rerun `python3 tools/validate_cross_platform_matcher.py`; any high-confidence false positive against an operator `NO_MATCH` label defaults to Outcome B tuning/design revision. Until then, the correct status is: matcher works mechanically, but it is unvalidated for trading.
+
+**Architectural lesson.** Splitting the matcher from validation was the right move. The deterministic rules can now be regression-tested and used to prioritize labeling, while the system refuses to smuggle heuristic agreement in as truth. The useful new labeling list is not the top-Jaccard queue again; it is the 40-pair disagreement slice where the matcher and candidate-builder disagree for explicit, inspectable reasons.
