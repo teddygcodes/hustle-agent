@@ -6290,3 +6290,44 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 - ✅ `bot/state/cross_platform_labeling_queue.jsonl`, `bot/state/codex_sampling_match_high_confidence.jsonl`, `bot/state/codex_labels_match_high_confidence_raw.json`, and `bot/state/active_observations.json` force-added per established state-file pattern.
 
 **Open loop update.** CLAUDE.md S105 now records: matcher validated in the NO_MATCH direction (S118, 0 FPs on 40 disagreement labels) BUT has 24 false positives in the MATCH direction (S119, 0 FNs on 40 MATCH-direction labels). **Matcher v1 is NOT shipped as live-arb-validated.** S120 must address bet-type discrimination + settlement-window granularity in MATCH classification, validated against the 80 combined Codex labels (S118+S119) as ground truth.
+
+### ☑ Session 120 — Matcher v2 bet-type + time-granularity gates (2026-05-12, Outcome A — ship offline)
+
+**Trigger.** S119 found 24 false positives in the matcher's MATCH_HIGH_CONFIDENCE bucket across the 80 Codex-labeled S118+S119 corpus. The failures were structural, not threshold-only: same fixture with different bet/proposition type, plus crypto explicit-hour snapshots matched to date-only markets. S120 implements deterministic gates before the existing Jaccard/source/family logic.
+
+**Decision: Outcome A — matcher v2 ships offline with 0 FPs on the 80-label corpus.** Live-arb validation still waits for operator final spot-check via Claude review; no bot restart and no live trading/client wiring.
+
+**Implementation.**
+- [bot/cross_platform_matcher.py](bot/cross_platform_matcher.py) now exposes `BetTypeSignature`, `TimeGranularity`, `extract_bet_type()`, and `extract_time_granularity()`.
+- Bet-type extraction is deterministic regex/keyword parsing, not row lookup: winner, total/O-U, handicap/spread, exact score, period/set/map/game winner, completed match, draw, both-teams-to-score, top-N finish, price threshold, and `other`.
+- Compatibility is a gate: known bet-type/parameter mismatches return `NO_MATCH`; ambiguous `other` blocks HIGH_CONFIDENCE via `MATCH_NEEDS_REVIEW`; compatible signatures proceed to the old Jaccard/source/family rules.
+- Time-granularity extraction uses explicit hour markers (`4AM ET`, `at 2pm EDT`) before date-only price wording. Hour-specific vs day-wide/date-range returns `MATCH_NEEDS_REVIEW` per policy.
+- Existing Jaccard math and the resolved-outcome-conflict filter remain load-bearing and unchanged in purpose.
+- [tools/validate_cross_platform_matcher.py](tools/validate_cross_platform_matcher.py) now reports safety `accuracy` plus separate `exact_accuracy`. Safety accuracy counts `NO_MATCH` labels downgraded to `NEEDS_REVIEW` as acceptable because they are no longer tradable high-confidence positives.
+
+**Validation result.** `python3 tools/validate_cross_platform_matcher.py --labeler codex --json --disagreement-path /tmp/s120_matcher_disagreements.jsonl`:
+- `labeled_count`: **80**.
+- `accuracy`: **97.5%** safety accuracy.
+- `exact_accuracy`: **91.25%** (the five time-window NO_MATCH labels intentionally downgrade to review).
+- `false_positive_count`: **0** (down from 24).
+- `false_negative_count`: **0**.
+- `confusion`: `{MATCH->match_high_confidence: 14, NEEDS_REVIEW->match_high_confidence: 2, NO_MATCH->no_match: 59, NO_MATCH->match_needs_review: 5}`.
+
+**Full queue distribution.**
+- S119 baseline: `MATCH_HIGH_CONFIDENCE=2,937`, `MATCH_NEEDS_REVIEW=963`, `NO_MATCH=1,100`.
+- S120 v2: `MATCH_HIGH_CONFIDENCE=1,590`, `MATCH_NEEDS_REVIEW=1,558`, `NO_MATCH=1,852`.
+- HIGH_CONFIDENCE drops 45.9%, which is material but below the >50% / <1,000 warning threshold from the brief. Safer bucket, still not a collapsed opportunity set.
+
+**Tests and verification.**
+- Focused tests: `python3 -m pytest tests/test_cross_platform_matcher.py tests/test_validate_cross_platform_matcher.py -q` -> **37/0**.
+- Full pytest: `python3 -m pytest` -> **1744/0**.
+- Regression guard updated: `tests/test_validate_cross_platform_matcher.py::test_matcher_classifications_locked_against_codex_labels` now asserts 80 Codex labels, FP=0, FN=0, safety accuracy >=95%, and the S120 confusion split.
+- `bot/state/active_observations.json` force-added with S120 validation status and the full-corpus distribution.
+
+**What did NOT change.**
+- No Jaccard threshold/math changes.
+- No outcome-conflict relaxation.
+- No LLM matching, no Polymarket trading client, no live arb trading.
+- No bot restart; PID 37978 intentionally untouched.
+
+**Open loop update.** CLAUDE.md S105 now records: matcher v2 shipped in S120 with 0 false positives on the 80-label corpus; operator final spot-check via Claude review remains pending before live-arb trust.

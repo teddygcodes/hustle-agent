@@ -626,5 +626,31 @@
         "last_updated": "2026-05-12T19:00:00Z"
       }
     ]
+  },
+  {
+    "session": 120,
+    "shipped_at": "2026-05-12T18:17:31Z",
+    "description": "Matcher v2 shipped for S105 cross-platform Kalshi-Polymarket settlement matching. bot/cross_platform_matcher.py now extracts deterministic bet-type signatures and explicit time-granularity markers before applying the existing Jaccard/source/family rules. S120 validation on the 80 Codex-labeled S118+S119 corpus: safety accuracy=97.5%, exact_accuracy=91.25%, false_positives=0, false_negatives=0. Full 5,000-row distribution shifted from S119 baseline MATCH_HIGH_CONFIDENCE=2,937 / MATCH_NEEDS_REVIEW=963 / NO_MATCH=1,100 to MATCH_HIGH_CONFIDENCE=1,590 / MATCH_NEEDS_REVIEW=1,558 / NO_MATCH=1,852. No bot restart; matcher is not live-wired.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "matcher_v2_codex_validation",
+        "expectation": "S120 regression gate remains at 0 false positives and 0 false negatives on the 80 Codex-labeled corpus. Re-run: python3 tools/validate_cross_platform_matcher.py --labeler codex --json --disagreement-path /tmp/s120_matcher_disagreements.jsonl",
+        "current_value": "accuracy=97.5%; exact_accuracy=91.25%; false_positives=0; false_negatives=0; confusion={MATCH->match_high_confidence: 14, NEEDS_REVIEW->match_high_confidence: 2, NO_MATCH->no_match: 59, NO_MATCH->match_needs_review: 5}",
+        "last_updated": "2026-05-12T18:17:31Z"
+      },
+      {
+        "name": "matcher_v2_full_corpus_distribution",
+        "expectation": "HIGH_CONFIDENCE should stay safely below the S119 over-classified baseline without collapsing below 1,000 unless the operator explicitly accepts a much smaller arb opportunity set.",
+        "current_value": "MATCH_HIGH_CONFIDENCE=1590; MATCH_NEEDS_REVIEW=1558; NO_MATCH=1852; HIGH_CONFIDENCE down 45.9% from S119 baseline 2937 and above the <1000 tradeoff threshold",
+        "last_updated": "2026-05-12T18:17:31Z"
+      },
+      {
+        "name": "operator_final_spot_check_pending",
+        "expectation": "Claude/operator spot-check reviews Codex labels and matcher v2 behavior before treating MATCH_HIGH_CONFIDENCE as live-arb-validated.",
+        "current_value": "pending; matcher v2 is offline tooling only and not wired to live arb",
+        "last_updated": "2026-05-12T18:17:31Z"
+      }
+    ]
   }
 ]
