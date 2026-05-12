@@ -20,6 +20,8 @@ def _row(
     kalshi_result: str = "yes",
     polymarket_result: str = "yes",
     labeler=None,
+    labeling_session=None,
+    sample_stratum=None,
 ) -> dict:
     row = {
         "kalshi_ticker": "KXBTC",
@@ -39,6 +41,10 @@ def _row(
     }
     if labeler is not None:
         row["labeler"] = labeler
+    if labeling_session is not None:
+        row["labeling_session"] = labeling_session
+    if sample_stratum is not None:
+        row["sample_stratum"] = sample_stratum
     return row
 
 
@@ -101,39 +107,82 @@ def test_validate_queue_can_filter_codex_labels_from_other_labels(tmp_path):
     assert summary["operator_validation"]["false_positive_count"] == 1
 
 
+def test_validate_queue_can_filter_by_labeling_session_and_report_strata(tmp_path):
+    queue = tmp_path / "queue.jsonl"
+    disagreements = tmp_path / "disagreements.jsonl"
+    _write_rows(
+        queue,
+        [
+            _row(
+                operator_label="NO_MATCH",
+                labeler="codex",
+                labeling_session="S121",
+                sample_stratum="high_confidence_boundary",
+            ),
+            _row(operator_label="NO_MATCH", labeler="codex", labeling_session="S119"),
+        ],
+    )
+
+    summary = validate_queue(queue, disagreements, labeler="codex", labeling_session="S121")
+
+    validation = summary["operator_validation"]
+    assert validation["labeler_filter"] == "codex"
+    assert validation["labeling_session_filter"] == "S121"
+    assert validation["labeled_count"] == 1
+    assert validation["false_positive_count"] == 1
+    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["false_positive_count"] == 1
+    assert validation["per_stratum"]["high_confidence_boundary"]["false_positive_count"] == 1
+
+
 def test_matcher_classifications_locked_against_codex_labels(tmp_path):
-    """S118-S120 regression guard against the labeled validation corpus.
+    """Regression guard against the S118-S121 labeled validation corpus.
 
     Locks the matcher's classification behavior on every Codex-labeled row in
-    bot/state/cross_platform_labeling_queue.jsonl. False-positive count is the
-    load-bearing metric for live cross-platform arb safety. S120 accepts
-    NO_MATCH-labeled rows downgraded to NEEDS_REVIEW as safe; only
-    MATCH_HIGH_CONFIDENCE on a NO_MATCH label is a false positive.
+    bot/state/cross_platform_labeling_queue.jsonl. S121 found one fresh
+    holdout false positive, so the matcher is no longer live-arb-validated.
     """
     disagreements = tmp_path / "disagreements.jsonl"
     summary = validate_queue(PROD_QUEUE_PATH, disagreements, labeler="codex")
 
     validation = summary["operator_validation"]
-    assert validation["labeled_count"] == 80, (
-        "expected 80 codex labels (40 S118 NO_MATCH + 40 S119), "
+    assert validation["labeled_count"] == 120, (
+        "expected 120 codex labels (80 S118-S120 + 40 S121 holdout), "
         f"got {validation['labeled_count']}"
     )
-    assert validation["false_positive_count"] == 0, (
-        "matcher false-positive count drifted from S120 target (0); "
+    assert validation["false_positive_count"] == 1, (
+        "S121 holdout evidence should show exactly one high-confidence false positive; "
         f"got {validation['false_positive_count']}"
     )
     assert validation["false_negative_count"] == 0, (
-        "matcher false-negative count drifted from S120 target (0); "
+        "matcher false-negative count drifted from S121 evidence (0); "
         f"got {validation['false_negative_count']}"
     )
     assert validation["accuracy"] >= 0.95
     confusion = validation["confusion"]
-    # S120: all NO_MATCH labels are kept out of high-confidence; 5 time-window
-    # mismatches intentionally downgrade to review per the v2 policy.
-    assert confusion.get("NO_MATCH->no_match") == 59
-    assert confusion.get("NO_MATCH->match_needs_review") == 5
-    assert confusion.get("NO_MATCH->match_high_confidence", 0) == 0
-    # S119 positive labels remain high-confidence; the two ambiguous labels
-    # are still high-confidence under fixture-only moneyline semantics.
-    assert confusion.get("MATCH->match_high_confidence") == 14
+    assert confusion.get("NO_MATCH->no_match") == 69
+    assert confusion.get("NO_MATCH->match_needs_review") == 6
+    assert confusion.get("NO_MATCH->match_high_confidence") == 1
+    assert confusion.get("MATCH->match_high_confidence") == 28
+    assert confusion.get("MATCH->match_needs_review") == 1
     assert confusion.get("NEEDS_REVIEW->match_high_confidence") == 2
+    assert confusion.get("NEEDS_REVIEW->match_needs_review") == 13
+
+
+def test_matcher_holdout_validation_documents_residual_false_positive(tmp_path):
+    """S121 holdout validation is Outcome B: one boundary false positive."""
+    disagreements = tmp_path / "disagreements.jsonl"
+    summary = validate_queue(PROD_QUEUE_PATH, disagreements, labeler="codex", labeling_session="S121")
+
+    validation = summary["operator_validation"]
+    assert validation["labeled_count"] == 40
+    assert validation["false_positive_count"] == 1
+    assert validation["false_negative_count"] == 0
+    assert validation["accuracy"] == 0.95
+    assert validation["exact_accuracy"] == 0.925
+    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["labeled_count"] == 15
+    assert validation["per_bucket"]["MATCH_HIGH_CONFIDENCE"]["false_positive_count"] == 1
+    assert validation["per_bucket"]["MATCH_NEEDS_REVIEW"]["false_positive_count"] == 0
+    assert validation["per_bucket"]["NO_MATCH"]["false_positive_count"] == 0
+    assert validation["per_stratum"]["high_confidence_boundary"]["labeled_count"] == 8
+    assert validation["per_stratum"]["high_confidence_boundary"]["false_positive_count"] == 1
+    assert validation["per_stratum"]["high_confidence_interior"]["false_positive_count"] == 0
