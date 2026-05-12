@@ -15,8 +15,9 @@ def _row(
     operator_label=None,
     kalshi_result: str = "yes",
     polymarket_result: str = "yes",
+    labeler=None,
 ) -> dict:
-    return {
+    row = {
         "kalshi_ticker": "KXBTC",
         "kalshi_question": "Will Bitcoin be above 100000 on May 12?",
         "kalshi_close_date": "2026-05-12T12:00:00Z",
@@ -32,6 +33,9 @@ def _row(
         "suggested_label": suggested_label,
         "operator_label": operator_label,
     }
+    if labeler is not None:
+        row["labeler"] = labeler
+    return row
 
 
 def test_validate_queue_reports_zero_label_pending_status(tmp_path):
@@ -72,3 +76,22 @@ def test_validate_queue_writes_heuristic_disagreement_rows(tmp_path):
     assert len(rows) == 1
     assert rows[0]["suggested_label"] == "MATCH"
     assert rows[0]["matcher_label"] == "NO_MATCH"
+
+
+def test_validate_queue_can_filter_codex_labels_from_other_labels(tmp_path):
+    queue = tmp_path / "queue.jsonl"
+    disagreements = tmp_path / "disagreements.jsonl"
+    _write_rows(
+        queue,
+        [
+            _row(operator_label="NO_MATCH", labeler="codex"),
+            _row(operator_label="NO_MATCH", labeler="operator"),
+            _row(operator_label="NO_MATCH"),
+        ],
+    )
+
+    summary = validate_queue(queue, disagreements, labeler="codex")
+
+    assert summary["operator_validation"]["labeler_filter"] == "codex"
+    assert summary["operator_validation"]["labeled_count"] == 1
+    assert summary["operator_validation"]["false_positive_count"] == 1

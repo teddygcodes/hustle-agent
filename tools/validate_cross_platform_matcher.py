@@ -71,6 +71,20 @@ def _operator_label(row: dict) -> str | None:
     return label or None
 
 
+def _labeler(row: dict) -> str | None:
+    labeler = row.get("labeler")
+    if labeler is None:
+        return None
+    labeler = str(labeler).strip().lower()
+    return labeler or None
+
+
+def _labeler_matches(row: dict, labeler_filter: str | None) -> bool:
+    if not labeler_filter:
+        return True
+    return _labeler(row) == labeler_filter.strip().lower()
+
+
 def _write_jsonl(records: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -83,6 +97,7 @@ def validate_queue(
     queue_path: Path = DEFAULT_QUEUE_PATH,
     disagreement_path: Path = DEFAULT_DISAGREEMENT_PATH,
     disagreement_limit: int = 40,
+    labeler: str | None = None,
 ) -> dict:
     rows = load_jsonl(queue_path)
     distribution: Counter[str] = Counter()
@@ -123,7 +138,7 @@ def validate_queue(
                     "matcher_reason": decision.reason,
                 })
 
-        label = _operator_label(row)
+        label = _operator_label(row) if _labeler_matches(row, labeler) else None
         if label:
             labeled_count += 1
             confusion[f"{label}->{result_value}"] += 1
@@ -151,6 +166,7 @@ def validate_queue(
             "disagree_rate": heuristic_disagree / heuristic_total if heuristic_total else None,
         },
         "operator_validation": {
+            "labeler_filter": labeler,
             "labeled_count": labeled_count,
             "accuracy": labeled_exact / labeled_count if labeled_count else None,
             "false_positive_count": false_positive_count,
@@ -159,7 +175,11 @@ def validate_queue(
             "status": (
                 "validation_available"
                 if labeled_count
-                else "0 labels available, awaiting operator review."
+                else (
+                    f"0 labels available for labeler={labeler}, awaiting review."
+                    if labeler
+                    else "0 labels available, awaiting operator review."
+                )
             ),
         },
         "disagreement_report_path": str(disagreement_path),
@@ -182,8 +202,10 @@ def print_summary(summary: dict) -> None:
             f"({heuristic['agree_rate']:.1%} agree, {heuristic['disagree_rate']:.1%} disagree)"
         )
     validation = summary["operator_validation"]
+    if validation.get("labeler_filter"):
+        print(f"Labeler filter: {validation['labeler_filter']}")
     if validation["labeled_count"] == 0:
-        print("0 labels available, awaiting operator review.")
+        print(validation["status"])
     else:
         print(
             "Operator-label validation: "
@@ -204,6 +226,11 @@ def main(argv=None) -> int:
     parser.add_argument("--queue-path", default=str(DEFAULT_QUEUE_PATH))
     parser.add_argument("--disagreement-path", default=str(DEFAULT_DISAGREEMENT_PATH))
     parser.add_argument("--disagreement-limit", type=int, default=40)
+    parser.add_argument(
+        "--labeler",
+        default=None,
+        help="Restrict validation metrics to rows labeled by this labeler, e.g. codex or operator.",
+    )
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON summary")
     args = parser.parse_args(argv)
 
@@ -211,6 +238,7 @@ def main(argv=None) -> int:
         queue_path=Path(args.queue_path),
         disagreement_path=Path(args.disagreement_path),
         disagreement_limit=args.disagreement_limit,
+        labeler=args.labeler,
     )
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
