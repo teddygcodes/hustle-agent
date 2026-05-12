@@ -1079,7 +1079,7 @@ Items where Outcome B was filed but no data accumulates passively.
 
 - **(Resolved by S112, 2026-05-11)** — IPL ESPN integration shipped. `"ipl": "cricket/8048"` added to `ESPN_SPORT_PATHS`; `_fetch_espn_score` now extracts `over_count` / `innings` / `wickets` / `runs_scored` from the current-batting linescore for sport=ipl; `_build_live_momentum_decision_context` threads those onto `decisions.jsonl.extra`; `_context_match_phase` delegates to `regime._match_phase("ipl", ...)` so `match_phase` resolves to powerplay / middle / death from over_count. **Constraint relaxation is IPL-specific** — the S96 / S107 "no new network calls" rule still holds for tennis, UFC, NHL match_phase, and future sport additions; see "Network Call Policy" above. Tennis match-level state remains deferred (per-tournament drill-down + ATP/WTA re-enable). 14-day cohort N re-measurement tracked in `bot/state/active_observations.json` (Session 112 entry).
 
-- **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **Unblocks:** build a manual labeled Kalshi↔Polymarket pair corpus (~50-100 pairs) by hand-labeling against historical settled markets, OR locate an emerging public dataset. **Why it matters:** without a validation corpus, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
+- **S105 — Cross-platform settlement matcher.** Validation corpus doesn't exist publicly (only LLM-based products like Predexon, which warn about hallucinations). Source: [`docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md`](docs/superpowers/specs/2026-05-11-cross-platform-matcher-design.md). **S116 (2026-05-12) shipped the scraping + candidate-generation infrastructure** — `tools/build_cross_platform_corpus.py` produces a labeling queue at `bot/state/cross_platform_labeling_queue.jsonl` (5,000 top-Jaccard pairs from a 3-day scrape: 2,937 suggested-MATCH + 2,063 suggested-NEEDS_REVIEW; full 604,603-pair corpus cached at `bot/state/cache/cross_platform_candidate_pairs_full.jsonl`, gitignored). Operator labeling protocol documented in CLAUDE.md "Cross-platform corpus labeling protocol". **Matcher implementation gated on operator hand-labeling completion** — S105 spec requires ≥20 labeled MATCH + ≥20 labeled NO_MATCH; sub-finding from S116: Polymarket's recent settled inventory is heavily esports/sports/crypto-micro (politics/econ markets settle slowly), so the corpus is dominated by per-game and per-hour-price-strike pairs rather than headline politics. **Why it matters:** without labeled pairs, the matcher can't achieve zero false positives, and the entire cross-platform arb path is dead.
 
 - **S106 — `post_event_reversion` discovery heuristic (partial unblock shipped in S109; on a 30-day re-measurement clock).** S109 (2026-05-12) shipped Outcome A-defensive: `SCAN_INTERVAL_IDLE 1800→900` for 2× denser non-live universe coverage. S106's unblock path (a) is partially addressed; (b) post-resolution retention and (c) ≥30 days of natural history are still pending. **Investigation 4 in S109 returned 16.6% reversion at 1¢ events on N=205, with reversion *decreasing* as move size grew** — directional anomaly contradicts mean-reversion theory broadly. **KXCOPPERD 33% (N=12)** and **KXAAAGASD 29% (N=21)** subfamily signals were the borderline-evidence basis for the defensive ship rather than strict Outcome C. Source: [`docs/superpowers/specs/2026-05-11-post-event-reversion-design.md`](docs/superpowers/specs/2026-05-11-post-event-reversion-design.md). **Auto-trigger:** at the earlier of **2026-06-11** (30 days post-S109) OR when N≥50 observable ≥5¢ events accumulate on KXCOPPERD+KXAAAGASD post-restart, re-run the S106 v1 measurement at event_threshold≥5¢. If reversion rate ≥40% on N≥50 AND directional anomaly reverses → promote to v1 heuristic session. If <40% OR directional finding persists → kill the strategy class (deferred Outcome C). **Why it matters:** still the only fundamentally different STRATEGY CLASS we've identified vs current vig_stack + live_momentum, but the S109 directional finding sets a high bar for the re-measurement to clear.
 
@@ -1099,6 +1099,95 @@ Items observed during operation but not prioritized for a session. No calendar t
 - **Lifecycle / smart-bot vision** → "Future Direction" section above (north star, NOT BUILDING YET, readiness gate).
 - **Auto-firing watch-list triggers** → individual session ☑ blocks in `CLAUDE-sessions.md` + `bot/state/active_observations.json` registry; surface in `glint_status §10 Active Observations`.
 - **Battle Scars** (operational gotchas already known) → "Critical Gotchas (Battle Scars)" section above.
+
+---
+
+## Cross-platform corpus labeling protocol (S116)
+
+The S105 cross-platform settlement matcher requires a hand-labeled validation corpus. S116 shipped the scraping + candidate-generation infrastructure that produces the labeling queue; this section is the operator's protocol for filling in `operator_label` on each row.
+
+### Files
+
+- **Tool:** [`tools/build_cross_platform_corpus.py`](tools/build_cross_platform_corpus.py) — single-file CLI, no `agent/` deps, no bot restart needed. Scrapes Kalshi `/events?status=settled&with_nested_markets=true` (politics/econ/crypto/elections/world categories, filtered client-side because the API ignores the `category` param) + Polymarket Gamma `/markets?closed=true&order=closedTime&ascending=false`. Generates candidate pairs via token-set Jaccard + date alignment.
+- **Queue (operator-facing):** [`bot/state/cross_platform_labeling_queue.jsonl`](bot/state/cross_platform_labeling_queue.jsonl) — top 5,000 candidates by Jaccard descending. Force-added per the `active_observations.json` precedent (state/ is gitignored otherwise).
+- **Full corpus (cached, gitignored):** `bot/state/cache/cross_platform_candidate_pairs_full.jsonl` — all 604K+ candidates from the latest 3-day scrape. Reference for advanced analysis only; do not commit.
+- **Raw caches (gitignored):** `bot/state/cache/kalshi_settled_markets.json` (~240 MB) + `bot/state/cache/polymarket_settled_markets.json` (~30 MB).
+
+### Per-row schema
+
+- `kalshi_ticker`, `kalshi_question`, `kalshi_close_date`, `kalshi_result` (`"yes"` | `"no"`), `kalshi_category`, `kalshi_url`
+- `polymarket_ticker`, `polymarket_question`, `polymarket_close_date`, `polymarket_result`, `polymarket_category` (often empty — Polymarket no longer tags recent markets), `polymarket_url`
+- `jaccard` (token-set Jaccard, ≥0.40 floor at generation), `days_apart` (`|close_date_K − close_date_P|`, ≤3.0 floor)
+- `suggested_label` ∈ `{"MATCH", "NEEDS_REVIEW", "NO_MATCH"}` — **generator's hint, never authoritative**
+- `operator_label` — initially `null`; operator fills in
+
+### Operator label values
+
+- **`MATCH`** — these two markets settle on the same real-world event. Tokens align, dates align, resolutions agree. Both venues would have closed consistently on the same outcome. **Use sparingly** — false MATCH labels poison the matcher's eventual zero-false-positive bar (per S105 spec).
+- **`NO_MATCH`** — these two markets reference different events. The text overlap was coincidental (shared topic words like "Bitcoin", "May", "vs") but the underlying question / resolution criterion differs.
+- **`NEEDS_REVIEW`** — genuinely ambiguous. Wording mismatches (e.g. Kalshi "shutdown duration" vs Polymarket "shutdown occurrence"), unclear resolution sources, close-but-not-identical date boundaries, or one venue has a binary while the other has a ladder.
+
+### Suggested-label semantics
+
+The generator's `suggested_label` follows the rule at [`tools/build_cross_platform_corpus.py:suggest_label`](tools/build_cross_platform_corpus.py):
+- `MATCH` suggested when Jaccard ≥0.60 AND `days_apart` ≤1.0 AND `kalshi_result == polymarket_result`.
+- `NO_MATCH` suggested when Jaccard <0.40 OR `days_apart` >3.0 (never emitted to the queue — filtered out at generation).
+- `NEEDS_REVIEW` everything else.
+
+The operator overrides. The bias is conservative: false MATCH suggestions train the operator to disagree, which slows labeling.
+
+### Edge cases
+
+- **Different but related events on the same day** (e.g. Kalshi "Fed cuts 25bp" vs Polymarket "Fed cuts at all"): label `NEEDS_REVIEW`. These are exactly the cases the matcher must learn to flag.
+- **Same event, different granularity** (one venue binary, other has multiple outcomes): `NEEDS_REVIEW`. Matcher's eventual scope is YES/NO only.
+- **Identical wording, far close_dates** (>1 day apart): `NEEDS_REVIEW`. Could be resolution-delay artifact or real difference.
+- **Ladder rungs vs single threshold market** (e.g. Kalshi `KXBTC-T80000` vs Polymarket "Will Bitcoin be above $80,000?"): `MATCH` only if the threshold matches exactly and the date window is tight.
+- **Per-game sports / esports** (e.g. Counter-Strike map handicap, LoL game-winner): these dominate the recent Polymarket inventory and produce many `MATCH` suggestions; labeling them as MATCH is correct **but** these aren't S105's target use case (politics/econ arb). Label honestly; the matcher's downstream scope filter will exclude sports.
+
+### Expected per-pair labeling time
+
+- **30-90 seconds per pair.** The Jaccard score, dates, and result agreement should resolve most pairs at a glance. Click through to `kalshi_url` / `polymarket_url` only when the question text alone is ambiguous.
+- **Target throughput:** ≥40 labeled pairs in a 60-90 minute session.
+
+### Target corpus size (per S105 spec)
+
+- **Minimum:** 20 labeled `MATCH` + 20 labeled `NO_MATCH` pairs. More is better.
+- **Coverage:** at least one pair per intended launch category (politics / economics / crypto). Recognize the recent-inventory skew — operator may want to look further back via `--lookback-days 30` if politics/econ pairs are too thin in the default 3-day window.
+
+### Re-running the scraper
+
+```bash
+# Full re-scrape + regenerate (5K top-Jaccard queue + full corpus cache):
+python3 tools/build_cross_platform_corpus.py
+
+# Regenerate from cached scrapes (skip API calls):
+python3 tools/build_cross_platform_corpus.py --skip-scrape
+
+# Refresh Polymarket only; reuse Kalshi cache:
+python3 tools/build_cross_platform_corpus.py --polymarket-only
+
+# Wider lookback window (operator may want politics/econ that settle slowly):
+python3 tools/build_cross_platform_corpus.py --lookback-days 30
+
+# Uncapped queue (writes the full corpus to bot/state/cross_platform_labeling_queue.jsonl;
+# may be 400+ MB — DO NOT git add):
+python3 tools/build_cross_platform_corpus.py --skip-scrape --queue-top-n 0
+```
+
+**Before re-running, back up any in-progress labels** — the script overwrites `bot/state/cross_platform_labeling_queue.jsonl`:
+
+```bash
+cp bot/state/cross_platform_labeling_queue.jsonl bot/state/cross_platform_labeling_queue.jsonl.bak-$(date +%Y%m%d)
+```
+
+### After labeling
+
+The labeled JSONL becomes the validation corpus for the S105 matcher implementation (separate session). The matcher will be required to:
+- Achieve **zero false positives** on labeled-MATCH pairs.
+- Flag labeled-NEEDS_REVIEW pairs as ambiguous (not silently emit as MATCH).
+- Recover ≥30% of labeled MATCH pairs at high confidence (per S105 spec).
+
+The matcher implementation is gated on this corpus reaching ≥20 MATCH + ≥20 NO_MATCH labels.
 
 ---
 

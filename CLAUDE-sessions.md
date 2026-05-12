@@ -6073,3 +6073,67 @@ CLAUDE.md "Open Loops" was deliberately NOT touched — no finding moves any def
 **Watch-list trigger.** None registered as new. The 7 measured observations carry their existing triggers (auto-fire at calendar dates or N thresholds); `active_observations.json` refresh captures current values to inform the future-firing operator who hits each trigger.
 
 **Architectural lesson.** A substrate maturity review is honest precisely when it produces few actionable findings. Five WAITs across observations whose windows have only had 0–3 days to accumulate is the correct outcome — the discipline is to resist constructing a story (the all-families S109 supplement is the tempting one) just because data exists. The two HEALTHY confirmations validate that S107/S113 are operative; that alone justifies the session. Operating Posture corollary to S114: *the value of a maturity review is not in the verdicts it produces today but in the per-observation snapshots it leaves for the next operator who hits the calendar trigger.* Three additional notes: (a) the supplementary S109 all-families read at 43.5% reversion was the strongest temptation to over-reach this session; resisting it preserves the discipline of "the watch-list is scoped on purpose, widening is its own decision"; (b) the parallel sub-agent dispatch pattern (S84/S89) scaled cleanly to 7 reads with the 8th synthesis pass as the main session — total wall-clock 30–45 min, total context cost contained; (c) `Pattern C count` deliberately not incremented because S115 is a scheduled snapshot rather than an investigation of a specific premise — the count axis is reserved for "investigated, found no fix" outcomes.
+
+### ☑ Session 116 — S105 cross-platform validation corpus: scraping + candidate-generation shipped (2026-05-12, Outcome A — ship)
+
+**Trigger.** S105 (May 11) design-doc'd the cross-platform Kalshi↔Polymarket settlement matcher but found no public validation corpus exists. Predexon (the only commercial product in the space) uses LLM matching and warns about hallucinations — confirming that deterministic-only matching needs a hand-labeled corpus. S116 builds the scraping + candidate-generation infrastructure that produces a labeling queue for operator hand-labeling. The matcher implementation itself remains gated on labeling completion (separate post-S116 session).
+
+**Phase 0 — substrate check.**
+- **Polymarket Gamma API** (`gamma-api.polymarket.com/markets?closed=true`): accessible, HTTP 200. Two API quirks discovered mid-implementation: (1) default sort is `closedTime` ascending — without `&order=closedTime&ascending=false` the API returns 2020-2024 markets first and the 2026 inventory is past offset 100k; (2) the top-level `category` field is **no longer populated on recent markets** (it was on 2020-2022 markets) — category filter discarded in favor of relying on token-set Jaccard at pair-generation time. Resolution is inferred from final `outcomePrices` near 1/0 per S105 design doc.
+- **Kalshi public REST** (`api.elections.kalshi.com/trade-api/v2/events?status=settled&with_nested_markets=true`): accessible. **The `category` query parameter is silently ignored** — every category value returns the same set of events. The real category lives on the per-event `category` field; we filter client-side. The `/markets?status=settled` endpoint is dominated by KXMVE* parlay expansions (per Battle Scar / `bot/universe.py` precedent) — `/events` with nested markets is the only sane path. Bypassed `agent/kalshi_client.py` per project_scope memory (bot-only).
+- **Existing state file inventory** (`paper_trades.json` / `decisions.jsonl` / `universe.jsonl`): confirmed bot's local Kalshi history is sports/weather/index-only — politics/econ markets must come from fresh scraping (operator-confirmed scope expansion via AskUserQuestion during plan-mode).
+
+**Decision: Outcome A — ship scraping + candidate-generation.**
+
+Tool: `tools/build_cross_platform_corpus.py` (single-file CLI, 49-test pytest suite, no `agent/` deps, no scanner/executor/strategy changes, no bot restart). Pure deterministic helpers (`normalize_tokens` / `jaccard` / `parse_iso_date` / `within_days` / `suggest_label`) + two scrapers + cross-join generator + atomic JSONL writers + `argparse` CLI.
+
+**Live scrape results (default `--lookback-days 3`, run completed 2026-05-12 10:43 ET):**
+- Kalshi: **735,381 unique markets** (after dedup; raw scrape returned 3.68M due to the 5× duplication issue from the category-param bug, fixed in-flight)
+- Polymarket: **97,699 settled markets** (3-day window)
+- Cross-join via day-precision date bucketing (±3 day window): **604,603 candidate pairs** above Jaccard 0.40 floor
+- Suggested-label breakdown: MATCH=2,937 (0.5%), NEEDS_REVIEW=601,666 (99.5%) — all NO_MATCH gated out at the 0.40 floor by design
+- Top-Jaccard sample: tennis matches (ATP Tunis, Bengaluru), basketball (Pallacanestro Varese vs Virtus Bologna at Jaccard=1.0), esports (CS / LoL maps), hourly Bitcoin / Ethereum price strikes — all legitimately cross-platform-paired
+
+**Queue cap decision (deviation from plan-mode answer).** The operator's plan-mode answer to "Queue cap?" was "no cap, write all candidates." Anticipated candidate count: 200–500. Actual: 604,603 (409 MB JSONL). The uncapped queue is unreviewable (text-editor unfriendly) AND uncommittable (GitHub 100 MB file cap). Resolution: queue capped at **top 5,000 by Jaccard descending** (3.3 MB, committable), full 604K corpus preserved at `bot/state/cache/cross_platform_candidate_pairs_full.jsonl` (gitignored) for advanced use. `--queue-top-n N` flag exposes the cap (use `--queue-top-n 0` to disable). Queued label breakdown: MATCH=2,937 + NEEDS_REVIEW=2,063 — Jaccard range 0.55–1.00. Documented in CLAUDE.md "Cross-platform corpus labeling protocol."
+
+**Artifacts shipped:**
+- [tools/build_cross_platform_corpus.py](tools/build_cross_platform_corpus.py) — 470-line single-file CLI; force-added in `.gitignore` per existing `!tools/<file>.py` convention.
+- [tests/test_build_cross_platform_corpus.py](tests/test_build_cross_platform_corpus.py) — 49 pytest cases covering all pure helpers + both scrapers (HTTP-mocked) + the build_corpus orchestrator + dedupe regression + category-not-on-allowlist regression. Full pytest **1707/0** (1658 baseline + 49 net new); no regressions.
+- [bot/state/cross_platform_labeling_queue.jsonl](bot/state/cross_platform_labeling_queue.jsonl) — 5,000 candidate pairs (top by Jaccard), force-added.
+- `bot/state/cache/cross_platform_candidate_pairs_full.jsonl` — full 604K corpus (gitignored; 409 MB).
+- `bot/state/cache/kalshi_settled_markets.json` + `polymarket_settled_markets.json` — scrape caches (gitignored).
+- [CLAUDE.md](CLAUDE.md) — new "Cross-platform corpus labeling protocol" section (schema, label semantics, edge cases, expected per-pair time, re-running, target corpus size).
+- [CLAUDE.md Open Loops S105](CLAUDE.md) — updated to reflect S116 progress; matcher implementation now gated on operator labeling completion (≥20 MATCH + ≥20 NO_MATCH per S105 spec).
+- [bot/state/active_observations.json](bot/state/active_observations.json) — Session 116 entry (30-day window, operator-labeling progress metric + matcher-implementation-unblock metric).
+- [README.md](README.md) — changelog entry.
+
+**What did NOT change.**
+- `agent/` untouched (project_scope memory: bot/ only). `agent/kalshi_client.py` not imported or referenced.
+- No scanner / executor / strategy changes. No `bot/main.py`, no `bot/live_watcher.py`, no `bot/config.py`.
+- No bot restart. Tool is fully offline.
+- No LLM in the matching pipeline. Operator IS the validation.
+- No matcher implementation (S105 spec; remains separate session, gated on labeling).
+- No live or paper cross-platform trades.
+
+**Tests:** pytest tests/ → 1707 passed, 0 failed. Baseline 1658 + 49 new = exact 1707 (no regressions, no flakes).
+
+**Verification.**
+- ✅ `python3 tools/build_cross_platform_corpus.py --skip-scrape` regenerates 5,000-pair queue from cached scrapes in ~22 min (CPU-bound on Python date-bucketed cross-join of 120K × 31K = 3.7B comparisons).
+- ✅ Sample MATCH pair inspection confirms quality: tennis match pairs at Jaccard 0.62–0.71 (player names + tournament + same-day close), basketball game pairs at Jaccard 1.0, Bitcoin price-strike pairs at Jaccard 0.64.
+- ✅ Queue file parses cleanly (`head -3 bot/state/cross_platform_labeling_queue.jsonl | python -m json.tool` validates).
+- ✅ Every queue row has `"operator_label": null` (operator-fills-in).
+- ✅ Force-added files appear in `git status` as untracked (not gitignored): `tools/build_cross_platform_corpus.py`, `bot/state/cross_platform_labeling_queue.jsonl`.
+- ✅ Battle Scar #14 — bot PID untouched throughout; tool is fully offline (no bot interaction).
+- ✅ `ls -lh bot/state/cross_platform_labeling_queue.jsonl` confirms 3.3 MB (committable; under GitHub 100 MB cap).
+
+**Watch-list trigger (30d, 2026-06-11):** registered in `bot/state/active_observations.json` Session 116 entry with two metrics:
+1. `operator_pairs_labeled` — expectation: ≥40 within 30 days (≥20 MATCH + ≥20 NO_MATCH per S105 spec). Current: 0.
+2. `matcher_implementation_unblocked` — expectation: when ≥40 labels accumulate, the S105 matcher session can proceed. Current: `blocked_on_labeling`.
+
+If by 2026-06-11 the operator hasn't labeled ≥40 pairs, re-evaluate: corpus may be too thin (politics/econ inventory under-represented vs sports/esports/crypto-micro that dominated the 3-day scrape — operator may want `--lookback-days 30` for slower-settling politics markets), OR the operator workflow may need a CLI label helper (`tools/label_cross_platform_pair.py next/skip/label/quit` was deferred from v1 per session brief).
+
+**Architectural notes.**
+- The "5× Kalshi duplication" bug (per-category iteration on an API that ignores the category param) was caught only by direct probe mid-implementation, not by any unit test. Lesson: scrapers against external APIs should include a "first-page-content-is-different-per-filter" smoke check OR a dedup-by-ticker safeguard. The post-fix dedup-regression test at `TestScrapeKalshi::test_dedupes_repeated_tickers` locks in the safeguard.
+- The "no Polymarket category on recent markets" finding contradicts the S105 design doc assumption (category is exposed). Updated comment in `scrape_polymarket` and removed category filter. Token-set Jaccard alone is doing the heavy lifting for topical filtering — and the 2,937 MATCH suggestions at Jaccard ≥0.60 are well-calibrated by spot-check.
+- The user's "no cap" plan-mode answer was correct for the anticipated 200–500 candidate count but became unworkable at 604K. Capping the operator queue at 5,000 while preserving the full corpus in `bot/state/cache/` (with `--queue-top-n 0` flag to opt out) is the minimum-deviation resolution. Honest documentation of the deviation in this ☑ block + the CLAUDE.md operator protocol section.
+- Polymarket's RECENT-settled inventory (last 3 days) is dominated by per-game esports / hourly crypto-price-strikes — these legitimately match Kalshi equivalents and dominate the high-Jaccard tail. The S105 use-case (politics/econ cross-platform arb) will need the operator to pull a wider lookback (`--lookback-days 30+`) when explicit politics/econ pairs are sparse in the top-Jaccard slice.

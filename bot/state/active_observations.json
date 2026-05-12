@@ -206,7 +206,7 @@
       {
         "name": "KXHIGHAUS forecast-edge loss concentration (watch-list trigger)",
         "expectation": "re-evaluate after 14d (target 2026-05-25). If post-Session-100 KXHIGHAUS rows show N>=10 in the [-0.5, 0.5) forecast_distance bucket AND win_rate < 60%, surface as a candidate for Session 101 forecast-edge-aware floor/sizing decision. Pure observation; no action this session. Motivating evidence: two -$199 KXHIGHAUS B-bucket losses (B80.5, B89.5) on 2026-05-09/10 where the day's high landed inside the bucket.",
-        "current_value": "S115 (2026-05-12) measurement: N_in_bucket=0 of 0 settled KXHIGHAUS-B vig_stack rows with new S100 fields; only 2 post-S100 KXHIGHAUS rows exist total, both still open at forecast_bucket_distance>=3.0 (outside bucket). Motivating losses KXHIGHAUS-26MAY08-B80.5 (-$199.20) and KXHIGHAUS-26MAY09-B89.5 (-$199.87) confirmed in data with family=null AND forecast_bucket_distance=null — pre-S100 instrumentation, un-classifiable retroactively. Re-eval 2026-05-25 unchanged.",
+        "current_value": "S115 (2026-05-12) measurement: N_in_bucket=0 of 0 settled KXHIGHAUS-B vig_stack rows with new S100 fields; only 2 post-S100 KXHIGHAUS rows exist total, both still open at forecast_bucket_distance>=3.0 (outside bucket). Motivating losses KXHIGHAUS-26MAY08-B80.5 (-$199.20) and KXHIGHAUS-26MAY09-B89.5 (-$199.87) confirmed in data with family=null AND forecast_bucket_distance=null \u2014 pre-S100 instrumentation, un-classifiable retroactively. Re-eval 2026-05-25 unchanged.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
@@ -290,7 +290,7 @@
       {
         "name": "live_momentum decisions with context_available=true in decisions.jsonl.extra",
         "expectation": "materially higher forward after restart. Pre-ship all-history coverage was 43/1098 (3.9%) because S96 was forward-only; current May 11 watcher rows were already 43/48 (89.6%). The S107 lift should mainly show on executor all_gates_passed rows and future scan/no-entry context surfaces.",
-        "current_value": "S115 (2026-05-12) measurement on post-S107 window (ts>=2026-05-11T22:00Z): N=20 live_momentum decisions, coverage=100.0% (20/20). Per-sport: atp=11, atp_challenger=2, nba=6, wta_challenger=1 — all sport_disabled rejects being context-instrumented per S107's reachable-partial-context widening. Zero IPL/NHL/UFC decisions in window (no enabled-sport live games since ship). Sub-finding (not actionable today): atp/nba labels appear despite S97 disable set {atp, atp_challenger, nba_game, wta, wta_challenger} — likely a 'nba' vs 'nba_game' ticker-prefix vs ESPN-label discrepancy at sport-tagging site, not an enforcement regression (these are rejects, not accepts). Verify in 5min next sport-tagging investigation.",
+        "current_value": "S115 (2026-05-12) measurement on post-S107 window (ts>=2026-05-11T22:00Z): N=20 live_momentum decisions, coverage=100.0% (20/20). Per-sport: atp=11, atp_challenger=2, nba=6, wta_challenger=1 \u2014 all sport_disabled rejects being context-instrumented per S107's reachable-partial-context widening. Zero IPL/NHL/UFC decisions in window (no enabled-sport live games since ship). Sub-finding (not actionable today): atp/nba labels appear despite S97 disable set {atp, atp_challenger, nba_game, wta, wta_challenger} \u2014 likely a 'nba' vs 'nba_game' ticker-prefix vs ESPN-label discrepancy at sport-tagging site, not an enforcement regression (these are rejects, not accepts). Verify in 5min next sport-tagging investigation.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
@@ -322,13 +322,13 @@
       {
         "name": "reentry_blocked shadow rows with sizing_status=available",
         "expectation": "forward rows should be available whenever the live_momentum sizer returns positive contracts from block-point inputs; unavailable rows must include explicit missing_sizing_fields / sizing_unavailable_reason.",
-        "current_value": "S115 (2026-05-12) measurement: 2 reentry_blocked rows total post-S108 (both IPL KXIPLGAME-26MAY11DCPBKS-PBKS, yes-side @0.68/0.67), both with sizing_status='unavailable' and null would_contracts/would_notional. Sub-finding (not actionable today): S108 sizer wire-up did not populate on these IPL rows; verify next reentry_blocked fire whether extra.missing_sizing_fields/sizing_unavailable_reason annotations are present per Schema spec — if structurally missing, ship a small follow-on instrumentation patch. 0d since S108 ship; explicit 'very early after ship' case.",
+        "current_value": "S115 (2026-05-12) measurement: 2 reentry_blocked rows total post-S108 (both IPL KXIPLGAME-26MAY11DCPBKS-PBKS, yes-side @0.68/0.67), both with sizing_status='unavailable' and null would_contracts/would_notional. Sub-finding (not actionable today): S108 sizer wire-up did not populate on these IPL rows; verify next reentry_blocked fire whether extra.missing_sizing_fields/sizing_unavailable_reason annotations are present per Schema spec \u2014 if structurally missing, ship a small follow-on instrumentation patch. 0d since S108 ship; explicit 'very early after ship' case.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
         "name": "settled-and-sized reentry_blocked rows for S90 threshold analysis",
         "expectation": "when N >= 10 rows have sizing_status=available and settled market_result, compute aggregate would-have-traded P&L to evaluate S90 N=1 vs N=2.",
-        "current_value": "S115 (2026-05-12) measurement: N_settled=0; total_would_pnl=$0.00. Zero sizing-available reentry_blocked rows exist (see prior metric); even if they existed, the only 2 reentry_blocked tickers have close_ts 2026-05-14 — un-settled at measurement time. 14d window opens ~2026-05-26.",
+        "current_value": "S115 (2026-05-12) measurement: N_settled=0; total_would_pnl=$0.00. Zero sizing-available reentry_blocked rows exist (see prior metric); even if they existed, the only 2 reentry_blocked tickers have close_ts 2026-05-14 \u2014 un-settled at measurement time. 14d window opens ~2026-05-26.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
@@ -372,7 +372,7 @@
       {
         "name": "post-S109 reversion re-measurement gate (fires 2026-06-11 OR N>=50 observable >=5c events on commodity-spread families)",
         "expectation": "Re-run Investigation 4 methodology against post-restart universe data, restricted to event_threshold>=5c (S106 spec, not the 1c probe S109 used). If reversion rate >=40% on N>=50 events AND directional anomaly (larger moves revert less) reverses, promote to v1 heuristic session. If <40% OR directional finding persists, kill the strategy class (deferred Outcome C). Headline must include per-family N and the >=5c threshold explicitly to avoid the S103 fabrication trap.",
-        "current_value": "S115 (2026-05-12) hour-3 of 30d window: target-families KXCOPPERD+KXAAAGASD >=5c events = 0 (universe coverage for these tickers ended pre-S109 ship; awaiting next surfacing). Supplementary all-families >=5c events = 395 (eligible 292) with 43.5% reversion of eligible / 32.2% of all — above 40% bar on eligible-only read. NOT actionable: watch-list is scoped to KXCOPPERD+KXAAAGASD per S106 design rationale; do NOT widen unilaterally. Calendar trigger 2026-06-11 remains authoritative; re-examine then if target-family pattern still N-thin and all-families pattern persists.",
+        "current_value": "S115 (2026-05-12) hour-3 of 30d window: target-families KXCOPPERD+KXAAAGASD >=5c events = 0 (universe coverage for these tickers ended pre-S109 ship; awaiting next surfacing). Supplementary all-families >=5c events = 395 (eligible 292) with 43.5% reversion of eligible / 32.2% of all \u2014 above 40% bar on eligible-only read. NOT actionable: watch-list is scoped to KXCOPPERD+KXAAAGASD per S106 design rationale; do NOT widen unilaterally. Calendar trigger 2026-06-11 remains authoritative; re-examine then if target-family pattern still N-thin and all-families pattern persists.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       }
     ]
@@ -464,19 +464,19 @@
   {
     "session": 113,
     "shipped_at": "2026-05-12T03:10:05+00:00",
-    "description": "LIVE_GAME_CARDS_ENABLED flag (default False) gates send_message_get_id + edit_message_by_id in bot/notifier.py. Per-tick editMessageText calls suppressed; initial-card sendMessage suppressed. Operator doesn't read Telegram so per-tick API calls update a status card nobody watches — the disable removes that cost. Event-driven Telegram paths (send_confirmation, send_resolution, send_daily_summary, slash commands) are preserved — they route through send_message() and the base _telegram_call() machinery, not the two disabled methods. Cascade design: send_message_get_id returns None when flag is False, so LiveGameWatcher.status_msg_id stays None, so the existing 'if self.status_msg_id:' guards at live_watcher.py:2205 / 2633 short-circuit per-tick edits without any caller-side changes. 4 new pytest cases (2 no-op assertions, 1 flag=True regression lock, 1 send_message preservation). 3 existing edit_message_by_id tests updated to monkeypatch LIVE_GAME_CARDS_ENABLED=True so they continue exercising the dedup + throttle machinery for the case where the operator flips the flag back on. pytest 1654 → 1658 / 0 failures. Restart 63214 → 85470 via launchctl, cwd-verified.",
+    "description": "LIVE_GAME_CARDS_ENABLED flag (default False) gates send_message_get_id + edit_message_by_id in bot/notifier.py. Per-tick editMessageText calls suppressed; initial-card sendMessage suppressed. Operator doesn't read Telegram so per-tick API calls update a status card nobody watches \u2014 the disable removes that cost. Event-driven Telegram paths (send_confirmation, send_resolution, send_daily_summary, slash commands) are preserved \u2014 they route through send_message() and the base _telegram_call() machinery, not the two disabled methods. Cascade design: send_message_get_id returns None when flag is False, so LiveGameWatcher.status_msg_id stays None, so the existing 'if self.status_msg_id:' guards at live_watcher.py:2205 / 2633 short-circuit per-tick edits without any caller-side changes. 4 new pytest cases (2 no-op assertions, 1 flag=True regression lock, 1 send_message preservation). 3 existing edit_message_by_id tests updated to monkeypatch LIVE_GAME_CARDS_ENABLED=True so they continue exercising the dedup + throttle machinery for the case where the operator flips the flag back on. pytest 1654 \u2192 1658 / 0 failures. Restart 63214 \u2192 85470 via launchctl, cwd-verified.",
     "observation_window_days": 14,
     "metrics": [
       {
         "name": "Telegram editMessageText / edit_message_by_id call volume per 24h",
-        "expectation": "0 with flag False. Verify via `grep -c \"edit_message_text\\|edit_message_by_id\" bot/logs/bot.log` against the rolling log. Any non-zero hit is either (a) someone flipped the flag back on (intentional re-enable), or (b) a path that bypasses the notifier-side guards — investigate.",
-        "current_value": "0 — verified at ship time over the first 3 min post-restart with 3 active LiveGameWatcher MOMENTUM instances (oklahoma, minnesota, casper ruud) firing per-tick logic normally and the cascade short-circuiting cleanly",
+        "expectation": "0 with flag False. Verify via `grep -c \"edit_message_text\\|edit_message_by_id\" bot/logs/bot.log` against the rolling log. Any non-zero hit is either (a) someone flipped the flag back on (intentional re-enable), or (b) a path that bypasses the notifier-side guards \u2014 investigate.",
+        "current_value": "0 \u2014 verified at ship time over the first 3 min post-restart with 3 active LiveGameWatcher MOMENTUM instances (oklahoma, minnesota, casper ruud) firing per-tick logic normally and the cascade short-circuiting cleanly",
         "last_updated": "2026-05-12T03:10:05+00:00"
       },
       {
         "name": "Telegram 'Message is not modified' error count per 24h",
-        "expectation": "0 with flag False (errors only fired when editMessageText fired, so calls=0 implies errors=0). Pre-restart baseline was ~0.6/hour in bot/logs/bot.log.1 (Phase 0 measured 42 raw lines / 70.3h window). NOT the 236/hour the CLAUDE.md Open Loops entry framed — that framing was wrong by ~three orders of magnitude. Do not claim the dedup logic was 'fixed' — it was bypassed; the bug at bot/notifier.py:993 (hash store only after success) is unchanged.",
-        "current_value": "S115 (2026-05-12) verified ~5h post-ship: 0 errors in bot/logs/bot.log post-ship (rate 0.00/hr vs corrected baseline ~0.6/hr). editMessageText calls continued 12 min post-ship (236 calls 22:54:14→23:05:59, all HTTP 200) then ceased fully — consistent with flag taking effect on next live-card render cycle. No residual call site to chase. HEALTHY.",
+        "expectation": "0 with flag False (errors only fired when editMessageText fired, so calls=0 implies errors=0). Pre-restart baseline was ~0.6/hour in bot/logs/bot.log.1 (Phase 0 measured 42 raw lines / 70.3h window). NOT the 236/hour the CLAUDE.md Open Loops entry framed \u2014 that framing was wrong by ~three orders of magnitude. Do not claim the dedup logic was 'fixed' \u2014 it was bypassed; the bug at bot/notifier.py:993 (hash store only after success) is unchanged.",
+        "current_value": "S115 (2026-05-12) verified ~5h post-ship: 0 errors in bot/logs/bot.log post-ship (rate 0.00/hr vs corrected baseline ~0.6/hr). editMessageText calls continued 12 min post-ship (236 calls 22:54:14\u219223:05:59, all HTTP 200) then ceased fully \u2014 consistent with flag taking effect on next live-card render cycle. No residual call site to chase. HEALTHY.",
         "last_updated": "2026-05-12T03:51:39+00:00"
       },
       {
@@ -487,9 +487,35 @@
       },
       {
         "name": "14d re-evaluation trigger",
-        "expectation": "At 2026-05-26 OR if any metric above drifts non-zero before then, re-evaluate: (a) confirm the disable is still appropriate (operator hasn't changed Telegram-usage stance); (b) decide whether to remove the live-card code entirely (currently kept reversible) vs. fix the underlying dedup bug at bot/notifier.py:993 vs. leave as-is. If operator wants live cards back, flipping LIVE_GAME_CARDS_ENABLED=True is the entire change — no other code paths assumed False.",
+        "expectation": "At 2026-05-26 OR if any metric above drifts non-zero before then, re-evaluate: (a) confirm the disable is still appropriate (operator hasn't changed Telegram-usage stance); (b) decide whether to remove the live-card code entirely (currently kept reversible) vs. fix the underlying dedup bug at bot/notifier.py:993 vs. leave as-is. If operator wants live cards back, flipping LIVE_GAME_CARDS_ENABLED=True is the entire change \u2014 no other code paths assumed False.",
         "current_value": "not yet fired (S113 ship time)",
         "last_updated": "2026-05-12T03:10:05+00:00"
+      }
+    ]
+  },
+  {
+    "session": 116,
+    "shipped_at": "2026-05-12T14:49:18.147238+00:00",
+    "description": "S105 cross-platform Kalshi\u2194Polymarket validation corpus scraping + candidate-generation infrastructure shipped via tools/build_cross_platform_corpus.py (470-line single-file CLI). Scrapes Kalshi /events?status=settled&with_nested_markets=true (politics/elections/economics/crypto/world, filtered client-side because the API ignores its own `category` param) + Polymarket Gamma /markets?closed=true&order=closedTime&ascending=false (no category filter \u2014 Polymarket no longer tags recent markets, rely on token-set Jaccard text similarity at pair-time). Live 3-day scrape: 735K unique Kalshi \u00d7 97K Polymarket \u2192 604,603 candidate pairs (2,937 suggested-MATCH at Jaccard \u22650.60, 601,666 NEEDS_REVIEW at Jaccard 0.40\u20130.60). Queue capped at top 5,000 by Jaccard descending (committable 3.3 MB) for operator hand-labeling; full 604K corpus preserved at bot/state/cache/cross_platform_candidate_pairs_full.jsonl (gitignored). Two API quirks caught mid-implementation and regression-locked: Kalshi 5\u00d7 duplication via category-param iteration (fixed: single-pass + client-side filter + ticker dedupe); Polymarket recent markets lack top-level category field (fixed: category filter removed). 49 pytest cases, no agent/ deps, no scanner/executor/strategy changes, no bot restart. Full pytest 1707/0 (1658 baseline + 49 net). Operator labeling protocol documented in CLAUDE.md Cross-platform corpus labeling protocol section.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "operator_pairs_labeled",
+        "expectation": "\u226540 within 30 days (\u226520 MATCH + \u226520 NO_MATCH per S105 spec). Operator opens bot/state/cross_platform_labeling_queue.jsonl and sets operator_label to 'MATCH' / 'NEEDS_REVIEW' / 'NO_MATCH' on each row. Suggested-label hint is non-authoritative. Expected ~30-90 sec per pair. Target throughput \u226540 labels per 60-90 min session. Per-rung Bitcoin / Ethereum / sports / esports MATCH suggestions are well-calibrated by spot-check but are NOT S105's politics/econ target use case \u2014 operator should label honestly; the downstream matcher's scope filter will exclude sports/esports.",
+        "current_value": "0 \u2014 corpus written at ship time; labeling deferred to operator follow-on session",
+        "last_updated": "2026-05-12T14:49:18.147238+00:00"
+      },
+      {
+        "name": "matcher_implementation_unblocked",
+        "expectation": "When \u226520 labeled MATCH + \u226520 labeled NO_MATCH accumulate in cross_platform_labeling_queue.jsonl, the S105 matcher implementation session can proceed. The matcher must achieve zero false positives on labeled-MATCH pairs and \u226530% high-confidence recovery (per S105 spec).",
+        "current_value": "blocked_on_labeling",
+        "last_updated": "2026-05-12T14:49:18.147238+00:00"
+      },
+      {
+        "name": "30d re-evaluation trigger",
+        "expectation": "At 2026-06-11 OR when operator_pairs_labeled reaches 40, re-evaluate. (a) If labeled count is \u226540, unblock matcher implementation session (separate from S116). (b) If labeled count is <20 AND corpus quality is the bottleneck, operator should re-run with wider lookback (`python3 tools/build_cross_platform_corpus.py --lookback-days 30`) to surface politics/econ pairs that settle slower than the dominant per-game / per-hour-strike inventory. (c) If labeled count is <20 AND operator workflow is the bottleneck, ship the deferred tools/label_cross_platform_pair.py CLI helper (next/skip/label/quit) before continuing.",
+        "current_value": "not yet fired (S116 ship time)",
+        "last_updated": "2026-05-12T14:49:18.147238+00:00"
       }
     ]
   }
