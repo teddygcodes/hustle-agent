@@ -5688,3 +5688,30 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - No invented IPL `match_phase` fallback from elapsed wall-clock; rich cricket state remains a follow-on.
 
 **Watch-list / verification.** `bot/state/active_observations.json` now tracks 14d context coverage for live_momentum decisions, executor `all_gates_passed` context, scan/journal context on formerly empty gates, and the S102 slice counts (`leader_price + dip_cents` vs `leader_price + dip_cents + match_phase`). Post-restart expectation: context coverage should rise immediately on executor accept rows and scan/no-entry rows; `match_phase` may remain thin until a future rich-state session.
+
+### ☑ Session 108 — reentry_blocked shadow sizing substrate (2026-05-12, Outcome A forward-only instrumentation)
+
+**Trigger.** S102 found the S90 re-entry-after-loss breaker counterfactual structurally uncomputable: `reentry_blocked` shadow rows had `would_contracts=null`, `would_notional=null`, and `sizing_status="unavailable"`. S103 then caught a fabricated "+$10K saved" claim built from invented contract counts plus a 100x decimal-dollar unit error. This session closes that substrate gap forward-only so future breaker validation can use real sizing evidence instead of guesswork.
+
+**Phase 0 finding.** Outcome A was feasible. Live_momentum sizing is local deterministic math around `kelly_size()` plus dip multiplier, conviction reduction, `SportInstincts` halving, and sport `max_contracts`; it does not need a network call. The existing shadow write happened in `LiveGameWatcher._log_decision_dampened()` before any hypothetical buy sizing, so the fix needed to compute sizing at the `reentry_blocked` reject site and pass it explicitly into the shadow writer. Historical rows remain unavailable by design.
+
+**Outcome A shipped.**
+- Added [bot/live_momentum_sizing.py](bot/live_momentum_sizing.py), a shared side-effect-free helper for live_momentum entry sizing. `_auto_bet_momentum()` now uses the helper, preserving paper-balance reconstruction, GameContext fair-prob fallback behavior, sport multipliers/caps, conviction reduction, and instinct halving.
+- Extended [bot/live_watcher.py](bot/live_watcher.py) `_log_decision_dampened()` with shadow-only sizing kwargs. `sport_disabled` rows stay unavailable; `reentry_blocked` rows now carry `would_contracts` / `would_notional` when sizing returns positive contracts.
+- Added explicit unavailable annotations for non-computable `reentry_blocked` sizing: `extra.missing_sizing_fields` and `extra.sizing_unavailable_reason`. Non-positive or invalid contract counts are coerced back to null rather than written as zeros.
+- Updated [CLAUDE.md](CLAUDE.md) schema notes and removed the resolved S90 sizing-unavailable Open Loop. Added [bot/state/active_observations.json](bot/state/active_observations.json) Session 108 metrics for forward sizing coverage and no-silent-null regressions.
+
+**Tests.**
+- Added helper tests for parity with existing Kelly + dip-scale behavior, sport max-contract caps, missing-input diagnostics, and no-fabrication on unsized Kelly output.
+- Added live-watcher shadow tests for available `reentry_blocked` sizing, unavailable annotation, dampener dedupe, and unchanged `sport_disabled` semantics.
+- ☑ Targeted: `python3 -m pytest tests/test_live_watcher.py tests/test_live_momentum_sizing.py tests/test_shadow_trades.py -q` → **76 passed**.
+- ☑ Spillover guard: `python3 -m pytest tests/test_bot_executor.py::TestSession93FamilyDisableExecutor -q` → **3 passed**.
+- ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1635 passed in 37.47s**.
+
+**What did NOT change.**
+- No re-entry breaker threshold change; `MOMENTUM_REENTRY_LOSS_LIMIT` stays N=1.
+- No entry/exit logic, disabled sports, vig_stack behavior, family disable behavior, budget/cap semantics, or historical shadow-row backfill.
+- No claim about S90 profitability yet. The validation unlocks only after enough post-Session-108 `reentry_blocked` rows are both sized and settled.
+
+**Watch-list / verification.** After restart, inspect the next post-Session-108 `blocked_reason="reentry_blocked"` row in `bot/state/shadow_trades.jsonl`. It should either have `sizing_status="available"` with populated `would_contracts`/`would_notional`, or an explicit `sizing_unavailable_reason` explaining why contracts were not computable. When ≥10 rows are settled and sized, compute aggregate would-have-traded P&L to evaluate S90 N=1 vs N=2.

@@ -790,8 +790,12 @@ session.
 ```
 
 Sizing rule: mark `sizing_status="available"` only when both contracts and
-price are known. If a blocked live-watcher path lacks contracts, keep
-`would_contracts`/`would_notional` null and use `sizing_status="unavailable"`.
+price are known. Session 108 wires forward-only `reentry_blocked` rows through
+the shared live_momentum sizer when block-point inputs are present. If a blocked
+live-watcher path lacks computable contracts, keep
+`would_contracts`/`would_notional` null, use `sizing_status="unavailable"`, and
+include explicit `extra.missing_sizing_fields` / `extra.sizing_unavailable_reason`
+metadata. Do not write zeros or invented contract counts.
 
 ### `bot/state/paper_trades.json` records
 
@@ -1039,8 +1043,6 @@ When a new session ships an Outcome B (design doc) or Outcome C with deferred wo
 ### Blocked: needs dedicated session to unblock data collection
 
 Items where Outcome B was filed but no data accumulates passively.
-
-- **S90 — Re-entry breaker counterfactual computation.** Shadow rows for `reentry_blocked` carry `sizing_status=unavailable`, making counterfactual P&L uncomputable. Surfaced concretely in S102 (couldn't validate whether the breaker is saving or costing money). **Unblocks:** add sizing computation to `bot/shadow_trades.py` writer for the `reentry_blocked` path so each shadow row has `would_contracts` + `would_notional`. **Why it matters:** without this we can't measure whether S90's threshold (N=1) is correct vs N=2.
 
 - **S107 follow-on — rich live_momentum match-phase state.** Session 107 fixed reachable partial context on scan/executor paths, but `match_phase` is still structurally thin for IPL because the regime spec requires `over_count` rather than elapsed wall-clock. **Unblocks:** source compact sport-state fields (`over_count` for IPL, and richer round/set state where available) into `_build_live_momentum_decision_context()` without full ESPN blobs. **Why it matters:** leader-strength and dip buckets are now observable forward, but `sport × match_phase × leader_strength` slicing remains N-thin until rich match state exists.
 
