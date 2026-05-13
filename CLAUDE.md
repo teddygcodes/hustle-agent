@@ -859,6 +859,21 @@ allowlisted no-entry/entry context:
   "innings": int,                      # 1 or 2 — current batting innings (T20 has two)
   "wickets": int,                      # 0..10 — wickets lost by current batting team
   "runs_scored": int,                  # runs in the current innings
+  # Session 137 forward-only — dip classifier label + diagnostic. Present on
+  # every live_momentum decision where the watcher's context-build path fires,
+  # INCLUDING scan-time reject paths (low_volume, no_leader, no_vol_growth_first_seen,
+  # no_vol_growth_idle, capacity_capped, settled, not_today, bad_event_shape).
+  # Absent at paths that bypass the context-build entirely (sport_disabled
+  # rejects, etc.). Reader rule: treat absence as null; do not infer "C" from
+  # absence. Classifier is pure; thresholds at bot/config.py
+  # DIP_CLASSIFIER_WIDE_SPREAD_CENTS / _THIN_VOLUME / _DQS_MIN.
+  "dip_class": "A" | "B" | "C" | "D",  # A=state-confirmed, B=state-deterioration,
+                                        # C=unknown-context (abstain), D=spread/liquidity
+  "dip_classifier_diagnostics": {
+      "version": str,        # "dip_classifier_v1"
+      "axis_fired": str,     # "spread_wide" | "volume_thin" | "missing_context" |
+                             # "all_positive" | "state_deterioration"
+  },
 }
 ```
 
