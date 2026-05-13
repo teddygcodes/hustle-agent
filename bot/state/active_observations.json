@@ -756,5 +756,31 @@
         "last_updated": "2026-05-13T09:25:15Z"
       }
     ]
+  },
+  {
+    "session": 130,
+    "shipped_at": "2026-05-13T10:57:17Z",
+    "description": "live_momentum sizing-on-losses investigation: Outcome (b) \u2014 sizing is also a dead axis. Cap sweep (1-20% of bankroll) finds NO cap value with per-trade delta >= +$1.00 on full N=69 or post-S54 N=32. Existing per-trade caps (5% * balance AND $200 family=None ceiling at bot/sizing.py:113-123) rarely bind on the post-S54 cohort because Kelly itself recommends tiny fractions (0.13% typical at 20 contracts * 75c / $10,500 bankroll). Cohort total_pnl = -$50.86 / 69 trades = -$0.74/trade. Pearson(kelly_frac, pnl) = +0.078 (full) / +0.304 (post-S54); Spearman = +0.106 / -0.181 (Pearson and Spearman point opposite on post-S54 = classic fat-tail signal, no monotone size-loss link). Surprise finding (NOT acted on, scope: sizing only): confidence and DQS are inversely correlated with outcome on the populated sub-cohort (N=37, post-S50): conf 0.75-1.00 band mean=-$2.21 (N=28) vs conf 0.50-0.75 band mean=+$6.31 (N=9); DQS Q2 (=1.0) mean=-$2.35 (N=27) vs DQS Q1 (<=0.708) mean=+$5.82 (N=10). With TP/SL (S129) and sizing (S130) both ruled out, remaining live_momentum leak axes are: (a) entry quality / confidence-DQS scoring direction, (b) sport scope.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "live_momentum_cohort_size_for_resizing_investigation",
+        "expectation": "Re-run tools/_oneoff_session_130_sizing_analysis.py when post-S54 cohort N >= 60 (roughly 2x today's 32) OR full cohort N >= 105 (50% growth from 69) \u2014 whichever first. Re-investigate sizing only if the cap-sweep per-trade delta crosses +$1.00 at any cap value, OR if the post-S54 Spearman flips materially positive (>+0.25). Otherwise sizing axis stays closed.",
+        "current_value": "post-S54 N=32, full cohort N=69 on 2026-05-13",
+        "last_updated": "2026-05-13T10:57:17Z"
+      },
+      {
+        "name": "live_momentum_confidence_dqs_inverse_signal",
+        "expectation": "If at next re-measurement (N>=60 post-S54) the populated-confidence high-band (0.75-1.00) still underperforms the medium-band (0.50-0.75) AND DQS quartile inversion persists, queue a focused session to investigate whether S50 confidence/DQS scoring direction is wrong (scoring captures the inverse of outcome). Currently UNACTIONED \u2014 this session's scope was sizing-only.",
+        "current_value": "Populated N=37. conf 0.75-1.00 mean=-$2.21 (N=28) vs 0.50-0.75 mean=+$6.31 (N=9). DQS Q2 (=1.0) mean=-$2.35 (N=27) vs Q1 (<=0.708) mean=+$5.82 (N=10).",
+        "last_updated": "2026-05-13T10:57:17Z"
+      },
+      {
+        "name": "post_s54_kelly_q3_loss_concentration",
+        "expectation": "Post-S54 Kelly-band Q3 (fractions 0.0013-0.0015) had total_pnl=-$49.00 (N=8, mean=-$6.12, p95_loss=-$16.40 \u2014 the cohort's single biggest loss) vs Q1+Q2+Q4 combined total=+$27.64. If Q3 reverses to non-negative on re-measurement, the cohort's single-tail concentration was a small-N artifact, not structural. If Q3 stays the worst quartile with growing N, sizing-cap investigation worth re-opening with finer band granularity (deciles).",
+        "current_value": "Q3 N=8 total=-$49.00; Q1+Q2+Q4 combined total=+$27.64 on 2026-05-13",
+        "last_updated": "2026-05-13T10:57:17Z"
+      }
+    ]
   }
 ]

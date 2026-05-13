@@ -6591,3 +6591,121 @@ Session 129 training table, raw N=69 / sweep N=51:
 **What this session did NOT do.**
 - No changes to [bot/config.py](bot/config.py), [bot/live_watcher.py](bot/live_watcher.py), [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py), `MOMENTUM_DISABLED_SPORTS`, or production trading state.
 - No test changes, no TP/SL config change, no bot restart.
+
+### ☑ Session 130 — live_momentum sizing-on-losses investigation (2026-05-13, Outcome B — Pattern C / dead axis)
+
+**Decision: Outcome B / classification (b).** S40 named Win:Loss magnitude = 0.261 (avg win +$3.41 / avg loss −$13.10) as the structural `live_momentum` leak. S41 surfaced four candidate explanations; S129 (today) ruled out the TP/SL ratio axis. This session investigated the remaining un-falsified axis — sizing asymmetry — and concludes it is **also a dead axis**: no Kelly-fraction band or counterfactual cap value produces an actionable improvement (≥ +$1.00/trade per the S40 EE-cohort benchmark). No config change shipped.
+
+**Phase 0 premises (verified).**
+- Cohort: `type=='live_momentum' AND status in {won, lost, exited_early} AND timestamp >= 2026-04-23`. **Full N=69** (46 exited_early / 17 won / 6 lost). Sport mix `?=32 / atp=18 / nba=7 / ipl=6 / nhl=3 / ufc=3`. Post-Apr-29 (bankroll-bump) sub-cohort **N=47**. Post-S54 (sizer-fix, ≥ 2026-05-05) sub-cohort **N=32**.
+- Total cohort PnL: **−$50.86** (−$0.74/trade).
+- Sizer signature at [bot/sizing.py:18](bot/sizing.py): `kelly_size(edge, probability, balance, price_cents, max_fraction=MAX_BET_FRACTION, uncertainty_discount=1.0, confidence=0.75, sport=None, family=None)`. `KELLY_FRACTION = 0.25` (quarter-Kelly). `MAX_BET_FRACTION = 0.05` (5% per-trade cap). When `family=None`, hardcoded **$200/trade dollar ceiling** at [bot/sizing.py:113-123](bot/sizing.py). Sport multiplier branch active only when `sport=` passed.
+- live_momentum call site at [bot/live_watcher.py:3192-3219](bot/live_watcher.py): `bet_balance = PAPER_STARTING_BALANCE + paper_pnl` (S54 fix confirmed in place; prompt's :1686 reference is stale — code at :3192 now). Sizer is called with `confidence=0.75` **literal constant** — the sizer never sees per-trade confidence/DQS. `sport` and `family` not passed → sport-multiplier inactive, `family=None` $200 cap applies.
+- Config constants: `PAPER_STARTING_BALANCE = 10_500.0`, `STRATEGY_BUDGETS["live_momentum"] = 0.20`, `MAX_POSITION_PERCENT = 0.20`.
+
+**Analysis.** New one-off script at [tools/_oneoff_session_130_sizing_analysis.py](tools/_oneoff_session_130_sizing_analysis.py) reconstructs `bankroll_at_entry` per trade ($500 starting before 2026-04-29, $10,500 after) by summing realized P&L on all paper trades resolved before each entry, then derives `kelly_fraction_actual = notional / bankroll`. Tables A–E plus a Pearson+Spearman correlation block and a 7-step counterfactual cap sweep.
+
+**Table A.1 — kelly_band quartile (full N=69).**
+
+| Quartile | N | WR | mean | median | p95_loss | total |
+|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 18 | 56% | −$0.36 | +$0.50 | −$13.00 | −$6.49 |
+| Q2 | 17 | 24% | −$5.23 | −$2.00 | −$16.40 | **−$88.84** |
+| Q3 | 17 | 53% | +$3.12 | +$0.23 | −$10.11 | +$53.05 |
+| Q4 | 17 | 65% | −$0.50 | +$2.10 | −$14.60 | −$8.58 |
+
+Q4 (largest Kelly fractions) has the **best** win-rate (65%) and only mildly negative mean. The loss concentration is Q2 (medium-low), not Q4 — direction-of-causation runs opposite to the sizing-asymmetry hypothesis.
+
+**Table A.2 — kelly_band quartile (post-S54 N=32, the cleanly-sized cohort).**
+
+| Quartile | N | WR | mean | median | p95_loss | total |
+|---:|---:|---:|---:|---:|---:|---:|
+| Q1 | 8 | 25% | −$2.35 | −$1.50 | −$13.00 | −$18.80 |
+| Q2 | 8 | 38% | +$0.13 | −$1.10 | −$2.00 | +$1.00 |
+| Q3 | 8 | 25% | −$6.12 | −$2.30 | −$16.40 | **−$49.00** |
+| Q4 | 8 | 38% | +$5.68 | −$2.10 | −$10.11 | +$45.44 |
+
+Largest losses cluster in Q3, not Q4 — and Q4 is **positive** at +$45.44. The post-S54 quartiles are right at the stability floor (N=8 each) so treat as provisional.
+
+**Table B — entry_price_band (full N=69).**
+
+| Band | N | WR | mean | total |
+|---:|---:|---:|---:|---:|
+| 60–69¢ | 16 | 38% | −$3.11 | −$49.82 |
+| 70–79¢ | 35 | 46% | +$0.28 | +$9.91 |
+| 80–89¢ | 18 | 67% | −$0.61 | −$10.95 |
+
+Low-entry trades carry the loss; 70–79¢ is roughly flat; 80–89¢ has highest WR but a single fat-tail loss.
+
+**Tables C & D — confidence/DQS (informational; sizer ignores both).** N=37 trades have populated confidence/DQS (post-S50, 2026-05-01+; pre-S50 trades have `confidence=0`/`dqs=None` per the Session 50 forward-only rule). **The surprising signal**: confidence and DQS are **inversely** correlated with outcome.
+
+| confidence band | N | WR | mean | total |
+|---:|---:|---:|---:|---:|
+| 0.50–0.75 | 9 | 44% | +$6.31 | +$56.83 |
+| 0.75–1.00 | 28 | 39% | **−$2.21** | −$62.00 |
+
+| DQS quartile | N | WR | mean | total |
+|---:|---:|---:|---:|---:|
+| Q1 (≤0.708) | 10 | 50% | +$5.82 | +$58.23 |
+| Q2 (=1.0) | 27 | 37% | **−$2.35** | −$63.40 |
+
+DQS clusters hard at the top of the range (Q2/Q3/Q4 edges all = 1.0), so the table collapses to Q1 vs the saturated rest. Reading: the S50 composite confidence/DQS scoring may be capturing the **inverse** of outcome — a high-conf/high-DQS dip predicts a losing trade more often than a winning one in this cohort. This is NOT a sizing finding (sizer never reads these inputs) and was NOT acted on this session; flagged in active_observations.json (`live_momentum_confidence_dqs_inverse_signal`) for a follow-up scoring-direction investigation when post-S54 N grows.
+
+**Correlation.**
+- Full N=69: Pearson(kelly_frac, pnl) = **+0.078**, Spearman = **+0.106**. Effectively zero — no monotone size↔outcome link.
+- Post-S54 N=32: Pearson = **+0.304**, Spearman = **−0.181**. Pearson and Spearman point opposite — classic fat-tail signal (one or two large positives and one or two large negatives dominate). No clean trend either direction.
+
+**Counterfactual cap sweep — full N=69 (uncapped total = −$50.86).**
+
+| Cap | N_capped | cohort_pnl | Δ vs uncap | Δ/trade |
+|---:|---:|---:|---:|---:|
+| 1% | 25 | −$58.56 | −$7.70 | **−$0.11** |
+| 2% | 19 | −$45.24 | +$5.62 | +$0.08 |
+| 3% | 12 | −$50.05 | +$0.81 | +$0.01 |
+| 5% | 1 | −$51.54 | −$0.68 | −$0.01 |
+| 10% | 0 | −$50.86 | $0.00 | $0.00 |
+| 15% | 0 | −$50.86 | $0.00 | $0.00 |
+| 20% | 0 | −$50.86 | $0.00 | $0.00 |
+
+**Post-S54 N=32 sweep (uncapped total = −$21.36).**
+
+| Cap | N_capped | cohort_pnl | Δ vs uncap | Δ/trade |
+|---:|---:|---:|---:|---:|
+| 1% | 4 | −$41.00 | −$19.64 | −$0.61 |
+| 2% | 1 | −$20.79 | +$0.57 | +$0.02 |
+| 3% | 0 | −$21.36 | $0.00 | $0.00 |
+| ≥5% | 0 | −$21.36 | $0.00 | $0.00 |
+
+The action threshold is +$1.00/trade (mirrors the S40 EE-cohort −$0.55/trade benchmark). **No cap value clears it on either cohort.** At 1% the cap binds aggressively but *hurts* cohort P&L (it caps winners more aggressively than losers because the high-Kelly trades in this cohort are pre-Apr-29 trades on the small $500 bankroll, and they're a mix of wins and losses, not a structural loss tail). At ≥3% (post-S54) and ≥10% (full), the cap doesn't bind at all — existing caps (5% × balance, $200 family-None ceiling) are already looser than what Kelly itself recommends in the post-S54 trades, which size at ~0.13% of bankroll typically (20 contracts × 75¢ on $11k bankroll = $15 notional = 0.14% of bankroll, well under any tested cap).
+
+**Why the existing caps rarely bind on post-S54 trades.** Kelly's recommended fraction is `(prob × (1+payoff) − 1) / payoff`, then × `KELLY_FRACTION=0.25`. For a typical live_momentum trade (`prob≈0.55`, entry 70–80¢ → payoff ratio ≈ 0.30), quarter-Kelly recommends a notional that is a small fraction of bankroll. The $200/5% caps were designed to prevent runaway full-Kelly sizing, but quarter-Kelly + the cap structure makes the effective cap mostly moot for typical edges in this cohort. Sizing is already conservative; the leak isn't in sizing.
+
+**Subgroup audit (the bug-period anomaly).**
+- Pre-Apr-29 (true bankroll ~$500): N=22, total = **−$17.79**.
+- Apr-29 → May-4 (S54 bug window: bot used `$500 + pnl` but actual bankroll was `~$10,500 + pnl`): N=15, total = **−$11.71**. Their realized Kelly fractions (notional / true_bankroll) are tiny (~0.13–0.15%, clustering in Q1 of the full-cohort kelly_band).
+- Post-S54: N=32, total = **−$21.36**.
+
+All three sub-periods are negative. The leak persists across the sizing-bug boundary. The leak is **not** sizing.
+
+**Classification rationale.** Outcome (b) — diffuse losses with no clear size dependence. Not (a): no band has p95_loss ≥ 2× the median band's p95_loss in a directionally-consistent way, and cap sweep finds no per-trade Δ ≥ +$1.00. Not (c): full-cohort Pearson is positive (small) so big trades aren't winning more; the relationship is essentially noise. Not (d): N=32 post-S54 is at the floor but the full N=69 has enough statistical mass for the broad conclusion, and the conclusion is "no signal" not "uncertain." Not (e): no sport-specific actionable sub-finding inside Table E (sport × kelly_band cells too thin; atp Q1/Q3 are slightly negative, ipl Q4 is positive, ufc Q1 slightly negative — typical small-sample noise).
+
+**Most surprising finding.** Confidence and DQS show an **inverse** relationship with outcome on the populated sub-cohort. Per the prompt's scope, NOT acted on. Flagged in [bot/state/active_observations.json](bot/state/active_observations.json) S130 entry as a candidate follow-up session: "investigate whether S50 confidence/DQS scoring direction is wrong (scoring captures the inverse of outcome)." Pre-condition: post-S54 cohort should grow to N≥60 before re-measuring — current N=37 is thin, signal could be a small-sample artifact.
+
+**Most actionable finding.** None — sizing axis is closed for now. The cumulative `live_momentum` leak picture after S40 + S41 + S129 + S130:
+- TP/SL ratio axis — ruled out (S129 Pattern C).
+- Exit-firing axis — ruled out (S41 counterfactual analysis: holding EE trades to settlement would have lost MORE money).
+- Sizing axis — ruled out (this session).
+- **Remaining un-investigated axes**: (a) entry-quality scoring direction (S50 confidence/DQS forward-only data, now thick enough to see signal but inverted from expectation); (b) sport-scope (S97 disabled atp+nba_game; ipl was added S112 with strong-looking early data — small N).
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` → **1767 passed**.
+- Post-edit pytest: pending — see ship verification below.
+- Script execution: `python3 tools/_oneoff_session_130_sizing_analysis.py` ran clean, all tables produced.
+
+**Watch-list trigger.** Re-run [tools/_oneoff_session_130_sizing_analysis.py](tools/_oneoff_session_130_sizing_analysis.py) when post-S54 cohort N ≥ 60 (roughly 2× today's 32) OR full cohort N ≥ 105 (50% growth) — whichever first. Re-open sizing investigation only if (a) any cap value crosses per-trade Δ ≥ +$1.00, OR (b) post-S54 Spearman flips materially positive (> +0.25). Otherwise sizing axis stays closed.
+
+**What this session did NOT do.**
+- No changes to [bot/sizing.py](bot/sizing.py), [bot/config.py](bot/config.py), [bot/live_watcher.py](bot/live_watcher.py), or [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py).
+- No changes to `MOMENTUM_DISABLED_SPORTS`, sport profiles, Kelly fraction, position caps, or strategy budgets.
+- No production state files changed except the operator-curated `bot/state/active_observations.json` (S130 entry append).
+- No bot restart. No test changes. The confidence/DQS inversion was identified but NOT acted on per session scope.
