@@ -6863,3 +6863,125 @@ All thresholds 0.70–0.90 clear the S130 actionability gate (Δ/trade ≥ +$1.0
 - No production state files changed except the operator-curated [bot/state/active_observations.json](bot/state/active_observations.json) (S99 metric update + new S131 entry).
 - No bot restart. No test changes. No confidence-band filter shipped.
 - The S99 May 25 native Brier-eval trigger is **preserved** as the strict ship-bar; S131's reconstructed measurement is a pulled-forward read, not a replacement.
+
+### ☑ Session 132 — live_momentum sport-scope profitability deep-dive (2026-05-13, Outcome B — classification (d) primary, operator-noted (e))
+
+**Decision: Outcome B / classification (d) N-too-thin-per-sport with operator-noted (e) sub-period instability on IPL.** S131 closed with a sport-confounded finding (IPL +/ ATP −). This session takes the full post-Apr-23 cohort (N=69) and asks the forward-looking question: "what sports should live_momentum actually be running on?" Full-cohort breakdown **confirms the S97 disable was correct** (ATP −$54.20 / N=18 and nba_game −$54.57 / N=18 both still dramatically negative). Among CURRENTLY-ENABLED sports the counterfactual sweep flags two candidates above the +$1.00/trade actionability gate (`only_ipl` Δ +$2.38; `disable_ufc` Δ +$1.11), but **per-sport bootstrap 95% CIs all span zero** (IPL [−3.71, +16.21] width $19.92; nhl_game [−2.15, +3.27]; UFC [−2.64, +0.57]). Max per-sport N = 13, below the 15 threshold for a confident scope-restriction call. The IPL headline +$53.71 is sub-period concentrated: $60.1 of it comes from **2 trades** in the May-5→May-11 window; the post-May-11 IPL signal is already −$14.4/N=2. No `MOMENTUM_DISABLED_SPORTS` edit, no `SPORT_PROFILES` toggle, no bot restart, no production code change.
+
+**Phase 0 premises (verified).**
+- `MOMENTUM_DISABLED_SPORTS` at [bot/config.py:239](bot/config.py:239) = `{"atp", "atp_challenger", "nba_game", "wta", "wta_challenger"}`. Matches CLAUDE.md.
+- `SPORT_PROFILES` MLB entry at [bot/config.py:387-400](bot/config.py:387) has `"disabled": True`. Other sports enabled at profile level.
+- Cohort: `type=='live_momentum' AND status in {won, lost, exited_early} AND timestamp >= 2026-04-23`. **N=69** (won=17 / lost=6 / exited_early=46). Raw `sport` field distribution: `?=32 / atp=18 / nba=7 / ipl=6 / nhl=3 / ufc=3`. 32 trades have `sport='?'`.
+- Sport canonicalization (this session's discipline): every cohort trade canonicalized from its full ticker prefix using CLAUDE.md's [ticker prefix → sport map](CLAUDE.md:883), longest-match-first. Resolves the 32 `?` rows AND normalizes simplified labels (raw `'nba'` → canonical `'nba_game'`, raw `'nhl'` → canonical `'nhl_game'`) so the same granularity matches `MOMENTUM_DISABLED_SPORTS`. **No category drift, no unmapped tickers.** Granularity drift (expected): `'nba' → 'nba_game' (7)`, `'nhl' → 'nhl_game' (3)`. Canonical distribution: `nba_game=18 / atp=18 / ipl=13 / nhl_game=10 / ufc=10`.
+- Sub-period boundaries (UTC date string compare): pre-Apr-29 (N=22) / Apr-29→May-5 (N=15, S54 sizer-fix landed May-5) / May-5→May-11 (N=27) / post-May-11 (N=5, S97 ATP+nba_game disable + S112 IPL ESPN-integration ship).
+- `exit_reason` missing on 35 / 69 cohort rows (50.7%) — forward-only since S36. On the enabled cohort (N=33) the Other bucket carries 79% of trades.
+- Pytest baseline: **1767 passed** in 38.13s.
+
+**Analysis.** New one-off script at [tools/_oneoff_session_132_sport_scope.py](tools/_oneoff_session_132_sport_scope.py). 7 analyses (A–G) plus a decision-framing block, pure-stdlib (json / statistics / math / random); mirrors S130 + S131 oneoff pattern. Output captured at `/tmp/s132_output.txt`.
+
+**Table A — full-cohort sport breakdown (sorted by total P&L descending).**
+
+| Sport | N | W/L/EE | WR | Mean $ | Total $ | Entry ¢ | Conf |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ipl | 13 | 2/0/11 | 15.4% | **+4.13** | **+53.71** | 72.7 | 0.695 |
+| nhl_game | 10 | 7/1/2 | 70.0% | +1.22 | +12.20 | 79.5 | 0.831 |
+| ufc | 10 | 1/1/8 | 10.0% | −0.80 | −8.00 | 77.8 | 1.000 |
+| atp | 18 | 1/0/17 | 5.6% | **−3.01** | **−54.20** | 74.6 | 1.000 |
+| nba_game | 18 | 6/4/8 | 33.3% | **−3.03** | **−54.57** | 73.7 | 0.870 |
+
+ATP −$54.20 reconciles exactly with S131's post-S50 ATP number (the 18 trades are the same trades). nba_game is the new headline drag at −$54.57. Both are already in `MOMENTUM_DISABLED_SPORTS` — the S97 ship was correct. WR column is status-based (`'won' / N`); IPL and UFC are EE-dominated so WR is low even where total P&L is positive.
+
+**Table B — enabled-only sub-cohort (forward-looking, N=33).**
+
+| Sport | N | W/L/EE | WR | Mean $ | Total $ | Entry ¢ | Conf |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ipl | 13 | 2/0/11 | 15.4% | +4.13 | +53.71 | 72.7 | 0.695 |
+| nhl_game | 10 | 7/1/2 | 70.0% | +1.22 | +12.20 | 79.5 | 0.831 |
+| ufc | 10 | 1/1/8 | 10.0% | −0.80 | −8.00 | 77.8 | 1.000 |
+
+Enabled-cohort total: **+$57.91 / N=33** (mean +$1.75/trade). The three enabled sports differ by ~$5/trade across the range.
+
+**Table C — sub-period N per enabled sport (ungated diagnostic; gated detail below).**
+
+| Sport | pre-Apr-29 | Apr-29 → May-5 | May-5 → May-11 | post-May-11 | Total |
+|---|---:|---:|---:|---:|---:|
+| ipl | 4 (−$4.3) | 5 (+$12.3) | **2 (+$60.1)** | 2 (−$14.4) | 13 |
+| nhl_game | 4 (+$10.9) | 4 (−$3.3) | 1 (+$1.4) | 1 (+$3.2) | 10 |
+| ufc | 7 (−$7.2) | 0 | 3 (−$0.8) | 0 | 10 |
+
+No enabled sport clears the N≥5 post-S54 gate, so the detail table doesn't render. The diagnostic reveals **outcome (e) sub-period instability on IPL**: the +$60.1 in the 2-trade May-5→May-11 window dominates IPL's headline; the more recent post-May-11 sub-cohort (since S112 ESPN-integration ship) is already −$14.4 on N=2. UFC has zero trades in the bankroll-bump (Apr-29→May-5) and post-May-11 windows — UFC has gone quiet since S97.
+
+**Table D — time-in-trade and exit-reason by sport (enabled, N≥10).**
+
+| Sport | N | Mean hold (min) | Median hold (min) | TP% | SL% | EE% | Other% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ipl | 13 | 33.6 | 26.8 | 0.0% | 30.8% | 0.0% | 69.2% |
+| nhl_game | 10 | 97.4 | 85.1 | 20.0% | 0.0% | 0.0% | 80.0% |
+| ufc | 10 | 9.1 | 2.7 | 10.0% | 0.0% | 0.0% | 90.0% |
+
+UFC's 2.7-min median hold vs IPL's 26.8 vs nhl_game's 85.1 is a striking per-sport difference. With 79% of enabled trades in the Other bucket (pre-S36 exit_reason gap), the TP/SL/EE percentages are informational only — re-investigate when Other% < 30%.
+
+**Table E — per-sport entry price distribution (enabled, N≥10).**
+
+| Sport | N | Mean ¢ | Med ¢ | p25 ¢ | p75 ¢ |
+|---|---:|---:|---:|---:|---:|
+| ipl | 13 | 72.7 | 74.0 | 71.0 | 74.0 |
+| nhl_game | 10 | 79.5 | 82.5 | 76.2 | 83.8 |
+| ufc | 10 | 77.8 | 77.5 | 77.0 | 79.0 |
+
+No S38c (premium leaders ≥90¢) signal on the enabled cohort. nhl_game has the highest median entry (82.5¢) and the highest WR (70%); IPL has the lowest median entry (74.0¢) and high mean P&L. The "premium losers" hypothesis would predict the opposite if it applied here. Flag for S38c, not re-scoped here.
+
+**Table F — counterfactual scope sweep (baseline = currently-enabled, N=33, total +$57.91, mean +$1.75/trade).**
+
+| Action | N | Total $ | Mean $ | Δ vs base |
+|---|---:|---:|---:|---:|
+| baseline (enabled) | 33 | +57.91 | +1.75 | — |
+| disable_ipl | 20 | +4.20 | +0.21 | −1.54 |
+| disable_nhl_game | 23 | +45.71 | +1.99 | +0.23 |
+| disable_ufc | 23 | +65.91 | +2.87 | **+1.11 ⭐** |
+| only_ipl | 13 | +53.71 | +4.13 | **+2.38 ⭐** |
+| only_nhl_game | 10 | +12.20 | +1.22 | −0.53 |
+| only_ufc | 10 | −8.00 | −0.80 | −2.55 |
+
+⭐ = clears the +$1.00/trade actionability gate. Two candidates: `disable_ufc` and `only_ipl`. Both are conditional on the bootstrap CI (Analysis G) below.
+
+**Table G — sport-stratified bootstrap 95% CI on per-sport mean P&L (10,000 iters, seed=132).**
+
+| Sport | N | Mean $ | 95% CI lo | 95% CI hi | CI width | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| ipl | 13 | +4.13 | −3.71 | +16.21 | $19.92 | spans 0 |
+| nhl_game | 10 | +1.22 | −2.15 | +3.27 | $5.42 | spans 0 |
+| ufc | 10 | −0.80 | −2.64 | +0.57 | $3.21 | spans 0 |
+
+**All three CIs span zero.** IPL's CI is very wide ($19.92) — N=13 is too thin to distinguish "real edge" from "lucky sample". UFC's CI is tight but straddles zero on both sides, consistent with no detectable per-trade effect at N=10. nhl_game similarly inconclusive.
+
+**Classification rationale.** Outcome B / (d) primary with operator-noted (e).
+- NOT (a) clean disable: `disable_ufc` clears the +$1.00 gate but UFC's CI spans 0 (no confident downside).
+- NOT (b) clean restrict: `only_ipl` clears the +$1.00 gate but IPL's CI is wide and spans 0; the per-sport profitability case is not statistically defensible.
+- NOT (c) uniform: there IS material per-sport spread (IPL +$4.13 vs UFC −$0.80 per-trade), so "everything's roughly the same" doesn't fit either.
+- (d) is the primary fit: max per-sport N = 13 (IPL), below the 15 threshold. Bootstrap CIs are wide enough that any candidate scope move could plausibly be reversed by 3-5 new trades.
+- (e) is the operator-noted secondary fit, specific to IPL: $60.1 of IPL's $53.71 comes from 2 trades in a 6-day window; post-May-11 is already −$14.4/N=2. The cohort is not homogeneous within IPL itself.
+
+**Sharpest single contrast.** IPL Apr-29→May-5 (+$12.3 / N=5) vs IPL May-5→May-11 (+$60.1 / N=2) — the latter window is +$30/trade on 2 trades. This is the kind of contrast that disappears with N=5 more trades, in either direction. The forward-looking question depends on which way it resolves.
+
+**Direction-setting conclusion.** This is the **first sport-scope investigation that takes the full post-Apr-23 cohort** rather than the post-S50 sub-cohort. It opens (does not close) the sport-scope arc:
+- The S97 disable set is **confirmed correct** by the full-cohort numbers — re-enable evaluation for ATP / nba_game / wta / wta_challenger / atp_challenger should NOT use S132 evidence as a re-enable case.
+- The IPL profitability story is **not yet defensible**; the headline number is concentrated in 2 trades.
+- The UFC marginal-negative story is **not yet defensible** either.
+- The next sport-scope session should run **when any single enabled sport reaches N=15** — that's roughly 2-3 more IPL trades or 5 more UFC trades from the May-13 baseline.
+- No new investigation axis opens. No follow-up S133 session queued in CLAUDE.md Open Loops (Outcome B does not warrant it; the watch-list trigger lives in `bot/state/active_observations.json`).
+
+**Watch-list trigger.** Re-run [tools/_oneoff_session_132_sport_scope.py](tools/_oneoff_session_132_sport_scope.py) when any enabled sport reaches per-sport N≥15, OR when post-May-11 IPL reaches N≥10. Re-investigate scope-restriction only if (a) the relevant sport's bootstrap CI excludes zero on the actionable side AND (b) the counterfactual sweep still produces Δ ≥ +$1.00/trade vs baseline AFTER controlling for sub-period (i.e., on the post-May-11 sub-cohort alone, IPL specifically). Otherwise the sport-scope axis stays open but un-actionable.
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` → **1767 passed** in 38.13s.
+- Post-edit pytest: re-run after ship (Task 14).
+- Script execution: `python3 tools/_oneoff_session_132_sport_scope.py` ran clean; audit shows N=69, no unmapped tickers, no category drift, expected granularity drift only.
+- Dashboard updates: new S132 entry appended to [bot/state/active_observations.json](bot/state/active_observations.json) with 4 metrics tracking per-sport N threshold, IPL sub-period instability, disabled-sport continued drag baseline, and exit-reason coverage.
+
+**What this session did NOT do.**
+- No changes to [bot/config.py](bot/config.py) — `MOMENTUM_DISABLED_SPORTS` and `SPORT_PROFILES` unchanged.
+- No changes to [bot/live_watcher.py](bot/live_watcher.py), [bot/game_context.py](bot/game_context.py), [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py), [bot/sizing.py](bot/sizing.py).
+- No production state files changed except the operator-curated [bot/state/active_observations.json](bot/state/active_observations.json) (new S132 entry).
+- No bot restart. No test changes. No `CLAUDE.md` Open Loops update (Outcome B does not warrant a queued follow-up session).
+- The 2-trade IPL May-5→May-11 window driving +$60.1 was NOT investigated at the per-trade level — that's a candidate sub-investigation if a future operator wants to understand whether those 2 trades reveal an exploitable mechanism (e.g., specific match phase + entry price combination). S132 stays at the cohort-statistics level.

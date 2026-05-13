@@ -814,5 +814,37 @@
         "last_updated": "2026-05-13T16:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 132,
+    "shipped_at": "2026-05-13T20:00:00+00:00",
+    "description": "live_momentum sport-scope profitability deep-dive on the post-Apr-23 cohort (N=69; enabled-only N=33). Outcome B, classification (d) primary with operator-noted (e) sub-period instability. Full-cohort sport breakdown confirms the S97 disable was correct (ATP -$54.20/N=18, nba_game -$54.57/N=18 still dramatically negative). Among CURRENTLY-ENABLED sports: IPL +$53.71/N=13 (headline winner), nhl_game +$12.20/N=10 (70% WR), UFC -$8.00/N=10 (flat). Counterfactual sweep flags only_ipl \u0394 +$2.38/trade and disable_ufc \u0394 +$1.11/trade above the +$1.00 actionability gate, BUT per-sport bootstrap 95% CIs all span zero (IPL [-3.71, +16.21] width $19.92; nhl_game [-2.15, +3.27]; UFC [-2.64, +0.57]). IPL profitability is sub-period concentrated: $60.1 of the $53.71 comes from 2 trades in the May-5\u2192May-11 window; post-May-11 IPL is already -$14.4/N=2. Max per-sport N=13 is below the 15 threshold for a confident scope-restriction call. No config change. Analysis script at tools/_oneoff_session_132_sport_scope.py.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "live_momentum_per_sport_N_threshold_for_scope_action",
+        "expectation": "Re-investigate sport-scope when per-sport N>=15 for any enabled sport (today max is IPL N=13). At N>=15, re-run tools/_oneoff_session_132_sport_scope.py. Threshold for scope-restriction action: bootstrap 95% CI excludes 0 on the relevant side AND counterfactual sweep (Analysis F) still produces per-trade \u0394 >= +$1.00 vs baseline AFTER the IPL May-5\u2192May-11 concentration washes out (i.e., on the post-May-11 sub-cohort, where the May-5\u2192May-11 lucky trades no longer dominate). Until then, MOMENTUM_DISABLED_SPORTS stays at {atp, atp_challenger, nba_game, wta, wta_challenger}.",
+        "current_value": "S132 (2026-05-13) enabled cohort N=33: per-sport N = {ipl: 13, nhl_game: 10, ufc: 10}. Bootstrap CIs all span 0. Largest CI width (IPL $19.92) reflects N=13 small-sample variance.",
+        "last_updated": "2026-05-13T20:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_ipl_sub_period_instability",
+        "expectation": "Track whether IPL's headline +$53.71 profitability persists outside the May-5\u2192May-11 window. Specifically: post-May-11 IPL is currently -$14.4/N=2 (since S112 ESPN-integration ship). If post-May-11 IPL grows to N>=10 with mean P&L >= +$1.00/trade, the May-5\u2192May-11 concentration was not the whole story \u2014 promote to sport-scope-in candidate. If post-May-11 IPL grows to N>=10 with mean P&L <= -$1.00/trade, the May-5\u2192May-11 window was an outlier and IPL is not the leader sport. If N stays thin, the question stays open.",
+        "current_value": "S132 (2026-05-13) IPL sub-period breakdown: pre-Apr-29 N=4 -$4.3; Apr-29\u2192May-5 N=5 +$12.3; May-5\u2192May-11 N=2 +$60.1; post-May-11 N=2 -$14.4. The +$60.1 in the 2-trade May-5\u2192May-11 window is the headline driver; post-May-11 signal is already negative.",
+        "last_updated": "2026-05-13T20:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_disabled_sport_continued_drag",
+        "expectation": "Verify the S97 ATP and nba_game disables remain correct as new ATP/nba_game shadow trades accumulate (S95 family_disabled_reject ledger). If post-S97 shadow ATP/nba_game shows mean would-have P&L >= +$1.00/trade on N>=15, the disable should be reconsidered. Otherwise the disable stands. Tracked here so any future re-enable session has the S132 baseline numbers to compare against.",
+        "current_value": "S132 (2026-05-13) full cohort: ATP -$54.20/N=18 (mean -$3.01, WR 5.6%); nba_game -$54.57/N=18 (mean -$3.03, WR 33.3%). Both DISABLED at config time. Baseline established for next re-enable evaluation.",
+        "last_updated": "2026-05-13T20:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_exit_reason_coverage",
+        "expectation": "exit_reason field is forward-only since S36 (2026-04-29). Currently 79% (26/33) of enabled-cohort trades fall in 'Other' (mostly missing exit_reason on pre-S36 records). Analysis D (time-in-trade + exit-mix) will become a useful sport-scope signal once the post-S36 sub-cohort grows large enough. Re-investigate exit-reason mix per sport once Other% drops below 30% on the enabled cohort (i.e., the pre-S36 records age out by attrition and post-S36 trades dominate).",
+        "current_value": "S132 (2026-05-13) enabled cohort Other% by sport: ipl 69%, nhl_game 80%, ufc 90%. Mean hold (minutes) varies sharply by sport: ipl 33.6, nhl_game 97.4, ufc 9.1 \u2014 informational, not yet actionable.",
+        "last_updated": "2026-05-13T20:00:00+00:00"
+      }
+    ]
   }
 ]
