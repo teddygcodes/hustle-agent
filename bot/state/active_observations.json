@@ -206,8 +206,8 @@
       {
         "name": "KXHIGHAUS forecast-edge loss concentration (watch-list trigger)",
         "expectation": "re-evaluate after 14d (target 2026-05-25). If post-Session-100 KXHIGHAUS rows show N>=10 in the [-0.5, 0.5) forecast_distance bucket AND win_rate < 60%, surface as a candidate for Session 101 forecast-edge-aware floor/sizing decision. Pure observation; no action this session. Motivating evidence: two -$199 KXHIGHAUS B-bucket losses (B80.5, B89.5) on 2026-05-09/10 where the day's high landed inside the bucket.",
-        "current_value": "S115 (2026-05-12) measurement: N_in_bucket=0 of 0 settled KXHIGHAUS-B vig_stack rows with new S100 fields; only 2 post-S100 KXHIGHAUS rows exist total, both still open at forecast_bucket_distance>=3.0 (outside bucket). Motivating losses KXHIGHAUS-26MAY08-B80.5 (-$199.20) and KXHIGHAUS-26MAY09-B89.5 (-$199.87) confirmed in data with family=null AND forecast_bucket_distance=null \u2014 pre-S100 instrumentation, un-classifiable retroactively. Re-eval 2026-05-25 unchanged.",
-        "last_updated": "2026-05-12T03:51:39+00:00"
+        "current_value": "S133 (2026-05-13) refresh: KXHIGHAUS lifetime cohort is the strongest performer of any vig_stack family \u2014 N=48 settled, total +$484.18, mean +$10.09/trade, WR 83.3%. B-bucket (the loss-concentration target) breakdown across all sub-periods is strongly POSITIVE: apr20\u2192apr29 N=12 mean -$1.47 (pre-Filter-F era); apr29\u2192may10 N=22 mean +$17.64 total +$388.10; may10\u2192may11 N=2 mean +$25.40; post-may11 N=1 mean +$17.36 total +$17.36. The motivating -$199 B-bucket losses (B80.5, B89.5) on 2026-05-09/10 remain pre-S100 instrumentation gaps (un-classifiable retroactively). Post-S100 N still thin for the in-bucket [-0.5, 0.5) slice but the broader B-bucket cohort sign-flipped from the motivating-loss signal. Re-eval 2026-05-25 anchor preserved; signal currently REFUTED by aggregate B-bucket math at N=46 across all sub-periods.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
       }
     ]
   },
@@ -844,6 +844,44 @@
         "expectation": "exit_reason field is forward-only since S36 (2026-04-29). Currently 79% (26/33) of enabled-cohort trades fall in 'Other' (mostly missing exit_reason on pre-S36 records). Analysis D (time-in-trade + exit-mix) will become a useful sport-scope signal once the post-S36 sub-cohort grows large enough. Re-investigate exit-reason mix per sport once Other% drops below 30% on the enabled cohort (i.e., the pre-S36 records age out by attrition and post-S36 trades dominate).",
         "current_value": "S132 (2026-05-13) enabled cohort Other% by sport: ipl 69%, nhl_game 80%, ufc 90%. Mean hold (minutes) varies sharply by sport: ipl 33.6, nhl_game 97.4, ufc 9.1 \u2014 informational, not yet actionable.",
         "last_updated": "2026-05-13T20:00:00+00:00"
+      }
+    ]
+  },
+  {
+    "session": 133,
+    "shipped_at": "2026-05-13T22:00:00+00:00",
+    "description": "vig_stack health re-check (post-Filter-F + post-bankroll-bump). Outcome (i) Mixed \u2014 primary (a) clean confirmation: post-Apr-20 cohort N=169 / total +$1,064.57 / mean +$6.30/trade / WR 82.2% (vs Apr-20 audit ground truth N=54 / -$110.62 / 54%). Strategy went from net-negative to strongly net-positive. Battle Scar #9 exemption intact (post-S36 stable+volatile EE rate 0.0%; the 6 EE trades carrying exit_reason are all futures, expected since _VIG_STACK_OPP_TYPES excludes vig_stack_futures). Secondary surface (d) vig_stack_futures lean-in: N=10, total +$264.65, mean +$26.47/trade \u2014 high-variance (CI [-$66.48, +$123.24] spans 0) but per-trade magnitude is the largest of any class. Pseudo-regression (f) discounted: 1 KXHIGHCHI post-S93 entry at 2026-05-10T16:24:20+00:00 occurred 31 min BEFORE S93 ship commit at 2026-05-10T16:55:33+00:00 \u2014 pre-deployment artifact, not a regression. Counterfactual floor sweep flagged 0.95 with \u0394 +$1.31/trade but pattern is non-monotone (0.94 \u0394 -$1.43); likely sampling noise on N=26. No config change. Analysis script at tools/_oneoff_session_133_vig_stack_health.py.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "vig_stack post-Filter-F cohort health (the headline)",
+        "expectation": "Post-Apr-20 cohort total P&L stays net-positive on a 30-day rolling window. If 30-day rolling total ever flips back below 0, escalate \u2014 Filter F was supposed to convert vig_stack from net-loser to net-winner and S133 confirms it did. Re-eval anchor: re-run tools/_oneoff_session_133_vig_stack_health.py if 30d rolling total < $0 OR if mean P&L/trade drops below +$1.00 on N>=50.",
+        "current_value": "S133 (2026-05-13): post-Apr-20 N=169, total +$1,064.57, mean +$6.30/trade, WR 82.2%. Sub-period: apr20\u2192apr29 N=65 mean -$1.57 (pre-S36 era still leaking); apr29\u2192may10 N=93 mean +$11.59 (post-S36 exemption + bankroll bump); may10\u2192may11 N=7 mean +$5.58; post-may11 N=4 mean +$12.36.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
+      },
+      {
+        "name": "vig_stack_futures lean-in surface (Operating Posture)",
+        "expectation": "vig_stack_futures path was identified at S133 as a high-magnitude / high-variance surface (N=10, mean +$26.47/trade, but individual trades swing +/-$200+). Per CLAUDE.md Operating Posture, do not lock in or fix; investigate the mechanism. Re-investigate scope: when vig_stack_futures N>=15 OR when total accumulates beyond +$500 / below -$200. The 8 KXMLBGAME trades carry opp_type='vig_stack_futures' in trade_history.json (2 of 10 paper rows are pre-opp_type tagging). Next investigation should answer: (1) is the +EV concentrated in 1-2 trades or distributed? (2) does the high-variance reflect MLB-game-winner mispricing or a sizing/exit-timing artifact? (3) are NHL/NBA per-game tickers similarly underscanned (per CLAUDE.md Operating Posture: 'where else could this work?').",
+        "current_value": "S133 (2026-05-13): KXMLBGAME N=10, total +$264.65, mean +$26.47/trade, WR 50% (P&L>0). All trades NO-side. Distribution: 5 wins (+$4.77, +$172.52, +$296.92, +$204.30, +$48.02) and 5 losses (-$6.46, -$5.95, -$199.88, -$199.68, -$49.91). Bootstrap 95% CI [-$66.48, +$123.24] spans 0 \u2014 magnitude real, sign noisy.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
+      },
+      {
+        "name": "Battle Scar #9 exemption integrity (regression-lock)",
+        "expectation": "Post-S36 (2026-04-29) EE rate on stable + volatile vig_stack families must remain <5%. The exemption tuple at bot/main.py:73 _VIG_STACK_OPP_TYPES = ('vig_stack_no', 'vig_stack_series') deliberately excludes vig_stack_futures, so futures EE is expected. Watch: if (stable + volatile) post-S36 EE rate ever rises >5% with reasons in {auto_take_profit, auto_cut_loss, auto_cut_loss_no_bid, edge_flipped}, that contradicts the exemption \u2014 promote to a regression-investigation session.",
+        "current_value": "S133 (2026-05-13): post-S36 stable+volatile EE rate = 0.0% on N=95. All 6 post-S36 EE trades with populated exit_reason are futures (auto_take_profit 3 + auto_cut_loss_no_bid 2 + auto_cut_loss 1). Exemption fully intact.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
+      },
+      {
+        "name": "vig_stack family-level intervention candidates (current: none)",
+        "expectation": "S133 counterfactual sweep found NO currently-enabled volatile family whose disable would improve post-Apr-20 cohort mean P&L by \u0394>=+$1.00/trade. KXHIGHDEN disable \u0394 -$0.18; KXHIGHNY disable \u0394 +$0.29. Both ENABLED families are profitable as-is. Re-run Analysis J of tools/_oneoff_session_133_vig_stack_health.py if any volatile family accumulates net-negative total P&L on a 30-day rolling window; promote to a family-disable session if that family's disable counterfactual \u0394 >= +$1.00 on N>=15.",
+        "current_value": "S133 (2026-05-13): KXHIGHDEN N=42 total +$123.57 mean +$2.94; KXHIGHNY N=27 total +$24.20 mean +$0.90. Both profitable. Disabled families KXHIGHCHI total -$69.24 (N=41, 78% WR) and KXINX total -$72.92 (N=28, 79% WR) \u2014 S93 disable was correct but not catastrophically beneficial.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
+      },
+      {
+        "name": "VIG_STACK_WEATHER_MIN_PRICE floor 0.93 health (non-monotone, do-not-tune)",
+        "expectation": "S133 counterfactual floor sweep at 0.93 / 0.94 / 0.95 / 0.96 / 0.97 produced a non-monotone \u0394 pattern (0.94 \u0394 -$1.43; 0.95 \u0394 +$1.31 \u2014 passes +$1 gate; 0.96/0.97 N=0). The 0.95 result is likely sampling noise on N=26 (current floor admits N=71). Do NOT raise the floor on this signal alone. Re-run if post-Apr-20 volatile cohort grows to N>=120 AND the 0.95 \u0394 holds or grows; only then promote to a floor-tuning session.",
+        "current_value": "S133 (2026-05-13): floor 0.93 (current) admits N=71 total +$201.45 mean +$2.84; floor 0.95 admits N=26 total +$106.50 mean +$4.10 (\u0394 +$1.31). Non-monotone via 0.94 \u0394 -$1.43. Floor 0.96+ admits N=0 \u2014 would kill the strategy on the volatile axis.",
+        "last_updated": "2026-05-13T22:00:00+00:00"
       }
     ]
   }

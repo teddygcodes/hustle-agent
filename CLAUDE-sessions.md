@@ -6985,3 +6985,226 @@ No S38c (premium leaders ≥90¢) signal on the enabled cohort. nhl_game has the
 - No production state files changed except the operator-curated [bot/state/active_observations.json](bot/state/active_observations.json) (new S132 entry).
 - No bot restart. No test changes. No `CLAUDE.md` Open Loops update (Outcome B does not warrant a queued follow-up session).
 - The 2-trade IPL May-5→May-11 window driving +$60.1 was NOT investigated at the per-trade level — that's a candidate sub-investigation if a future operator wants to understand whether those 2 trades reveal an exploitable mechanism (e.g., specific match phase + entry price combination). S132 stays at the cohort-statistics level.
+
+### ☑ Session 133 — vig_stack health re-check (post-Filter-F + post-bankroll-bump) (2026-05-13, Outcome A — classification (i) Mixed: primary (a) clean confirmation + secondary (d) vig_stack_futures lean-in surface)
+
+**Decision: Outcome A / classification (i) Mixed.** vig_stack is the bot's largest budget bucket (60% per `STRATEGY_BUDGETS`) and hadn't been re-audited since the Apr-20 Session 2 ground truth (54 settled / **−$110.62** / 54% WR). Three weeks of data + four ship events (Apr-29 bankroll bump + Session 36 TP/SL exemption, May-9 family cap, May-10 S93 KXHIGHCHI/KXINX disable, May-11 S100 ladder context) demanded a re-check. The headline answer to "is vig_stack post-Filter-F net positive or still leaking?" is **decisively net-positive: post-Apr-20 cohort N=169, total +$1,064.57, mean +$6.30/trade, WR 82.2%**. The strategy went from net-negative to strongly net-positive after Filter F + Session 36 exemption. **Secondary surface (d):** `vig_stack_futures` opens a lean-in surface per CLAUDE.md Operating Posture — N=10, total +$264.65, mean +$26.47/trade, but per-trade swings of ±$200+ make CI [−$66.48, +$123.24] span 0. Per-trade magnitude is the largest of any vig_stack class. **No (e) auto-exit regression** (post-S36 stable+volatile EE rate 0.0%; the 6 EE trades carrying `exit_reason` are all `vig_stack_futures`, expected because `_VIG_STACK_OPP_TYPES = ("vig_stack_no", "vig_stack_series")` deliberately excludes futures). **No (f) S93 regression**: the lone post-S93 KXHIGHCHI entry at 2026-05-10T16:24:20+00:00 occurred **31 minutes BEFORE** the S93 ship commit at 2026-05-10T16:55:33+00:00 — pre-deployment artifact, not a regression. **No (c) family-disable warranted**: KXHIGHDEN disable Δ −$0.18, KXHIGHNY disable Δ +$0.29 — both below the +$1.00/trade actionability gate. Counterfactual floor sweep flagged 0.95 with Δ +$1.31/trade (passes gate) but the pattern is **non-monotone** (0.94 Δ −$1.43; 0.96+ N=0), strongly suggesting sampling noise on N=26. No config change. Analysis script at [tools/_oneoff_session_133_vig_stack_health.py](tools/_oneoff_session_133_vig_stack_health.py).
+
+**Phase 0 premises (verified).**
+- `STRATEGY_BUDGETS["vig_stack"]` = 0.60 at [bot/config.py:521-525](bot/config.py:521).
+- `VIG_STACK_STABLE_FAMILIES` = {KXHIGHMIA, KXHIGHAUS, KXINX} at [bot/config.py:569](bot/config.py:569).
+- `VIG_STACK_WEATHER_MIN_PRICE` = 0.93 at [bot/config.py:596](bot/config.py:596).
+- `VIG_STACK_DISABLED_FAMILIES` = {KXHIGHCHI, KXINX} at [bot/config.py:696-699](bot/config.py:696) (Session 93 ship). **KXINX duality**: appears in BOTH stable AND disabled sets — historically classified stable, S93 added to disabled. Script treats disabled as authoritative for "currently entering" classification but preserves stable classification for Analysis F historical sub-period split per user direction.
+- `PAPER_STARTING_BALANCE` = 10500.0 at [bot/config.py:873](bot/config.py:873) (bumped Apr-29).
+- `_VIG_STACK_OPP_TYPES` = `("vig_stack_no", "vig_stack_series")` at [bot/main.py:73](bot/main.py:73) — Battle Scar #9 exemption tuple. Note `vig_stack_futures` is NOT in the tuple (intentional per CLAUDE.md Operating Posture commentary).
+- Ladder context: 13 forward-only fields persisted via `LADDER_CONTEXT_KEYS` import-loop in [bot/vig_stack_ladder_context.py](bot/vig_stack_ladder_context.py) + rename loop at [bot/executor.py:1210-1230](bot/executor.py:1210).
+- Cohort: `type=='vig_stack' AND status in {won, lost, exited_early}`. **N=227** settled (won=163 / exited_early=52 / lost=12) vs Apr-20 audit's 54.
+- Sub-period boundaries (UTC): pre_apr20 (N=58) / apr20_apr29 (N=65) / apr29_may10 (N=93) / may10_may11 (N=7) / post_may11 (N=4).
+- Family distribution (settled cohort): KXHIGHAUS 48 / KXHIGHDEN 42 / KXHIGHCHI 41 / KXHIGHMIA 31 / KXINX 28 / KXHIGHNY 27 / KXMLBGAME 10.
+- Pytest baseline: **1767 passed** in 40.49s.
+
+**Analysis.** New one-off script at [tools/_oneoff_session_133_vig_stack_health.py](tools/_oneoff_session_133_vig_stack_health.py). 11 analyses (A–K) plus premise banner + decision-framing block, pure-stdlib (json / statistics / math / random / collections); mirrors S130 + S131 + S132 oneoff pattern. Output captured at `/tmp/session_133_output.txt`.
+
+**Table A — headline P&L re-validation.** The single load-bearing table — direct comparison vs Apr-20 audit.
+
+| Cohort window | N | WR | Mean P&L | Total P&L | Entry NO¢ |
+|---|---:|---:|---:|---:|---:|
+| full settled cohort | 227 | 76.2% | +$4.33 | **+$983.41** | 83.6¢ |
+| **post-Apr-20 (Filter F)** | **169** | **82.2%** | **+$6.30** | **+$1,064.57** | **85.7¢** |
+| post-Apr-29 (bankroll + S36) | 104 | 86.5% | +$11.22 | +$1,166.44 | 83.5¢ |
+| post-May-10 (post-S93) | 11 | 90.9% | +$8.05 | +$88.53 | 87.0¢ |
+| **Apr-20 audit baseline (CLAUDE.md)** | **54** | **54.0%** | **−$2.05** | **−$110.62** | — |
+
+Sub-period breakdown (avoids cross-bankroll $ aggregation per CLAUDE.md Critical Gotcha #5):
+
+| Sub-period | N | WR | Mean P&L | Total P&L | Entry NO¢ |
+|---|---:|---:|---:|---:|---:|
+| pre_apr20 | 58 | 58.6% | −$1.40 | −$81.16 | 77.8¢ |
+| apr20_apr29 | 65 | 75.4% | −$1.57 | −$101.87 | 89.1¢ |
+| **apr29_may10** | **93** | **86.0%** | **+$11.59** | **+$1,077.91** | **83.1¢** |
+| may10_may11 | 7 | 85.7% | +$5.58 | +$39.09 | 83.6¢ |
+| post_may11 | 4 | 100.0% | +$12.36 | +$49.44 | 93.0¢ |
+
+The apr29_may10 sub-period is the load-bearing engine: +$1,077.91 on N=93 / mean +$11.59/trade / WR 86%. This is the post-bankroll-bump + post-Session-36-TP/SL-exemption window, and it's the post-Filter-F environment performing as designed.
+
+**Table B — per-family breakdown (sorted by Total P&L descending).**
+
+| Family | Class | N | WR | Mean P&L | Total P&L | Disabled |
+|---|---|---:|---:|---:|---:|---|
+| **KXHIGHAUS** | stable | 48 | 83.3% | +$10.09 | **+$484.18** | — |
+| KXMLBGAME | futures | 10 | 50.0% | +$26.47 | +$264.65 | — |
+| KXHIGHMIA | stable | 31 | 83.9% | +$7.39 | +$228.97 | — |
+| KXHIGHDEN | volatile | 42 | 69.0% | +$2.94 | +$123.57 | — |
+| KXHIGHNY | volatile | 27 | 70.4% | +$0.90 | +$24.20 | — |
+| KXHIGHCHI | volatile | 41 | 78.0% | −$1.69 | −$69.24 | 2026-05-10 |
+| KXINX | stable | 28 | 78.6% | −$2.60 | −$72.92 | 2026-05-10 |
+
+KXHIGHAUS is the star performer (+$484.18 alone — almost half the cohort total). KXMLBGAME has the highest mean P&L of any family (+$26.47/trade) despite N=10 and 50% WR — the variance is huge. The two S93-disabled families (KXHIGHCHI, KXINX) confirm the disable was reasonable but not catastrophic (combined −$142.16 across N=69 = mean −$2.06/trade pre-disable).
+
+**Table C — volatile-floor effectiveness (post-Apr-20, volatile families only, N=73).**
+
+| Entry NO¢ | N | WR | Mean P&L | Total P&L | ≥0.93 floor? |
+|---|---:|---:|---:|---:|---|
+| [85, 89) | 0 | — | — | — | N |
+| [89, 91) | 0 | — | — | — | N |
+| [91, 93) | 2 | 100.0% | +$1.08 | +$2.16 | N |
+| **[93, 95)** | **45** | **84.4%** | **+$2.11** | **+$94.95** | Y |
+| **[95, 97)** | **26** | **92.3%** | **+$4.10** | **+$106.50** | Y |
+| [97, 100] | 0 | — | — | — | Y |
+
+Admitted by 0.93 floor: N=71, total +$201.45, mean +$2.84/trade. Below-floor leakage (the 2 trades in [91, 93)) totals +$2.16 — trivial. The floor is doing its job at admission. The historically-flagged "only [92-96¢) is breakeven" framing has been overtaken by post-bankroll-bump $ amounts; both admitted buckets are now solidly positive.
+
+**Table D — status mix (Battle Scar #9 verification).** This was the leading suspicion going into the audit (52 EE across 227 settled = 23%) and is the source of the headline (e)-NEGATIVE finding.
+
+| Sub-period | N | won % | lost % | EE % | flag |
+|---|---:|---:|---:|---:|---|
+| pre_apr20 | 58 | 46.6% | 0.0% | 53.4% | — |
+| apr20_apr29 | 65 | 75.4% | 1.5% | **23.1%** | — |
+| **apr29_may10** | **93** | **82.8%** | **10.8%** | **6.5%** | ⚠ >5% |
+| may10_may11 | 7 | 85.7% | 14.3% | 0.0% | — |
+| post_may11 | 4 | 100.0% | 0.0% | 0.0% | — |
+
+The 6.5% EE rate in apr29_may10 LOOKS like a Battle Scar #9 regression at first glance. Class-split tells the real story:
+
+| Class | N | won % | lost % | EE % |
+|---|---:|---:|---:|---:|
+| stable | 52 | 86.5% | 13.5% | **0.0%** |
+| volatile | 43 | 95.3% | 4.7% | **0.0%** |
+| **futures** | **9** | **11.1%** | **22.2%** | **66.7%** |
+
+Stable + volatile post-S36 EE rate = **exactly 0.0%** on N=95. Battle Scar #9 is fully intact. The 6 futures EE trades carrying populated `exit_reason` break down as `auto_take_profit` 3 + `auto_cut_loss_no_bid` 2 + `auto_cut_loss` 1 — all expected because `_VIG_STACK_OPP_TYPES` deliberately excludes `vig_stack_futures` (per CLAUDE.md Operating Posture, S36's "missed" futures exemption is preserved-as-investigated, not preserved-as-bug). The 46 EE trades without `exit_reason` are all pre-S36 (S36 added the field forward-only on 2026-04-29).
+
+**Table E — S93 disable enforcement.** The other leading suspicion.
+
+| Family | pre-S93 N | post-S93 N | Last entry timestamp | Flag |
+|---|---:|---:|---|---|
+| KXHIGHCHI | 40 | **1** | 2026-05-10T16:24:20+00:00 | ⚠ apparent breach |
+| KXINX | 28 | 0 | 2026-05-07T14:03:56+00:00 | ✓ |
+
+**The KXHIGHCHI breach is NOT a regression.** Git log shows the S93 ship commit at `e5c5411 2026-05-10 12:55:33 -0400 = 2026-05-10T16:55:33+00:00`. The breach trade timestamp `2026-05-10T16:24:20+00:00` is **31 minutes BEFORE** the disable code was committed. The bot was still running pre-S93 code when the trade was entered. Pre-deployment artifact, not a regression. (`decisions.jsonl` carries 3 `family_disabled_reject` events on a 1532-line log — low but non-zero, consistent with S93 actively blocking new attempts post-deployment.)
+
+**Table F — sub-period split per stable family (per user direction: KXINX included with post-S93 row marked disabled).**
+
+| Family | Sub-period | N | WR | Mean P&L | Total P&L | Note |
+|---|---|---:|---:|---:|---:|---|
+| KXHIGHMIA | apr20_apr29 | 11 | 72.7% | −$2.73 | −$30.08 | |
+| KXHIGHMIA | apr29_may10 | 15 | 93.3% | +$16.70 | +$250.56 | (carries the family) |
+| KXHIGHMIA | may10_may11 | 0 | — | — | — | |
+| KXHIGHMIA | post_may11 | 0 | — | — | — | |
+| KXHIGHAUS | apr20_apr29 | 12 | 66.7% | −$1.47 | −$17.68 | |
+| KXHIGHAUS | apr29_may10 | 23 | 87.0% | +$17.63 | +$405.46 | (engine) |
+| KXHIGHAUS | may10_may11 | 2 | 100.0% | +$25.40 | +$50.80 | |
+| KXHIGHAUS | post_may11 | 1 | 100.0% | +$17.36 | +$17.36 | |
+| KXINX | apr20_apr29 | 12 | 83.3% | +$0.38 | +$4.50 | |
+| KXINX | apr29_may10 | 11 | 72.7% | −$7.26 | −$79.84 | (the loss that drove S93) |
+| KXINX | may10_may11 | 0 | — | — | — | [disabled, N=0 expected] |
+| KXINX | post_may11 | 0 | — | — | — | [disabled, N=0 expected] |
+
+**KXHIGHAUS B-bucket breakdown (refutes the S100 watch-list signal).** S100 was motivated by two −$199 B-bucket losses on 2026-05-09/10. The follow-up question: did the B-bucket loss concentration continue?
+
+| KXHIGHAUS bucket | N | WR | Mean P&L | Total P&L |
+|---|---:|---:|---:|---:|
+| **B-bucket** | **46** | **82.6%** | **+$10.13** | **+$466.02** |
+| T-bucket | 2 | 100.0% | +$9.08 | +$18.16 |
+
+B-bucket per sub-period: apr20_apr29 N=12 mean −$1.47; **apr29_may10 N=22 mean +$17.64 total +$388.10**; may10_may11 N=2 mean +$25.40; post_may11 N=1 mean +$17.36. The S100 motivating-loss signal is **refuted** by aggregate B-bucket math. The two −$199 losses remain in the data but pre-S100 (un-classifiable retroactively for the in-bucket [−0.5, 0.5) `forecast_bucket_distance` slice). S100 watch metric updated in [bot/state/active_observations.json](bot/state/active_observations.json).
+
+**Table G — vig_stack_futures lean-in (Operating Posture: investigate, don't lock-in).**
+
+| Ticker | Side | Entry¢ | Status | PnL |
+|---|---:|---:|---|---:|
+| KXMLBGAME-26APR211840STLMIA-MIA | no | 47.0¢ | won | +$4.77 |
+| KXMLBGAME-26MAY011910SFTB-TB | no | 38.0¢ | exited_early | −$6.46 |
+| KXMLBGAME-26MAY011905BALNYY-NYY | no | 37.0¢ | exited_early | −$5.95 |
+| **KXMLBGAME-26APR291840SFPHI-PHI** | no | 44.0¢ | exited_early | **+$172.52** |
+| KXMLBGAME-26MAY051905TEXNYY-NYY | no | 38.0¢ | exited_early | −$199.88 |
+| **KXMLBGAME-26MAY061905TEXNYY-NYY** | no | 35.0¢ | exited_early | **+$296.92** |
+| KXMLBGAME-26MAY082210ATLLAD-LAD | no | 39.0¢ | lost | −$199.68 |
+| **KXMLBGAME-26MAY092110ATLLAD-LAD** | no | 44.0¢ | exited_early | **+$204.30** |
+| KXMLBGAME-26MAY101610STLSD-STL | no | 51.0¢ | won | +$48.02 |
+| KXMLBGAME-26MAY121840COLPIT-PIT | no | 31.0¢ | lost | −$49.91 |
+
+**Totals: N=10, total +$264.65, mean +$26.47/trade, 50% WR (PnL>0).** All trades NO-side. Bootstrap 95% CI [−$66.48, +$123.24] spans 0 — magnitude real, sign noisy on N=10. Per-trade swings of ±$200+ are typical. The Apr-30 +$172 trade documented in CLAUDE.md "Operating Posture" has been **joined by 2 larger winners** (+$296.92 on May-6, +$204.30 on May-9) AND **2 large losers** (−$199.88 on May-5, −$199.68 on May-8). This is exactly the lean-in surface the Operating Posture rule was written for — the mechanism is unverified, the variance is huge, the magnitude per-trade is the largest of any vig_stack class. Per the rule: "Are NHL/NBA per-game winners similarly underscanned but profitable?" is a candidate follow-up.
+
+Of the 10 futures rows, 8 have `opp_type='vig_stack_futures'` confirmed via [bot/state/trade_history.json](bot/state/trade_history.json) cross-reference (2 are pre-opp_type-tagging from very early in the path).
+
+**Table H — S100 forward-only ladder context analysis.** Post-S100 trades carrying the 13 LADDER_CONTEXT_KEYS: N=2. **Below the N≥5 slicing threshold; deferred to S133 follow-up at higher N.** Re-run when post-S100 vig_stack settles ≥10 trades.
+
+**Table I — counterfactual floor sweep (post-Apr-20 volatile families, N=73; baseline floor 0.93 admits N=71, mean +$2.84/trade).**
+
+| Floor | N_remain | Total P&L | Mean P&L / trade | Δ vs 0.93 | gate |
+|---:|---:|---:|---:|---:|---|
+| 0.93 | 71 | +$201.45 | +$2.84 | +$0.05 | |
+| 0.94 | 39 | +$52.94 | +$1.36 | **−$1.43** | |
+| 0.95 | 26 | +$106.50 | +$4.10 | **+$1.31** | ✓ +$1 |
+| 0.96 | 0 | $0.00 | $0.00 | −$2.79 | |
+| 0.97 | 0 | $0.00 | $0.00 | −$2.79 | |
+
+0.95 passes the +$1.00/trade actionability gate (Δ +$1.31). **But the pattern is non-monotone**: 0.94 is −$1.43 below baseline (worse), 0.95 is +$1.31 above (better), 0.96+ admits zero trades. This shape is classic sampling noise on N=26, not a robust monotonic improvement. **Floor change NOT recommended on this signal alone.** Re-evaluate if post-Apr-20 volatile cohort grows to N≥120 AND the 0.95 Δ holds.
+
+**Table J — counterfactual family disable (currently-enabled volatile families, post-Apr-20 baseline N=169 mean +$6.30/trade).**
+
+| Disable family | N_drop | N_remain | Mean P&L / trade | Δ vs base | gate |
+|---|---:|---:|---:|---:|---|
+| KXHIGHDEN | 25 | 144 | +$6.12 | −$0.18 | |
+| KXHIGHNY | 16 | 153 | +$6.58 | +$0.29 | |
+
+**No currently-enabled volatile family clears the +$1.00/trade actionability gate.** Both KXHIGHDEN and KXHIGHNY are net-profitable as-is (Analysis B: +$123.57 and +$24.20 respectively). No family-disable session warranted.
+
+**Table K — bootstrap CIs (10000 iter, seed=133).**
+
+| Split | Cohort | N | Mean P&L | 95% CI | CI excludes 0? |
+|---|---|---:|---:|---|---|
+| 1 | Stable (enabled, post-Apr-20) | 64 | +$10.57 | [−$5.45, +$24.09] | no |
+| 1 | **Volatile (enabled, post-Apr-20)** | **41** | **+$5.86** | **[+$3.68, +$7.91]** | **yes ⚠** |
+| 2 | KXHIGHAUS (largest |P&L|) | 48 | +$10.09 | [−$9.35, +$25.85] | no |
+| 3 | vig_stack_futures (lean-in) | 10 | +$26.47 | [−$66.48, +$123.24] | no |
+
+**Volatile-enabled CI EXCLUDES 0** — the post-Filter-F volatile path is robustly positive. Stable-enabled CI spans 0 because KXHIGHAUS is high-variance (one big winning week dominates the mean). KXHIGHAUS family-level CI confirms the high variance. Futures CI spans 0 reflecting N=10 + ±$200 per-trade variance.
+
+**Classification rationale.** Outcome A / classification (i) Mixed: primary (a) + secondary (d).
+- **(a) applies as primary**: post-Apr-20 cohort total +$1,064.57 on N=169 / mean +$6.30/trade / WR 82.2% (vs Apr-20 audit −$110.62 on N=54). The headline question of the session ("is vig_stack post-Filter-F net positive or still leaking?") is decisively answered. Per spec definition, (a) requires "no family-level intervention warranted" — confirmed by Analysis J.
+- **(b) does NOT apply**: floor sweep's 0.95 Δ +$1.31 passes the +$1 gate in isolation but the non-monotone pattern (0.94 Δ −$1.43) classifies this as sampling noise on N=26. CI on the floor improvement was not computed but the bumpy shape is sufficient.
+- **(c) does NOT apply**: no currently-enabled family-disable produces Δ ≥ +$1.00/trade.
+- **(d) applies as secondary**: vig_stack_futures (N=10, mean +$26.47/trade, total +$264.65) is the lean-in surface CLAUDE.md Operating Posture was written for. Bootstrap CI spans 0, but per-trade magnitude is unique among classes. Follow-up investigation warranted (NOT a floor/disable change, but a separate scoped session on the futures mechanism).
+- **(e) does NOT apply**: post-S36 stable+volatile EE rate is exactly 0.0% on N=95. Battle Scar #9 exemption fully intact.
+- **(f) does NOT apply**: the 1 apparent KXHIGHCHI post-S93 entry preceded the S93 ship commit by 31 minutes — pre-deployment artifact, not a regression.
+- **(g) does NOT apply**: vig_stack is not at a structural ceiling — it's strongly net-positive.
+- **(h) does NOT apply**: N=227 settled is well above any reasonable thinness threshold.
+- **(i) is the correct classification**: combination of (a) primary + (d) secondary.
+
+**Most surprising finding.** The pre-Apr-29 vs post-Apr-29 sub-period sign flip on the stable-family axis. KXHIGHMIA went from −$30.08 / N=11 in apr20_apr29 to +$250.56 / N=15 in apr29_may10 — mean P&L per trade moved from −$2.73 to **+$16.70** across the Session 36 TP/SL exemption boundary. KXHIGHAUS similarly went from −$17.68 / N=12 to +$405.46 / N=23. The bankroll bump alone (21× sizing) explains some of the $-magnitude change but NOT the WR jump (KXHIGHMIA 72.7% → 93.3%; KXHIGHAUS 66.7% → 87.0%). The strongest hypothesis: S36's TP/SL exemption prevented stable-family trades from being prematurely closed in the apr20_apr29 window where ~23% of vig_stack trades exited early. Hold-to-settlement on a structurally-edged ladder is the right move; auto-cut on a transient mid-trade drawdown was leaving value on the table.
+
+**Most actionable finding.** None for vig_stack-internal changes — the strategy is working. The actionable surface is `vig_stack_futures` (Analysis G): it's the highest mean-P&L-per-trade vig_stack class, but variance is huge and N is thin. Per CLAUDE.md Operating Posture, this is exactly the kind of "investigate the mechanism, find more like it" surface that warrants a focused follow-up — not a config change in this session.
+
+**Direction-setting conclusion.** This session closes the vig_stack-health-watch loop opened at Apr-20 Session 2's volatile-floor decision:
+- Filter F (stable-family whitelist + 0.93 volatile floor) — **VALIDATED** at N=169 / +$1,064.57 / 82% WR.
+- Session 36 TP/SL exemption — **VALIDATED** at N=95 post-S36 / EE rate 0.0% on weather families.
+- Session 92 family cap — **NOT INDEPENDENTLY VALIDATED** here (cap-binding rate would need a separate analysis), but cohort math is healthy.
+- Session 93 KXHIGHCHI/KXINX disable — **CORRECT BUT NOT CATASTROPHICALLY BENEFICIAL** (the disabled cohorts were each ~−$1.7 to −$2.6/trade pre-disable — bad, but not catastrophically so).
+- Session 100 ladder-context instrumentation — **TOO THIN TO SLICE** (post-S100 N=2 of 227 cohort); the KXHIGHAUS B-bucket motivating signal is **REFUTED** by aggregate B-bucket math (+$10.13/trade on N=46).
+
+The strategic question this opens: **vig_stack is the workhorse and is healthy. Where else should the bot's discovery surface look?** The companion live_momentum arc (Sessions 130/131/132) closed with "structural ceiling identified — sport scope is the only remaining lever, and CIs are thin." `vig_stack` doesn't have that problem — its lever (Filter F + S36 exemption) is working. The next strategic move is exploring whether the `vig_stack_futures` lean-in extends to NHL/NBA/NFL per-game tickers (per CLAUDE.md Operating Posture: "where else could this work?").
+
+**Watch-list trigger.** Re-run [tools/_oneoff_session_133_vig_stack_health.py](tools/_oneoff_session_133_vig_stack_health.py) if any of:
+- 30-day rolling vig_stack post-Apr-20 total P&L drops below $0 (regression in the workhorse — highest priority).
+- Post-S36 stable+volatile EE rate rises above 5% with reasons in `{auto_take_profit, auto_cut_loss, auto_cut_loss_no_bid, edge_flipped}` (Battle Scar #9 regression).
+- `vig_stack_futures` cohort reaches N≥15 OR total accumulates beyond +$500 or below −$200 (lean-in re-investigation trigger).
+- Post-S100 vig_stack trades carrying ladder_context reach N≥10 (enables Analysis H slicing that was deferred today).
+- Any currently-enabled volatile family (KXHIGHDEN, KXHIGHNY) accumulates net-negative total P&L on a 30-day rolling window AND its disable counterfactual Δ ≥ +$1.00/trade on N≥15 (family-disable re-evaluation).
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` → **1767 passed** in 40.49s.
+- Post-edit pytest: re-run after ship (unchanged — no code under `bot/` or `tests/` modified in this session).
+- Script execution: `python3 tools/_oneoff_session_133_vig_stack_health.py` ran clean to completion; all 11 analyses (A–K) + premise banner + decision framing produced; cohort N=227 confirmed; sub-period counts reconcile (58+65+93+7+4 = 227).
+- Dashboard updates: new S133 entry appended to [bot/state/active_observations.json](bot/state/active_observations.json) with 5 metrics tracking post-Filter-F health, vig_stack_futures lean-in, Battle Scar #9 integrity, family-intervention candidates (none), and floor non-monotonicity. S100 KXHIGHAUS metric refreshed with S133 measurement (B-bucket signal REFUTED by aggregate math; re-eval 2026-05-25 anchor preserved).
+
+**What this session did NOT do.**
+- No changes to [bot/config.py](bot/config.py) — `VIG_STACK_STABLE_FAMILIES`, `VIG_STACK_DISABLED_FAMILIES`, `VIG_STACK_WEATHER_MIN_PRICE`, `STRATEGY_BUDGETS` all unchanged.
+- No changes to [bot/main.py](bot/main.py) `_VIG_STACK_OPP_TYPES` (Battle Scar #9 exemption tuple). `vig_stack_futures` deliberately stays out per CLAUDE.md Operating Posture.
+- No changes to [bot/strategies/vig_stack_series.py](bot/strategies/vig_stack_series.py), [bot/executor.py](bot/executor.py), or [bot/vig_stack_ladder_context.py](bot/vig_stack_ladder_context.py).
+- No production state files changed except the operator-curated [bot/state/active_observations.json](bot/state/active_observations.json) (S100 metric refresh + new S133 entry).
+- No bot restart. No test changes. No floor adjustment. No new disabled family. No new exemption-set member.
+- The vig_stack_futures lean-in surface was **identified but NOT pursued** in this session — it gets its own scoped follow-up per the spec "investigation-only" boundary. Per CLAUDE.md Operating Posture, the followup question to bring in: "are NHL/NBA/NFL per-game winners scanned by `vig_stack_futures` path? If not, why?"
+- CLAUDE.md updates: refresh to "Money (The Honest Numbers)" section reflecting the vig_stack flip (Apr-20 −$110.62 → post-Filter-F +$1,064.57); new Open Loops entry for the vig_stack_futures lean-in investigation. No restructure.
+
