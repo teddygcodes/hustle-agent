@@ -35,8 +35,10 @@ def size_live_momentum_entry(
     *,
     price_cents: int | float | None,
     dip_cents: int | float | None,
+    ticker: str | None,
     sport: str | None,
     balance: float | None,
+    confidence: float | None,
     game_ctx: Any = None,
     espn_data: dict | None = None,
     sport_profile: dict | None = None,
@@ -53,8 +55,12 @@ def size_live_momentum_entry(
         missing.append("price_cents")
     if dip_cents is None:
         missing.append("dip_cents")
+    if ticker is None:
+        missing.append("ticker")
     if balance is None:
         missing.append("balance")
+    if confidence is None:
+        missing.append("confidence")
     if missing:
         return {
             "contracts": None,
@@ -67,6 +73,7 @@ def size_live_momentum_entry(
         price = int(price_cents)
         dip = float(dip_cents)
         bal = float(balance)
+        conf = float(confidence)
     except (TypeError, ValueError):
         return {
             "contracts": None,
@@ -74,6 +81,13 @@ def size_live_momentum_entry(
             "missing_sizing_fields": ["numeric_inputs"],
             "sizing_unavailable_reason": "invalid_inputs",
         }
+    use_ticker = str(ticker)
+    family = use_ticker.split("-", 1)[0] if use_ticker else None
+    try:
+        from bot.regime import _ticker_to_sport
+        sizing_sport = _ticker_to_sport(use_ticker) or sport
+    except Exception:
+        sizing_sport = sport
 
     fair_prob_source = "fallback_price_plus_dip"
     if game_ctx is not None:
@@ -96,8 +110,9 @@ def size_live_momentum_entry(
         probability=fair_prob,
         balance=bal,
         price_cents=price,
-        confidence=0.80,
-        sport=sport,
+        confidence=conf,
+        sport=sizing_sport,
+        family=family,
     )
     if sizing["contracts"] <= 0:
         return {
@@ -106,6 +121,8 @@ def size_live_momentum_entry(
             "fair_prob": fair_prob,
             "fair_prob_source": fair_prob_source,
             "assumed_edge": assumed_edge,
+            "sizing_sport": sizing_sport,
+            "family": family,
             "missing_sizing_fields": [],
             "sizing_unavailable_reason": sizing.get("reason") or "unsized",
         }
@@ -116,7 +133,7 @@ def size_live_momentum_entry(
         scaled_contracts = max(1, int(scaled_contracts * CONVICTION_SIZE_FACTOR))
     post_conviction_contracts = scaled_contracts
 
-    bet_instincts = SportInstincts.detect(game_ctx, espn_data, sport or "")
+    bet_instincts = SportInstincts.detect(game_ctx, espn_data, sizing_sport or "")
     if bet_instincts.should_reduce_size:
         scaled_contracts = max(1, scaled_contracts // 2)
 
@@ -138,6 +155,8 @@ def size_live_momentum_entry(
         "fair_prob": fair_prob,
         "fair_prob_source": fair_prob_source,
         "assumed_edge": assumed_edge,
+        "sizing_sport": sizing_sport,
+        "family": family,
         "size_multiplier": size_mult,
         "post_conviction_contracts": post_conviction_contracts,
         "uncapped_contracts": uncapped_contracts,

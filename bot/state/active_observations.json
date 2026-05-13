@@ -760,14 +760,14 @@
   {
     "session": 130,
     "shipped_at": "2026-05-13T10:57:17Z",
-    "description": "live_momentum sizing-on-losses investigation: Outcome (b) \u2014 sizing is also a dead axis. Cap sweep (1-20% of bankroll) finds NO cap value with per-trade delta >= +$1.00 on full N=69 or post-S54 N=32. Existing per-trade caps (5% * balance AND $200 family=None ceiling at bot/sizing.py:113-123) rarely bind on the post-S54 cohort because Kelly itself recommends tiny fractions (0.13% typical at 20 contracts * 75c / $10,500 bankroll). Cohort total_pnl = -$50.86 / 69 trades = -$0.74/trade. Pearson(kelly_frac, pnl) = +0.078 (full) / +0.304 (post-S54); Spearman = +0.106 / -0.181 (Pearson and Spearman point opposite on post-S54 = classic fat-tail signal, no monotone size-loss link). Surprise finding (NOT acted on, scope: sizing only): confidence and DQS are inversely correlated with outcome on the populated sub-cohort (N=37, post-S50): conf 0.75-1.00 band mean=-$2.21 (N=28) vs conf 0.50-0.75 band mean=+$6.31 (N=9); DQS Q2 (=1.0) mean=-$2.35 (N=27) vs DQS Q1 (<=0.708) mean=+$5.82 (N=10). With TP/SL (S129) and sizing (S130) both ruled out, remaining live_momentum leak axes are: (a) entry quality / confidence-DQS scoring direction, (b) sport scope.",
+    "description": "live_momentum sizing-on-losses investigation: Outcome (b) \u2014 sizing is also a dead axis. S135 (2026-05-13) re-classified this finding as CONTAMINATED: the active live_momentum helper was tested while passing literal confidence=0.80 and no family into kelly_size; sport was already wired on the current helper path. S135 fixed the active sizing inputs by wiring S50 confidence plus ticker-derived sport/family. Re-run scheduled at post-S135 N>=20 OR 2026-05-27 (14d post-fix per S54 precedent), whichever first. Original S130 cap sweep (1-20% of bankroll) found NO cap value with per-trade delta >= +$1.00 on full N=69 or post-S54 N=32. Existing per-trade caps (5% * balance AND $200 family=None ceiling at bot/sizing.py:113-123) rarely bound on the post-S54 cohort because Kelly itself recommended tiny fractions (0.13% typical at 20 contracts * 75c / $10,500 bankroll). Cohort total_pnl = -$50.86 / 69 trades = -$0.74/trade. Pearson(kelly_frac, pnl) = +0.078 (full) / +0.304 (post-S54); Spearman = +0.106 / -0.181. Surprise finding (NOT acted on, scope: sizing only): confidence and DQS are inversely correlated with outcome on the populated sub-cohort (N=37, post-S50).",
     "observation_window_days": 30,
     "metrics": [
       {
         "name": "live_momentum_cohort_size_for_resizing_investigation",
         "expectation": "Re-run tools/_oneoff_session_130_sizing_analysis.py when post-S54 cohort N >= 60 (roughly 2x today's 32) OR full cohort N >= 105 (50% growth from 69) \u2014 whichever first. Re-investigate sizing only if the cap-sweep per-trade delta crosses +$1.00 at any cap value, OR if the post-S54 Spearman flips materially positive (>+0.25). Otherwise sizing axis stays closed.",
-        "current_value": "post-S54 N=32, full cohort N=69 on 2026-05-13",
-        "last_updated": "2026-05-13T10:57:17Z"
+        "current_value": "S135 reclassified S130 as contaminated: active helper used confidence=0.80 literal and family omitted during the measured cohort; fixed 2026-05-13. Re-run at post-S135 N>=20 OR 2026-05-27, whichever first. Original measurement: post-S54 N=32, full cohort N=69 on 2026-05-13.",
+        "last_updated": "2026-05-13T23:59:00+00:00"
       },
       {
         "name": "live_momentum_confidence_dqs_inverse_signal",
@@ -908,6 +908,26 @@
         "expectation": "Queue a separate simulation-only session if prioritizing scope expansion: replay post-Apr-29 KXNBAGAME/KXNHLGAME per-game ladders with explicit auto-exit policy preserved. Do not ship scanner expansion directly from rough YES-sum counts.",
         "current_value": "S134 (2026-05-13): KXNBAGAME universe rows 6,890 across 439 scan IDs, KXNHLGAME rows 5,418 across 436 scan IDs; both have 0 vig_stack decision rows and 0 scanned_by attribution. Rough post-Apr-29 event YES-sum>100 rates: KXNBAGAME 97.1% (2,518/2,594), KXNHLGAME 95.3% (2,184/2,291).",
         "last_updated": "2026-05-13T23:30:00+00:00"
+      }
+    ]
+  },
+  {
+    "session": 135,
+    "shipped_at": "2026-05-13T23:59:00+00:00",
+    "description": "live_momentum active sizer wiring fix + pre-committed kill rule. Active path is bot/live_watcher.py::_auto_bet_momentum -> bot/live_momentum_sizing.py::size_live_momentum_entry, not the stale S130-cited live_latency_arb _auto_bet call. S135 wires S50 confidence plus ticker-derived sport/family into kelly_size and arms a 2026-06-15 termination rule.",
+    "observation_window_days": 35,
+    "metrics": [
+      {
+        "name": "live_momentum_sizer_uses_actual_confidence",
+        "expectation": "kelly_size receives the S50 confidence value on every accepted live_momentum trade post-restart: min(1.0, dqs * (1 + max(0, wp_edge))). Verify via paper_trades.json confidence field and decisions/live_journal context; no accepted live_momentum sizing call should use the old helper literal 0.80 or the stale WATCH-path 0.75.",
+        "current_value": "Code shipped; focused regression tests assert _auto_bet_momentum passes computed confidence (example dqs=0.8, wp_edge=0.05 -> 0.84) and helper passes ticker-derived sport/family to kelly_size. Runtime verification starts after S135 restart.",
+        "last_updated": "2026-05-13T23:59:00+00:00"
+      },
+      {
+        "name": "live_momentum_kill_rule_armed",
+        "expectation": "By 2026-06-15, post-S97 cohort N>=80 with bootstrap 95% CI lower bound on per-trade EV > 0; OR substrate ship documented within 14d resets the trigger. If signal is not met and no documented exception ships, retire live_momentum via MOMENTUM_RETIRED plus equivalent active disable mechanism.",
+        "current_value": "Armed in CLAUDE.md Strategy Termination Rules. Phase 0 post-S97 enabled settled cohort count on 2026-05-13 was N=5, so the N>=80 trigger is not already stale.",
+        "last_updated": "2026-05-13T23:59:00+00:00"
       }
     ]
   }

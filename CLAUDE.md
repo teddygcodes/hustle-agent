@@ -467,9 +467,9 @@ May 3 incident: Telegram cooled Glint down after sustained `editMessageText` vol
 
 May 5 correctness review found production `live_watcher._auto_bet_momentum` still reconstructing paper balance as `$500 + realized_pnl` even though `PAPER_STARTING_BALANCE` was bumped to `$10,500` on Apr 29. Result: every live_momentum Kelly sizing decision after the bump operated at roughly 9% of intended scale, while vig_stack / arbs used the executor-side balance path correctly.
 
-**Rule:** never hardcode bankroll constants in strategy-local sizing paths. If a strategy needs paper balance, use the configured `PAPER_STARTING_BALANCE` or a canonical shared helper if one exists. Session 54 intentionally did NOT invent a new helper because `_check_balance()` mixes reconstruction with admission/reserve checks; the surgical production fix is [bot/live_watcher.py:1686](hustle-agent/bot/live_watcher.py:1686) `PAPER_STARTING_BALANCE + paper_pnl`.
+**Rule:** never hardcode bankroll constants in strategy-local sizing paths. If a strategy needs paper balance, use the configured `PAPER_STARTING_BALANCE` or a canonical shared helper if one exists. Session 54 intentionally did NOT invent a new helper because `_check_balance()` mixes reconstruction with admission/reserve checks; the current production path is [bot/live_watcher.py:1119](hustle-agent/bot/live_watcher.py:1119) `_current_momentum_balance()` feeding [bot/live_momentum_sizing.py](hustle-agent/bot/live_momentum_sizing.py). S135 completed the second half of the sizing fix: S54 correctly bankroll-anchored the call, but active live_momentum sizing was still using a literal helper confidence and omitting `family` until S135 wired S50 confidence plus ticker-derived sport/family into `kelly_size()`.
 
-**Analysis consequence:** Session 19c and Session 49 live_momentum sizing evidence is provisional until 14 days of post-Session-54 data accumulates. Do not re-tune those conclusions from pre-fix dollar notionals.
+**Analysis consequence:** Session 19c and Session 49 live_momentum sizing evidence is provisional until 14 days of post-Session-54 data accumulates. Session 130's sizing-axis conclusion is additionally contaminated until post-S135 data accumulates because the active helper was not receiving the trade's actual S50 confidence/family inputs.
 
 ### 17. Watcher asyncio tasks must be cancelled before notifier teardown (Session 58, May 7)
 
@@ -577,6 +577,120 @@ The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-s
 Battle Scar exemptions (#9 vig_stack auto-exit, #5 edge price basis, #12 settlement idempotency) preserve EXPLICITLY-DOCUMENTED known-correct behavior against accidental regression. Defense is correct when there's a paper trail showing WHY the current behavior is correct. Defense is WRONG when the current behavior just happens to work and we don't know why — that's where investigation belongs.
 
 **Tyler's frame (his words, paraphrased):** "Always look for new possibilities, don't be stuck and tied to what we are doing." This is the prime directive. Every session should ask "what new edge could I find?" before asking "what should I preserve?"
+
+---
+
+## Strategy Termination Rules
+
+Pre-committed kill criteria for active strategies. When a criterion fires, the strategy retires unless a documented exception is shipped in the same session that the trigger fires.
+
+### live_momentum
+
+**Trigger date:** 2026-06-15.
+
+**Required N:** >=80 settled trades on the post-S97 cohort filter:
+`status in {won, lost, exited_early}; sport NOT in MOMENTUM_DISABLED_SPORTS; timestamp >= 2026-05-11`.
+
+**Required signal:** bootstrap 95% CI on per-trade EV must exclude 0 from below, i.e. lower bound > 0.
+
+**On trigger fire:**
+
+- If signal met: continue running and set a new trigger date 30 days out with the same criteria.
+- If signal NOT met: ship a session that adds `"live_momentum"` to a new `MOMENTUM_RETIRED` set and comments out the strategy from `ACTIVE_STRATEGIES` or the equivalent disable mechanism.
+
+**Documented exceptions that re-set the trigger without retiring:**
+
+- New substrate work shipped within 14 days of the trigger date that materially changes the strategy, e.g. S138 dip classifier or fair-value model rewrite. Cite the session.
+
+**Rationale:** S40 (Apr-30) through S132 (May-13) tested five leak hypotheses; all returned null at the cohort N available. Cross-AI review (S134) identified the no-termination-criterion discipline gap as foundational. This rule forces a decision rather than indefinite investigation.
+
+---
+
+## Planner Investigation Discipline (read THIRD — before opening any new investigation arc)
+
+Conversation-level operating patterns the planner agent should apply across sessions. These are lessons from ~135 sessions of operator collaboration, distinct from the code-level Battle Scars and the data schema reference. They sit alongside the Operating Posture rule.
+
+### Investigation premise contamination — verify the analysis is testing what it claims
+
+Before declaring a hypothesis "ruled out" or an axis "closed," verify the analysis was actually testing what it claimed.
+
+**S130 example (canonical).** S130 declared the live_momentum sizing axis closed based on Pearson +0.078 correlation between Kelly fraction and P&L. S135 verified the active path and found the live_momentum helper was passing literal `confidence=0.80` and omitting `family` across the measured cohort; the `confidence=0.75` call flagged in the cross-AI review was a stale `live_latency_arb` WATCH-path reference. S130's test wasn't measuring fully wired sizing behavior; it was measuring a contaminated input path. The "axis closed" claim was structurally invalid.
+
+**Phase 0 must verify the analysis inputs match what the analysis claims to be testing.** If a sweep tests parameter X, confirm X is actually the variable being modulated in production. If a correlation test pairs A with B, confirm A and B are both varying as expected. Discovery of a contaminated test requires re-classifying the prior outcome to "untested" and re-running with proper inputs.
+
+This rule is upstream of any cumulative ruled-out arc. Five "ruled-out" axes can become four-and-a-half if any one was contaminated.
+
+### Tuning vs substrate — when null tunings accumulate, suspect substrate gap
+
+Investigations come in two shapes:
+- **Tuning** — test parameters within the current architecture (e.g., S41 TP/SL sweep, S130 sizing analysis, S132 sport-scope concentration)
+- **Substrate** — build the missing piece the architecture lacks (e.g., a fair-value model where one doesn't exist; a context-classifier that distinguishes state-confirmed dips from state-deterioration dips)
+
+When N null tunings accumulate, suspect a substrate gap. The 5-ruled-out-axes arc for live_momentum (S40, S41/S129, S130, S131, S132) was 5 tunings against an architecture that lacked a fair-value model. No amount of tuning can find edge in a strategy that doesn't have an edge-measurement layer. Cross-AI review identified this as the foundational gap.
+
+When tempted to "test the next tuning hypothesis" after several nulls, instead ask: "is there a substrate piece that would make this question answerable in the first place?"
+
+### Ruled-out vs N-thin — the two-explanations rule
+
+Every null result has two valid explanations:
+- (a) the hypothesis is wrong
+- (b) N is too thin to detect a real effect
+
+Both stay valid until ruled out by either a pre-committed kill rule firing OR substrate work changing the question.
+
+When framing investigation outcomes for the operator, never collapse explanation (b) into explanation (a). "S130 found Pearson +0.078" is a measurement; "sizing is dead" is the (a)-only conclusion that smuggles in (b)'s exclusion. Use "5 axes returned null at this N" rather than "5 axes ruled out."
+
+### Pre-committed kill rules — see "Strategy Termination Rules" section
+
+Strategy investigations without termination criteria become indefinite. The discipline gap shows up as "investigation as comfort food" — testing the next hypothesis instead of forcing a ship-or-kill decision.
+
+When opening a new investigation arc on a strategy without a kill rule, propose adding one to the "Strategy Termination Rules" section before the third null result. The rule should specify a date, an N threshold, a signal criterion, and a documented-exception path (e.g., substrate ship within X days re-sets the trigger).
+
+### Cross-AI review synthesis — when operator sends external AI critiques
+
+When the operator hands you back responses from other AIs critiquing a Glint spec, design, or strategy:
+
+1. **Don't sycophant.** Read each critique on its merits. If a finding is wrong or overstated, say so — even if rejecting it makes the conversation harder.
+2. **Cross-validation is the strongest signal.** A finding that 3+ of N AIs independently catch (especially through different framings) is much higher confidence than any single AI's deep dive. Single-AI deep insights can be brilliant or hallucinated; the cross-validation rate disambiguates.
+3. **Verify against ground truth.** When an AI claims "the call site does X," verify by reading the actual code. AIs hallucinate code paths.
+4. **Synthesize into a labeled action menu.** Tier 1 (foundational, high-confidence cross-validated), Tier 2 (substantive, requires substrate work), Tier 3 (broader strategic). My recommendation first.
+5. **Operator picks by letter/number; don't pre-commit subsequent prompts.**
+
+### Decision menu pattern — at strategic pivots
+
+When the operator is at a pivot point with multiple coherent paths forward:
+
+- Offer 2-4 labeled options (a/b/c/d or 1/2/3/4)
+- My recommendation FIRST with rationale
+- Alternatives next, rough priority order
+- Brief trade-off framing (cost, risk, info value, time horizon)
+- End with a short question
+
+The operator picks by letter/number. Don't pre-commit subsequent prompts; don't preempt the choice.
+
+### Dashboard measurement hygiene
+
+`bot/state/active_observations.json` `current_value` fields drift stale when not refreshed. When doing a dashboard read for the operator (especially a deep dig), check `last_updated` against today's date. If a metric's last_updated is ≥7 days old AND underlying data has accumulated since, flag for refresh OR refresh inline if cost is small.
+
+Never quote a stale `current_value` as if it's current state. The dashboard's signal is only as good as its freshness.
+
+When a session ships and updates an entry, also refresh any other entries whose underlying data the session touched — don't leave stale numbers on adjacent metrics that the analysis happened to compute as a side effect.
+
+### Named-but-untested list — don't lose hypotheses to session-entry burial
+
+When a session entry says "X is named as worth investigating" or "S38c is a queued candidate" but never gets queued in Open Loops, it gets forgotten. When ruling out adjacent axes for a strategy, explicitly check the named-but-untested list. Don't declare a strategy "fully investigated" when there are still untested hypotheses.
+
+For live_momentum specifically (as of S134 cross-AI review): S38c entry-price ceiling, per-sport TP/SL re-investigation at larger N, conviction-path P&L breakout, and AI #2's `recent_high_context` + dip-classifier substrate were all named-but-untested.
+
+### Spec-writing for external AI consumption
+
+When asked to write a spec for handing to multiple AIs:
+
+- **Opinion-free.** Document what the system DOES, not what we should change. No "we should..." sentences. No recommendations. No editorializing.
+- **Self-contained.** An outside reader shouldn't need to ask follow-ups for basic facts. Include schema fields, config values with rationales, file references, sub-period boundaries, performance numbers per cohort.
+- **Audience-aware ordering.** If the audience is "should this exist?", lead with cohort EV and the investigation arc. If the audience is "describe the design," plumbing detail first is fine. The cross-AI review for live_momentum (S134-followup) caught that a 549-line spec burying cohort EV in §12 was suboptimal for the "should this exist?" question.
+- **Honest.** Document what's been tested AND what's been ruled out. Document what's named-but-untested. Document what's contaminated or N-thin.
+- **Cite session entries for ground truth.** Every claim should trace to a specific session entry, config value, or file path that the AI can read for verification.
 
 ---
 
@@ -1090,6 +1204,8 @@ Items where Outcome B was filed but no data accumulates passively.
 ### Operational hygiene not yet shipped
 
 Items observed during operation but not prioritized for a session. No calendar trigger.
+
+- **live_momentum kill rule fires 2026-06-15 at N>=80 OR re-set on substrate ship** — see "Strategy Termination Rules" section. Trigger cohort: settled post-S97 live_momentum trades with `status in {won, lost, exited_early}`, sport not in `MOMENTUM_DISABLED_SPORTS`, and `timestamp >= 2026-05-11`.
 
 - **(Resolved by S114, 2026-05-11)** — MOMENTUM_LEADER_MIN dead-zone filter (Session 2 historical) — obsolete; dead zone disappeared in current data per S114 verification. The historical `[75-80¢)` negative-EV signal was traced to a per-sport artifact (single ATP trade, -$15.40), structurally excluded by S97's ATP re-disable on 2026-05-11. Post-S97 cohort (n=22 settled, Apr 15 – May 12, excluding `MOMENTUM_DISABLED_SPORTS`): `[75-80¢)` = 59% WR / +$0.46 per trade / +$10.17 total — positive-EV. Bucket is no longer a candidate for exclusion. See Session 114 entry in `CLAUDE-sessions.md` for full bucket breakdown + driver analysis.
 

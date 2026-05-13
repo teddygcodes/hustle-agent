@@ -1615,11 +1615,22 @@ class LiveGameWatcher:
                     from bot.live_momentum_sizing import size_live_momentum_entry
 
                     sizing_balance = self._current_momentum_balance()
+                    shadow_wp_edge = (
+                        self._game_ctx.win_probability - yes_ask / 100.0
+                        if self._game_ctx
+                        else 0.0
+                    )
+                    shadow_confidence = min(
+                        1.0,
+                        (mom_ctx.get("dqs") or 0.0) * (1.0 + max(0.0, shadow_wp_edge)),
+                    )
                     shadow_sizing = size_live_momentum_entry(
                         price_cents=yes_ask,
                         dip_cents=dip_cents,
+                        ticker=self.ticker,
                         sport=sport_lc,
                         balance=sizing_balance,
+                        confidence=shadow_confidence,
                         game_ctx=self._game_ctx,
                         espn_data=espn_data,
                         sport_profile=sport_profile,
@@ -2221,11 +2232,16 @@ class LiveGameWatcher:
 
         balance = self._current_momentum_balance()
         sport_profile = self._get_sport_profile()
+        gc = self._game_ctx
+        wp_edge = (gc.win_probability - price_cents / 100.0) if gc else 0.0
+        confidence = min(1.0, (dqs_score or 0.0) * (1.0 + max(0.0, wp_edge)))
         sizing_result = size_live_momentum_entry(
             price_cents=price_cents,
             dip_cents=dip_cents,
+            ticker=use_ticker,
             sport=self.sport,
             balance=balance,
+            confidence=confidence,
             game_ctx=self._game_ctx,
             espn_data=self._last_espn_data,
             sport_profile=sport_profile,
@@ -2261,15 +2277,12 @@ class LiveGameWatcher:
                 scaled_contracts,
             )
 
-        gc = self._game_ctx
         # Session 50 — forward-only observability for paper_trades.
         # `confidence` for live_momentum is a composite of DQS at entry +
         # wp_edge boost (clamped non-negative). NOT directly comparable to
         # vig_stack's `confidence` which is relative_edge fallback. See
         # CLAUDE.md "Canonical Data Schema Reference" for paper_trades.json
         # semantics by strategy.
-        _paper_wp_edge = (gc.win_probability - yes_ask / 100.0) if gc else 0.0
-        _paper_conf = min(1.0, (dqs_score or 0.0) * (1.0 + max(0.0, _paper_wp_edge)))
         opp = {
             "type": "live_momentum",
             "ticker": use_ticker,
@@ -2293,7 +2306,7 @@ class LiveGameWatcher:
                 "warnings": [],
             },
             # Session 50 — paper_trades.json observability fields.
-            "paper_confidence": _paper_conf,
+            "paper_confidence": confidence,
             "paper_dqs": dqs_score if dqs_score else None,  # 0.0 → None for empty-DQS scalp paths
             "paper_sport": self.sport.lower() if self.sport else None,
             # Session 99 — forward-only fair-value proxy fields read from the

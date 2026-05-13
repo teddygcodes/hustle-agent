@@ -7283,3 +7283,35 @@ Total actual EE **+$461.45** vs held CF **+$213.00**, delta **+$248.45**. This i
 - No changes to [bot/strategies/vig_stack_series.py](bot/strategies/vig_stack_series.py).
 - No scope expansion and no scanner behavior change.
 - No bot restart.
+
+### ☑ Session 135 — live_momentum active sizer wiring + kill rule (2026-05-13, Outcome A — clean ship + actionable infrastructure)
+
+**Decision.** S135 shipped the active `live_momentum` sizing input fix and a pre-committed termination rule. The stale S130 line reference pointed at `LiveGameWatcher._auto_bet()` / `live_latency_arb`; the actual active path is `_auto_bet_momentum()` -> `bot/live_momentum_sizing.py:size_live_momentum_entry()`. That helper was already receiving `sport=...`, but it still passed literal `confidence=0.80` and omitted `family` when calling `kelly_size()`. S135 wires the S50 confidence value plus ticker-derived sport/family into the active helper call without changing `kelly_size()` itself, entry/exit logic, thresholds, disabled sports, or strategy activation.
+
+**Phase 0 findings.**
+- `kelly_size()` signature confirmed: `edge, probability, balance, price_cents, max_fraction, uncertainty_discount, confidence, sport, family`.
+- Stale direct call site at `bot/live_watcher.py:3213-3219` still passes `confidence=0.75`, but that function is `_auto_bet` for `live_latency_arb`, not active `live_momentum`.
+- Active helper before S135: `confidence=0.80`, `sport=sport`, no `family`.
+- Active helper after S135: `_auto_bet_momentum()` computes `confidence = min(1.0, dqs_score * (1 + max(0, wp_edge)))`; `size_live_momentum_entry()` derives sport via `bot.regime._ticker_to_sport(ticker)` with caller-sport fallback and derives `family = ticker.split("-", 1)[0]`.
+- Post-S97 enabled settled cohort on 2026-05-13 was N=5, so the `N>=80` kill-rule trigger was not already stale.
+
+**Tests.**
+- Baseline before S135 implementation: `python3 -m pytest tests/ --tb=no -q` -> **1767 passed in 42.63s**.
+- Focused post-edit: `python3 -m pytest tests/test_live_momentum_sizing.py tests/test_live_watcher.py -q` -> **91 passed in 0.75s**.
+- Full post-edit: `python3 -m pytest tests/ --tb=no -q` -> **1770 passed in 44.14s**.
+- New regression coverage: active watcher confidence handoff, ticker-derived sport handoff, ticker-derived family handoff. The tests are written to fail against the pre-S135 active helper literal/omitted-family behavior.
+
+**Sample sizing before vs after.** Real trade `PAPER-A67119C1` / `KXNHLGAME-26MAY12BUFMTL-BUF`: `dqs=0.9`, `wp_edge=0.10`, `entry_price=75c`, `contracts=20`, recorded paper confidence `0.99`. Before S135, active `kelly_size()` saw helper literal `confidence=0.80` and no family. After S135, it sees `min(1.0, 0.9 * 1.10) = 0.99`, `sport="nhl"`, `family="KXNHLGAME"`.
+
+**Kill rule shipped.** `CLAUDE.md` now has `Strategy Termination Rules`: `live_momentum` fires on 2026-06-15 at `N>=80` settled post-S97 enabled-cohort trades and requires bootstrap 95% CI lower bound on per-trade EV > 0. If unmet, the next session retires the strategy via `MOMENTUM_RETIRED` plus equivalent disable mechanism unless documented substrate work shipped within 14 days resets the trigger. Rationale: S40 -> S132 tested five leak hypotheses at available N, and S134 cross-AI review identified the no-termination-criterion gap.
+
+**Dashboard/docs.**
+- `bot/state/active_observations.json`: S130 reclassified as contaminated; S135 metrics added for actual-confidence wiring and kill-rule arming.
+- `CLAUDE.md`: Battle Scar #16 updated from stale line `1686` to the current active helper path; Open Loops references the kill rule.
+
+**Restart.**
+- Confirmed cwd: `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- Glint wrapper PID `85464` / bot child PID `65590` before restart.
+- `launchctl kickstart -k gui/501/com.hustle-agent.bot`.
+- Glint wrapper PID `9553` / bot child PID `9580` after restart.
+- `bot/logs/bot.log` showed fresh startup at `18:31:30`, Telegram connected, and `LIVE_SCAN_TELEMETRY` at `18:32:12`.

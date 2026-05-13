@@ -1193,6 +1193,82 @@ def test_auto_bet_momentum_uses_paper_starting_balance_not_hardcoded_500(tmp_pat
     assert captured["balance"] > 5000
 
 
+def test_live_momentum_sizer_passes_actual_confidence_not_constant(tmp_path, monkeypatch):
+    """Regression: S135 wires S50 confidence into the active sizer path.
+
+    This fails on the pre-fix code because `_auto_bet_momentum` did not pass
+    confidence into the shared helper, and the helper used a literal 0.80 when
+    calling `kelly_size`.
+    """
+    import asyncio
+    from collections import Counter
+    from bot import live_watcher
+
+    class _Snap:
+        period = 3
+
+    class _GameCtx:
+        _snapshots = [_Snap()]
+        win_probability = 0.80
+        score_diff = 2
+        game_completion_pct = 0.75
+        momentum = 0.2
+        lead_trend = 0.1
+
+    captured = {}
+
+    def fake_size_live_momentum_entry(**kwargs):
+        captured.update(kwargs)
+        return {
+            "fair_prob": 0.80,
+            "fair_prob_source": "game_context",
+            "sizing": {"contracts": 2, "total_cost": 1.5, "max_payout": 2.0},
+            "contracts": 2,
+            "size_multiplier": 1.0,
+            "assumed_edge": 0.04,
+            "instincts": [],
+            "capped_by_sport": False,
+        }
+
+    def fake_execute_trade(*args, **kwargs):
+        return {
+            "success": True,
+            "order_result": {"order_id": "paper-order-confidence", "filled_count": 2},
+        }
+
+    monkeypatch.setattr(live_watcher, "LIVE_JOURNAL_FILE", tmp_path / "live_journal.json")
+    monkeypatch.setattr(
+        "bot.live_momentum_sizing.size_live_momentum_entry",
+        fake_size_live_momentum_entry,
+    )
+    monkeypatch.setattr("bot.executor.execute_trade", fake_execute_trade)
+
+    watcher = live_watcher.LiveGameWatcher.__new__(live_watcher.LiveGameWatcher)
+    watcher.ticker = "KXNHLGAME-26MAY12TEST-BUF"
+    watcher.query = "test"
+    watcher.sport = "nhl"
+    watcher.balance = 10_500.0
+    watcher._game_ctx = _GameCtx()
+    watcher._last_espn_data = None
+    watcher._match_title = "Test Game"
+    watcher.bets_placed = []
+    watcher._entry_count = 0
+    watcher._tick_telem = Counter()
+
+    asyncio.run(watcher._auto_bet_momentum(
+        {"ticker": watcher.ticker},
+        yes_ask=75,
+        reason="test dip",
+        dip_cents=4,
+        dqs_score=0.8,
+    ))
+
+    assert captured["ticker"] == "KXNHLGAME-26MAY12TEST-BUF"
+    assert captured["confidence"] == pytest.approx(0.84)
+    assert captured["confidence"] != 0.80
+    assert captured["confidence"] != 0.75
+
+
 def test_paper_exit_persists_exit_reason_not_unknown(tmp_path, monkeypatch):
     """Live watcher paper exits must forward the concrete exit reason.
 
