@@ -6514,3 +6514,36 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 **What did NOT change.**
 - No changes to [tools/cross_platform_pair_discovery.py](tools/cross_platform_pair_discovery.py), [bot/polymarket_gamma_client.py](bot/polymarket_gamma_client.py), [bot/cross_platform_matcher.py](bot/cross_platform_matcher.py), or [tools/build_cross_platform_corpus.py](tools/build_cross_platform_corpus.py).
 - No threshold tuning, no registry write, no scanner wiring, no bot restart.
+
+### ☑ Session 127 — Cross-platform discovery REAL ANSWER confirmation (2026-05-13, Outcome A — read-only investigation)
+
+**Decision: Outcome A — read-only investigation, no commits.** KXMVE-displacement check confirmed the S126 REAL ANSWER: current Kalshi and Polymarket live universes do not materially overlap for the cross-platform matcher/discovery use case.
+
+**Summary.**
+- Kalshi live cursor hit the 30,000 cap with **29,795 KXMVE rows** and only **205 non-MVE rows**: **99.32% MVE share**.
+- The non-MVE survivors were dominated by commodity-price ladders: `KXNATGASD=60`, `KXSILVERD=40`, `KXGOLDD=40`, `KXTEMPNYCH=24`, `KXBRENTD=20`. Polymarket does not carry those current ladder families.
+- Even after MVE filtering, discovery produced **0 HIGH_CONFIDENCE** pairs across all 12 threshold combinations: Jaccard `0.10`, `0.20`, `0.30`, `0.40` crossed with `+/-3d`, `+/-7d`, `+/-14d`.
+
+**Why it matters.** S105-S123 validated matcher infrastructure, and S124 shipped discovery substrate, but the current live product mixes have structurally absent overlap. The infrastructure parks pending future product-mix change: Kalshi shifting away from MVE dominance, an MVE-leg matcher as a different problem, or a new single-outcome platform.
+
+**Tests.** Full baseline remained **1767 passed**; no files changed.
+
+### ☑ Session 128 — Cross-platform docs cleanup after REAL ANSWER (2026-05-13, Outcome A — doc corrections only)
+
+**Decision: Outcome A — clean doc ship.** Corrected stale cross-platform documentation that still framed the matcher/discovery arc as live-arb-ready pending operator spot-check.
+
+**Summary.**
+- [CLAUDE.md](CLAUDE.md): rewrote the S105 Open Loops status from "live-arb-ready pending operator final spot-check" to validated-and-parked infrastructure with no active consumer under the S127 REAL ANSWER finding.
+- [CLAUDE.md](CLAUDE.md): closed the S124 follow-on Open Loops entries for scanner, discovery cron, and `bet_type` surfacing because all are moot while the registry stays empty.
+- [bot/state/active_observations.json](bot/state/active_observations.json): added the S127 REAL ANSWER observation with KXMVE dominance and zero-HIGH_CONFIDENCE metrics.
+- [CLAUDE-sessions.md](CLAUDE-sessions.md): added S127 and S128 retrospective entries.
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed**.
+- Baseline after edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed**.
+- JSON validity: `python3 -c "import json; json.load(open('bot/state/active_observations.json'))"` -> passed.
+- Whitespace: `git diff --check` -> passed.
+
+**What this session did NOT do.**
+- No matcher, discovery, scanner, Polymarket, or bot code changes.
+- No threshold tuning, no registry write, no scanner wiring, no bot restart.

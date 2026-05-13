@@ -736,5 +736,25 @@
         "last_updated": "2026-05-12T20:30:00Z"
       }
     ]
+  },
+  {
+    "session": 127,
+    "shipped_at": "2026-05-13T05:16:00Z",
+    "description": "Cross-platform discovery REAL ANSWER confirmed: live universes don't materially overlap. S124's first dry-run produced 0 candidate pairs from 5K Kalshi + 4.7K Polymarket (S126 investigation). S127 isolated KXMVE displacement: 99.32% of live Kalshi cursor is multi-leg parlays (29,795 of 30,000 fetched). The 205 non-MVE survivors are dominated by commodity-price ladders (KXNATGASD/KXSILVERD/KXGOLDD/KXTEMPNYCH/KXBRENTD) which Polymarket doesn't carry. Even MVE-filtered, 0 HIGH_CONFIDENCE across all 12 (Jaccard, window) combinations from 0.10-0.40 and +/-3-14d. Matcher arc (S105 -> S123) validated infrastructure parks pending future product-mix change.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "kalshi_live_universe_mve_dominance",
+        "expectation": "Kalshi live universe MVE share remains >=80% (current: 99.32%). If this drops materially (KXMVE inventory mix shifts, e.g. due to a Kalshi product change), re-run cross-platform discovery; the matcher arc may have a current consumer at that point. Re-check command: tools/cross_platform_pair_discovery.py --dry-run + cursor inspection.",
+        "current_value": "99.32% (29,795 MVE / 30,000 fetched on 2026-05-13). Top non-MVE prefixes: KXNATGASD=60, KXSILVERD=40, KXGOLDD=40, KXTEMPNYCH=24, KXBRENTD=20.",
+        "last_updated": "2026-05-13T09:25:15Z"
+      },
+      {
+        "name": "cross_platform_high_confidence_at_default_threshold",
+        "expectation": "Cross-platform discovery produces 0 HIGH_CONFIDENCE pairs at default Jaccard 0.40 / +/-3d window. Non-zero would mean Kalshi or Polymarket inventory has shifted toward overlap; re-investigate. Re-check command: tools/cross_platform_pair_discovery.py --dry-run.",
+        "current_value": "0 HIGH_CONFIDENCE on 2026-05-13 (5K Kalshi + 4.7K Polymarket dry-run; even at Jaccard 0.10/+/-14d producing 1743 candidates).",
+        "last_updated": "2026-05-13T09:25:15Z"
+      }
+    ]
   }
 ]
