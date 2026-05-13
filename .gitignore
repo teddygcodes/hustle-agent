@@ -49,4 +49,5 @@ tools/strategy_lab/reports_out/*
 !tools/sample_match_high_confidence_for_codex.py
 !tools/apply_codex_labels_match_high_confidence.py
 !tools/cross_platform_pair_discovery.py
+!tools/dip_class_report.py
 output/
