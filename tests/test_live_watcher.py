@@ -144,6 +144,82 @@ def test_live_momentum_context_helper_does_not_leak_blobs():
 
 
 # ---------------------------------------------------------------------------
+# Session 137: dip classifier wiring
+# ---------------------------------------------------------------------------
+
+def test_live_momentum_context_helper_dip_class_missing_context():
+    """Without game_ctx, momentum/wp_edge are absent → classifier returns Class C."""
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    ctx = _build_live_momentum_decision_context(
+        sport="nfl",
+        ticker="KXNFL-S137-MISSING",
+        leader_market={
+            "ticker": "KXNFL-S137-MISSING",
+            "yes_ask": 60,
+            "yes_bid": 58,
+            "volume_24h": 5000,
+        },
+        recent_high=72,
+        dip_cents=12,
+        dqs=0.7,
+        game_ctx=None,
+        source="watcher",
+    )
+    assert ctx["dip_class"] == "C"
+    assert ctx["dip_classifier_diagnostics"]["version"] == "dip_classifier_v1"
+    assert ctx["dip_classifier_diagnostics"]["axis_fired"] == "missing_context"
+
+
+def test_live_momentum_context_helper_dip_class_wide_spread():
+    """spread_cents >= DIP_CLASSIFIER_WIDE_SPREAD_CENTS → classifier returns Class D."""
+    from bot.config import DIP_CLASSIFIER_WIDE_SPREAD_CENTS
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    ctx = _build_live_momentum_decision_context(
+        sport="nfl",
+        ticker="KXNFL-S137-WIDE",
+        leader_market={
+            "ticker": "KXNFL-S137-WIDE",
+            "yes_ask": 60,
+            "yes_bid": 60 - (DIP_CLASSIFIER_WIDE_SPREAD_CENTS + 1),
+            "volume_24h": 10_000,
+        },
+        recent_high=72,
+        dip_cents=12,
+        dqs=0.7,
+        game_ctx=None,
+        source="watcher",
+    )
+    assert ctx["dip_class"] == "D"
+    assert ctx["dip_classifier_diagnostics"]["axis_fired"] == "spread_wide"
+
+
+def test_live_momentum_context_helper_dip_class_thin_volume():
+    """volume_24h below DIP_CLASSIFIER_THIN_VOLUME → classifier returns Class D."""
+    from bot.config import DIP_CLASSIFIER_THIN_VOLUME
+    from bot.live_watcher import _build_live_momentum_decision_context
+
+    ctx = _build_live_momentum_decision_context(
+        sport="ufc",
+        ticker="KXUFC-S137-THIN",
+        leader_market={
+            "ticker": "KXUFC-S137-THIN",
+            "yes_ask": 72,
+            "yes_bid": 71,
+            "volume_24h": max(0, DIP_CLASSIFIER_THIN_VOLUME - 1),
+        },
+        recent_high=80,
+        dip_cents=8,
+        dqs=0.6,
+        game_ctx=None,
+        source="watcher",
+    )
+    assert ctx["dip_class"] == "D"
+    assert ctx["dip_classifier_diagnostics"]["axis_fired"] == "volume_thin"
+
+
+# ---------------------------------------------------------------------------
 # Session 112: IPL ESPN cricket integration
 # ---------------------------------------------------------------------------
 #

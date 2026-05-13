@@ -43,6 +43,9 @@ from bot.config import (
     TENNIS_QUALITY_MIN_TICKS, TENNIS_QUALITY_MIN_RANGE,
     SPORT_PROFILES,
     PAPER_MODE, PAPER_STARTING_BALANCE, CONVICTION_SIZE_FACTOR,
+    DIP_CLASSIFIER_WIDE_SPREAD_CENTS,
+    DIP_CLASSIFIER_THIN_VOLUME,
+    DIP_CLASSIFIER_DQS_MIN,
 )
 import bot.odds_scraper as _odds
 from bot.clv import (
@@ -50,6 +53,7 @@ from bot.clv import (
     _should_emit_live_momentum_cf,
 )
 from bot.live_momentum_proxy import estimate_live_momentum_win_prob
+from bot.dip_classifier import classify_dip
 from collections import deque
 
 logger = logging.getLogger("glint.live_watcher")
@@ -288,6 +292,17 @@ def _build_live_momentum_decision_context(
         )
     )
     compact["missing_context_fields"] = missing
+    # Session 137 — dip classifier label + diagnostic (forward-only telemetry;
+    # no entry/exit behavior change). Fires on every context-build call,
+    # including scan-time reject paths.
+    dip_class, dip_diag = classify_dip(
+        compact,
+        wide_spread_cents=DIP_CLASSIFIER_WIDE_SPREAD_CENTS,
+        thin_volume=DIP_CLASSIFIER_THIN_VOLUME,
+        dqs_min=DIP_CLASSIFIER_DQS_MIN,
+    )
+    compact["dip_class"] = dip_class
+    compact["dip_classifier_diagnostics"] = dip_diag
     return compact
 
 
