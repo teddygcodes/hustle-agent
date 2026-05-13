@@ -6547,3 +6547,47 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 **What this session did NOT do.**
 - No matcher, discovery, scanner, Polymarket, or bot code changes.
 - No threshold tuning, no registry write, no scanner wiring, no bot restart.
+
+### ☑ Session 129 — S41 TP/SL sweep re-run on expanded live_momentum cohort (2026-05-13, Outcome B — Pattern C reconfirmed)
+
+**Decision: Outcome B / classification (a).** Re-ran Session 41's global TP/SL sweep on the expanded post-Apr-23 settled `live_momentum` cohort. The SL-axis-flat finding still holds exactly within every TP row, `TP=12` still wins training, and no TP variant beats baseline on test (`best test delta = +0.0¢/trade`, below the `+50¢/trade` Pattern A gate). No config change shipped.
+
+**Cohort and split.**
+- Raw S41-filter cohort: **N=69** settled trades from 2026-04-23 onward; status mix `exited_early=46 / won=17 / lost=6`.
+- Raw sport mix by ticker: `nba=18 / nhl=10 / ipl=13 / ufc=10 / atp=18`. The `atp=18` contribution is historical pre-S97 disabled-sport volume; S97 blocks it forward.
+- Sweep CLI eligibility applies the current disabled-sport gate, so `atp=18` was excluded and the actual replayable sweep was **N=51**, split **train=35 / test=16**. Replay coverage produced `31` training replays and `13` test replays in the variant tables.
+
+**S41 comparison.**
+
+Session 41 training table, N=31 cohort:
+
+| TP \ SL | 20 | 25 | 30 (baseline) | 35 |
+|---|---:|---:|---:|---:|
+| 10 | +646 | +646 | +646 | — |
+| 12 | +886 | +886 | +886 | +886 |
+| 14 | +550 | +550 | +550 | — |
+| 16 | +550 | +550 | — | — |
+
+Session 129 training table, raw N=69 / sweep N=51:
+
+| TP \ SL | 20 | 25 | 30 (baseline) | 35 |
+|---|---:|---:|---:|---:|
+| 10 | +184 | +184 | +184 | — |
+| 12 | +277 | +277 | +277 | +277 |
+| 14 | -179 | -179 | -179 | — |
+| 16 | -179 | -179 | — | — |
+
+**Test validation.** Top-3 training variants were all `TP=12`: `TP=12 SL=20`, `TP=12 SL=25`, and baseline `TP=12 SL=30`. All three tied on test at **−1716¢** over `13` replays, so delta vs baseline was **+0¢ total / +0.0¢ per trade**. This is Pattern C again.
+
+**Per-sport and regime context.** Best test variant (`TP=12 SL=20`) by sport: `KXIPLGAME n=3 −1646¢`, `KXNBAGAME n=6 −4¢`, `KXNHLGAME n=2 +138¢`, `KXUFCFIGHT n=2 −204¢`. Day-of-week on test: `mon n=3 −1068¢`, `sun n=2 −650¢`, `fri n=1 −222¢`, `thu n=2 −22¢`, `sat n=3 +32¢`, `tue n=2 +214¢`.
+
+**S42 caveat.** Still load-bearing. Current TP/SL resolution in [bot/live_watcher.py](bot/live_watcher.py) and [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py) is `sport_profile.get(...)` first with global fallback, and current [bot/config.py](bot/config.py) gives NBA/NHL/UFC/tennis aliases explicit `take_profit` and `stop_loss`. IPL has no profile entry and is the main global-fallback sport in this cohort. Any future shipping decision should be per-sport unless the no-profile/global-fallback cohort itself becomes thick enough.
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed**.
+- Sweep command: `python3 tools/tick_backtest.py --sweep-tp-sl --min-entry-date 2026-04-23` -> completed; full report saved at [bot/state/reports/session_129_tp_sl_sweep_2026-05-13.md](bot/state/reports/session_129_tp_sl_sweep_2026-05-13.md).
+- Dashboard update: only the S102 metric `post-Apr-23 settled live_momentum cohort size (S41 watch-list trigger)` changed in [bot/state/active_observations.json](bot/state/active_observations.json).
+
+**What this session did NOT do.**
+- No changes to [bot/config.py](bot/config.py), [bot/live_watcher.py](bot/live_watcher.py), [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py), `MOMENTUM_DISABLED_SPORTS`, or production trading state.
+- No test changes, no TP/SL config change, no bot restart.

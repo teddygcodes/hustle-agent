@@ -257,9 +257,9 @@
       },
       {
         "name": "post-Apr-23 settled live_momentum cohort size (S41 watch-list trigger)",
-        "expectation": "S41's N>=60 threshold met at N=66 on 2026-05-11; queue a Session 103+ candidate to re-run S41's TP/SL training sweep on the expanded cohort and check whether the SL-axis-flat finding still holds. If a new TP winner emerges that's an actionable Outcome A.",
-        "current_value": 66,
-        "last_updated": "2026-05-11T23:30:00+00:00"
+        "expectation": "S129 consumed S41's N>=60 trigger on 2026-05-13. Global TP/SL rerun confirmed classification (a): SL-axis-flat still holds in every TP row at raw N=69 / sweep-eligible N=51, and no TP variant beat baseline on test (best delta +0.0c/trade vs +50c gate). Treat the global SL flatness as structural under current architecture, not a small-N hypothesis. Re-open only if the no-profile/global-fallback cohort (principally IPL) becomes large enough to test independently, or run a separate per-sport TP/SL session if a future per-sport signal warrants it.",
+        "current_value": "raw N=69; sweep-eligible N=51 after S97 disabled-sport gate; rerun completed 2026-05-13; classification (a), Pattern C/no config change",
+        "last_updated": "2026-05-13"
       },
       {
         "name": "settled live_momentum trades with S96 context matched in decisions.jsonl",
