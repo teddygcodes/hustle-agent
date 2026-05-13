@@ -6440,3 +6440,35 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 - No tuning of any matcher gate thresholds.
 
 **Open loop update.** CLAUDE.md S105 now records: matcher v3 is operator-trusted across 3 independent samples (S118+S119 design + S121 holdout-1 + S123 holdout-2); 0 FPs on the 160-pair corpus; live-arb-ready pending operator final spot-check. Holdout-2 confirms v3 generalizes — the principled-extractor claim holds.
+
+### ☑ Session 124v2 — Cross-platform discovery substrate (2026-05-13, Outcome A — discovery-only ship)
+
+**Trigger.** S124v1 stopped in Phase 0 because it assumed `tools/build_cross_platform_corpus.py` fetched live markets and called the matcher; it actually scrapes settled markets and stamps `suggested_label`. S124-INVESTIGATE mapped the true mechanics: `match_markets()` accepts unresolved markets because `_outcome()` defaults missing outcomes to `""`; `generate_candidate_pairs()` is module-level and importable; Kalshi live fetches already use `agent.kalshi_client.get_markets(status="open")`; no live Polymarket fetcher existed.
+
+**Decision: Outcome A — discovery only.** Shipped the read-path substrate that can create `bot/state/cross_platform_pair_registry.jsonl` on manual invocation. Scanner, live price-source choice, cron, dashboard, trading wire-up, realized-edge/book-depth work, and Phase 2 enrichment are deferred.
+
+**Implementation.**
+- New [bot/polymarket_gamma_client.py](bot/polymarket_gamma_client.py): live Gamma `/markets?active=true&closed=false` client with offset pagination, 10s request timeout, 3 retry attempts, first-page systemic failure raise, mid-pagination partial return with warning, and `normalize_for_matcher()` mapping real Gamma fields (`id`, `slug`, `question`, `description`, `resolutionSource`, `endDate`, `bestBid`, `bestAsk`, `lastTradePrice`, `volume24hr`) into matcher/candidate shape.
+- New [tools/cross_platform_pair_discovery.py](tools/cross_platform_pair_discovery.py): standalone operator CLI. It paginates open Kalshi markets, fetches active Polymarket markets, normalizes both sides, reuses `generate_candidate_pairs()` for the S116 ±3-day/Jaccard prefilter, calls `match_markets()` on full normalized dicts, filters to `MATCH_HIGH_CONFIDENCE`, and atomically writes registry JSONL unless `--dry-run` is set.
+- Registry rows include deterministic `pair_id`, venue IDs/URLs, matcher classification/reason, `discovered_at`, and `slice_tags` for sport, market type, and time-to-resolution band. `market_type` is derived via `extract_bet_type()` beside the matcher because `MatchDecision` does not expose bet-type details.
+- `.gitignore` now explicitly unignores `tools/cross_platform_pair_discovery.py` under the load-bearing tool exceptions. No sample registry was committed; `bot/state/cross_platform_pair_registry.jsonl` remains a first-run generated state artifact.
+
+**Manual live dry-run.**
+- Command: `python3 tools/cross_platform_pair_discovery.py --dry-run > /tmp/s124v2_discovery_dry_run_full.jsonl`
+- Output: `Fetched 5000 kalshi + 4762 polymarket markets. Generated 0 candidate pairs (Jaccard >= 0.40, +/-3 day window). Matcher classified 0 as MATCH_HIGH_CONFIDENCE. Wrote registry to stdout. Sport breakdown: none`
+- The zero-pair result is recorded as real measured output, not fabricated. It means the current default-capped live inventory did not produce any pairs under the existing settled-corpus prefilter during this run; the tool still exited 0 and wrote no rows in dry-run mode.
+
+**Tests and verification.**
+- Baseline before implementation: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1756 passed**.
+- Focused tests: `python3 -m pytest tests/test_polymarket_gamma_client.py tests/test_cross_platform_pair_discovery.py -q` -> **11 passed**.
+- Full pytest: `python3 -m pytest tests/ --tb=no -q` -> **1767 passed in 37.69s**.
+
+**What did NOT change.**
+- No scanner or observation writer.
+- No Polymarket CLOB integration or price-source decision.
+- No cron wiring.
+- No dashboard.
+- No Phase 2 settlement/book-depth enrichment.
+- No bot restart; discovery is a manual CLI and nothing reads the registry yet.
+
+**Open loop update.** CLAUDE.md now tracks S125 scanner price-source investigation, discovery cron wiring after week-1 manual runs, and future bet-type surfacing if coarse `market_type` tags prove insufficient.
