@@ -1069,7 +1069,7 @@ Bundle only when the data path, owner files, and verification story are shared. 
 
 ## Open Loops: Deferred Items to Revisit
 
-Centralized backlog of items that have been investigated but deferred without a calendar trigger or auto-firing condition. **Items here will sit indefinitely without active work.** Items with calendar/threshold auto-triggers (S87 NHL convergence at 2026-06-08, S97 UFC at N≥15, S99 Brier at 2026-05-25, S100 KXHIGHAUS at N≥10 in bucket, S101 Layer 2 fires on counter event, S104 regime tagger when more daily buckets accumulate) are NOT here — they live in their session's watch-list trigger and surface in `glint_status §10 Active Observations` as data accumulates passively.
+Centralized backlog of items that have been investigated but deferred without a calendar trigger or auto-firing condition. **Items here will sit indefinitely without active work.** Items with calendar/threshold auto-triggers (S87 NHL convergence at 2026-06-08, S97 UFC at N≥15, S99 Brier at 2026-05-25, S100 KXHIGHAUS at N≥10 in bucket, S104 regime tagger when more daily buckets accumulate) are NOT here — they live in their session's watch-list trigger and surface in `glint_status §10 Active Observations` as data accumulates passively.
 
 When a new session ships an Outcome B (design doc) or Outcome C with deferred work that won't auto-resolve, **add an entry to this section** rather than burying it in the session ☑ block. Remove entries when the deferred work ships.
 
@@ -1095,9 +1095,9 @@ Items observed during operation but not prioritized for a session. No calendar t
 
 - **(Resolved by S114, 2026-05-11)** — MOMENTUM_LEADER_MIN dead-zone filter (Session 2 historical) — obsolete; dead zone disappeared in current data per S114 verification. The historical `[75-80¢)` negative-EV signal was traced to a per-sport artifact (single ATP trade, -$15.40), structurally excluded by S97's ATP re-disable on 2026-05-11. Post-S97 cohort (n=22 settled, Apr 15 – May 12, excluding `MOMENTUM_DISABLED_SPORTS`): `[75-80¢)` = 59% WR / +$0.46 per trade / +$10.17 total — positive-EV. Bucket is no longer a candidate for exclusion. See Session 114 entry in `CLAUDE-sessions.md` for full bucket breakdown + driver analysis.
 
-### S101 Layer 2 — borderline (in this section but with auto-trigger)
+### S101 Layer 2 — closed by S125
 
-- **S101 Layer 2 — outer `wait_for` binding fix on Python 3.14.** S98's outer 600s `asyncio.wait_for` failed silently — likely an `asyncio.get_event_loop()` vs `get_running_loop()` binding issue. S101 Layer 1 (per-request 30s daemon-thread guard) is verified working and bounds the actual cadence problem. Layer 2 is now belt-and-suspenders rather than urgent. **Auto-trigger:** if `snapshot_outer_timeout_count_24h` remains absent for ≥7 days while Layer 1's `_kalshi_get total wall-clock timeout` log line fires non-zero times during the same window, ship Layer 2. Otherwise demote to operational hygiene above when convenient.
+- **S101 Layer 2 — outer `wait_for` binding hypothesis disproven.** S125 (2026-05-13) tested the proposed Python 3.14 binding bug directly: the isolated reproducer fired `TimeoutError` at 0.506s on Python 3.14.3 using the exact pattern at [bot/main.py:1289-1297](hustle-agent/bot/main.py:1289). The old counter-at-0 reading is now consistent with "no 600s+ snapshot stalls have occurred in production" rather than "the guard can't fire" — likely because S101 Layer 1 (per-request 30s daemon-thread guard) prevents individual requests from stacking into a 600s snapshot stall. **Future investigation (no auto-trigger):** if Kalshi degrades and snapshot stalls reappear without `snapshot_outer_timeout_count_24h` incrementing, gather bot-specific runtime evidence — exact deployed commit during the gap, scan-id sequence, whether the guard code was actually running, whether the gap was inside `snapshot_universe` before or after the guarded await — before re-opening the binding hypothesis.
 
 ### Cross-references (do NOT duplicate here)
 

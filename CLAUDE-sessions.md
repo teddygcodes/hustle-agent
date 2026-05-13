@@ -6472,3 +6472,45 @@ The matcher correctly handles the third structural failure mode (token-overlap o
 - No bot restart; discovery is a manual CLI and nothing reads the registry yet.
 
 **Open loop update.** CLAUDE.md now tracks S125 scanner price-source investigation, discovery cron wiring after week-1 manual runs, and future bet-type surfacing if coarse `market_type` tags prove insufficient.
+
+### ☒ Session 125 — S101 Layer 2 binding hypothesis falsification (2026-05-13, Outcome C — do not ship)
+
+**Decision: Outcome C — no code, no commit, no push.** Phase 0 tested the S101 Layer 2 premise directly and disproved the proposed Python 3.14 binding bug. An isolated reproducer using the exact production pattern at [bot/main.py:1289-1297](bot/main.py) fired `TimeoutError` correctly at **0.506s** on Python **3.14.3**.
+
+**Why it matters.** The "outer `asyncio.wait_for` is structurally broken" claim had been propagating since S101 on 2026-05-11. Catching the false premise now prevents future sessions from treating a counter-at-0 reading as proof that the guard cannot fire.
+
+**Next step documented.** Future investigation moves to bot-specific runtime evidence, not Python-version theory: if Kalshi degradation produces snapshot stalls without `snapshot_outer_timeout_count_24h` incrementing, capture the deployed commit, scan-id sequence, whether the guard code was actually running, and whether the gap occurred inside `snapshot_universe` before or after the guarded await.
+
+**Tests.** Full baseline remained **1767 passed**; no files changed.
+
+### ☑ Session 126 — S125 retrospective doc correction + zero-pair investigation (2026-05-13, Outcome A — doc ship, investigation real-answer)
+
+**Trigger.** S125 falsified the S101 binding-bug hypothesis, but `CLAUDE.md` and `bot/state/active_observations.json` still said the outer guard was structurally broken. Separately, S124v2's first live discovery dry-run returned zero candidate pairs from `5000` Kalshi + `4762` Polymarket matcher-ready markets, and needed a read-only bug-vs-reality investigation before the result hardened into lore.
+
+**Decision: Outcome A.** Corrected the stale S101/S98 documentation and classified the S124 zero-pair result as **REAL ANSWER for the current live discovery universe**, not a discovered matcher bug and not a useful threshold artifact. Lower thresholds create noisy candidates, but still zero `MATCH_HIGH_CONFIDENCE` pairs.
+
+**Doc corrections.**
+- [CLAUDE.md](CLAUDE.md): closed the S101 Layer 2 binding hypothesis, cited the S125 Python 3.14.3 reproducer (`TimeoutError` at 0.506s), removed the auto-trigger, and redirected any future investigation to bot-specific runtime evidence.
+- [bot/state/active_observations.json](bot/state/active_observations.json): restored the S98 metric expectation for `snapshot_outer_timeout_count_24h` (`>2` in any 24h is a regression requiring S98 retuning) and marked the stale S101 Layer 2 active-observation trigger closed.
+- This session entry preserves the S125 Outcome C audit trail because S125 intentionally shipped no commit.
+
+**Zero-pair investigation.**
+- Live fetch: `5000` Kalshi raw / `5000` Polymarket raw; matcher-ready after normalization: `5000` Kalshi / `4762` Polymarket.
+- Shape spot-check: both venues produced tz-aware `close_date`, populated `question`/`title`/`question_text`, venue tags, ids/slugs, URLs, and `source_url`. `category` was blank in the sampled records on both sides, so it is a shape caveat but not the cause of candidate loss; candidate generation does not depend on category.
+- Date buckets overlapped enough that date-windowing alone is not the cause. Kalshi buckets: `today=41`, `+3d=1236`, `+4d=65`, `+5d=18`, `+6d=8`, `+7-14d=3160`, `+14-30d=410`, `+30d+=62`. Polymarket buckets: `past=237`, `+1d=16`, `+3d=49`, `+6d=102`, `+7d=24`, `+7-14d=75`, `+14-30d=581`, `+30d+=3678`.
+- Sensitivity sweep:
+  - `0.40`: `±3d=0/0`, `±7d=0/0`, `±14d=0/0` (`candidate_count/high_confidence_count`).
+  - `0.30`: `±3d=0/0`, `±7d=0/0`, `±14d=0/0`.
+  - `0.20`: `±3d=8/0`, `±7d=25/0`, `±14d=33/0`; all were `MATCH_NEEDS_REVIEW`.
+  - `0.10`: `±3d=1657/0` (`1178` review, `479` no-match), `±7d=2532/0` (`1989` review, `543` no-match), `±14d=3568/0` (`2709` review, `859` no-match).
+- Manual known-topic trace: Polymarket had `Will PSG win the 2025-26 Champions League?`; the best Kalshi-side PSG records in the fetched universe were multi-leg `KXMVE...` bundles such as `yes Mainz,yes PSG` with Jaccard `0.1429` and `days_apart=0.438`. They fail default Jaccard and the matcher hedges `MATCH_NEEDS_REVIEW` with `bet_type_ambiguous`, which is correct because they are not the same single-outcome market.
+- Cap/composition probe: the first `12000` Kalshi open markets were still overwhelmingly `KXMVE` multi-leg sports (`11996` `KXMVE`, `4` `KXUFC`) and contained zero simple hits for `bitcoin`, `fed`, `trump`, `approval`, `nba`, `stanley`, or `champions league`. That supports "current live discovery inventory has little material overlap" rather than "the candidate generator dropped obvious pairs."
+
+**Tests and verification.**
+- Focused premise test: `python3 -m pytest tests/test_main.py::test_main_loop_aborts_long_snapshot_after_outer_timeout -q` -> **1 passed**.
+- Baseline before doc edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed in 36.15s**.
+- Baseline after doc edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed in 36.16s**.
+
+**What did NOT change.**
+- No changes to [tools/cross_platform_pair_discovery.py](tools/cross_platform_pair_discovery.py), [bot/polymarket_gamma_client.py](bot/polymarket_gamma_client.py), [bot/cross_platform_matcher.py](bot/cross_platform_matcher.py), or [tools/build_cross_platform_corpus.py](tools/build_cross_platform_corpus.py).
+- No threshold tuning, no registry write, no scanner wiring, no bot restart.

@@ -117,9 +117,9 @@
       },
       {
         "name": "snapshot_outer_timeout_count_24h in bot_state.json",
-        "expectation": "SUPERSEDED by S101: outer asyncio.wait_for is structurally broken on Python 3.14 (silent-failure binding bug \u2014 likely asyncio.get_event_loop() vs get_running_loop()). Counter will remain 0 indefinitely until S101 Layer 2 binding fix ships (queued in Open Loops). The actual safety net for the cadence regression is S101 Layer 1 (per-request 30s daemon-thread guard in agent/kalshi_client.py), tracked under S101 entry.",
-        "current_value": "0 (structurally locked at 0; not a healthy-Kalshi signal)",
-        "last_updated": "2026-05-12T02:30:00+00:00"
+        "expectation": "S125 disproved the proposed Python 3.14 binding bug: the outer asyncio.wait_for pattern at bot/main.py:1289-1297 fires TimeoutError correctly on Python 3.14.3. Re-apply the original S98 expectation: >2 in any 24h is a regression and needs S98 retuning before further cadence increases. Counter is now expected to remain 0 under healthy Kalshi + S101 Layer 1 working.",
+        "current_value": "0 (expected under healthy Kalshi + S101 Layer 1 working)",
+        "last_updated": "2026-05-13"
       },
       {
         "name": "longest SCAN CYCLE gap during awake hours",
@@ -214,7 +214,7 @@
   {
     "session": 101,
     "shipped_at": "2026-05-11T21:40:23+00:00",
-    "description": "_kalshi_get total wall-clock timeout via daemon-thread guard (30s cap). Bounds the slow-drip case where urlopen's per-recv timeout=10 is bypassed by trickle responses, restoring inner-deadline effectiveness in snapshot_universe. Brief was re-scoped mid-session: original directive listed snapshot_universe as out-of-scope based on counter-absent inference, but Phase 0 evidence (bot.log lines 53934/54338/54349) showed today's gap WAS snapshot_universe with the outer wait_for failing silently. Layer 1 only; Layer 2 (outer wait_for binding fix) deferred to Session 102 with watch-list trigger.",
+    "description": "_kalshi_get total wall-clock timeout via daemon-thread guard (30s cap). Bounds the slow-drip case where urlopen's per-recv timeout=10 is bypassed by trickle responses, restoring inner-deadline effectiveness in snapshot_universe. S125 later disproved the Python 3.14 outer-wait_for binding hypothesis: the exact bot/main.py pattern fires TimeoutError correctly in an isolated reproducer. The old counter-absent inference now means no observed 600s+ production snapshot stalls under healthy Kalshi + Layer 1, not proof of a Python binding fault.",
     "observation_window_days": 14,
     "metrics": [
       {
@@ -236,10 +236,10 @@
         "last_updated": "2026-05-11T21:40:23+00:00"
       },
       {
-        "name": "Layer 2 watch-list \u2014 outer wait_for binding fix (Session 102 candidate)",
-        "expectation": "If snapshot_outer_timeout_count_24h in bot_state.json remains absent for >=7 days while the new '_kalshi_get total wall-clock timeout' log line fires non-zero times during the same window, the Session 98 outer guard is provably broken (it should fire when inner-guard activity sustained enough to overshoot 600s). Open Session 102 with the asyncio.get_event_loop() -> asyncio.get_running_loop() migration on Python 3.14 (deprecation hypothesis) plus a regression test for the actual production binding scenario.",
-        "current_value": "n/a (7d window opens 2026-05-11)",
-        "last_updated": "2026-05-11T21:40:23+00:00"
+        "name": "Layer 2 watch-list \u2014 outer wait_for binding hypothesis (closed by S125)",
+        "expectation": "CLOSED by S125: isolated reproducer disproved the asyncio.get_event_loop() -> get_running_loop() binding hypothesis on Python 3.14.3. No auto-trigger remains. If future Kalshi degradation produces snapshot stalls without snapshot_outer_timeout_count_24h incrementing, gather bot-specific runtime evidence before re-opening the hypothesis.",
+        "current_value": "closed; counter-at-0 now means no observed 600s+ production snapshot stalls under healthy Kalshi + S101 Layer 1",
+        "last_updated": "2026-05-13"
       }
     ]
   },
