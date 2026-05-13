@@ -6709,3 +6709,157 @@ All three sub-periods are negative. The leak persists across the sizing-bug boun
 - No changes to `MOMENTUM_DISABLED_SPORTS`, sport profiles, Kelly fraction, position caps, or strategy budgets.
 - No production state files changed except the operator-curated `bot/state/active_observations.json` (S130 entry append).
 - No bot restart. No test changes. The confidence/DQS inversion was identified but NOT acted on per session scope.
+
+### ☑ Session 131 — live_momentum scoring-direction investigation (2026-05-13, Outcome B — mixed mechanism, primarily sport-driven)
+
+**Decision: Outcome B / classification (f) mixed, primarily (c) sport-driven.** S130's confidence/DQS inverse-signal sub-finding (high-conf trades structurally lose, mid-conf trades structurally win) was pulled forward for investigation. Higher-resolution buckets confirm the pattern's directional shape but **statistical significance is borderline** (Welch t p=0.303, Mann-Whitney p=0.559, bootstrap 95% CI on diff = ($-26.12, $+2.68) INCLUDES zero on N=37). Per-sport breakdown reveals the inversion is **largely colinear with sport**: ATP (N=18) is 100% high-confidence and 100% losing (mean -$3.01); IPL (N=6) is 100% low-confidence and 100% winning (mean +$9.47). A blanket confidence-band filter would functionally re-implement "ban ATP / keep IPL", which is already in place via S97/S112. wp-model-quality is **not** the dominant mechanism (reconstructed Brier = 0.0736, within S99 OK_for_sizing band). No scoring change, no filter ship, no config change.
+
+**Phase 0 premises (verified).**
+- Cohort: `type=='live_momentum' AND status in {won, lost, exited_early} AND confidence > 0` (S50 forward-only). **N=37** (32 exited_early / 4 won / 1 lost). Date range 2026-05-02 → 2026-05-13. Matches S130's N=37 exactly.
+- Confidence formula at [bot/live_watcher.py:2272](bot/live_watcher.py:2272): `_paper_conf = min(1.0, (dqs_score or 0.0) * (1.0 + max(0.0, _paper_wp_edge)))` — exact match to CLAUDE.md.
+- wp model at [bot/game_context.py:239](bot/game_context.py:239) (`_compute_win_prob`): sport-specific (NBA logistic, NHL goal-diff lookup, MLB run-expectancy, generic logistic fallback).
+- Sport prefix map at [bot/regime.py:58](bot/regime.py:58) (`SPORT_PREFIXES`, not the brief's `_TICKER_PREFIX_TO_SPORT` name). Coarser per-game/futures collapsed: KXNBAGAME and KXNBA both → "nba".
+- Sport reconstruction **not needed** — all 37 cohort trades have `sport` populated. (S130's 32/69 missing-sport count was for the broader live_momentum history, not the confidence-populated sub-cohort.)
+- Sport mix: atp=18 / nba=7 / ipl=6 / nhl=3 / ufc=3.
+- Pytest baseline: **1767 passed** in 37.82s (matches CLAUDE.md).
+- `confidence_components` field populated on 4 of 37 trades (post-S99); 33 require backsolve. 23 of 37 have `confidence == 1.0` (clamped, exact wp_edge unrecoverable). Native `estimated_win_prob` cohort = 4 (far below S99 N≥30 gate). **User decision: reconstruct estimated_win_prob retroactively** on the full N=37 cohort, using native value where present, backsolved wp_edge = max(0, confidence/dqs − 1) where confidence < 1.0, and clamped-lower-bound wp_edge = max(0, 1/dqs − 1) where confidence == 1.0.
+
+**Analysis.** New one-off script at [tools/_oneoff_session_131_scoring_inversion.py](tools/_oneoff_session_131_scoring_inversion.py). 8 analyses (A–H), pure-stdlib (json/statistics/math/random); mirrors S130's pattern. Output captured at `/tmp/s131_analysis_output.txt`.
+
+**Table A.1 — finer confidence buckets (status-based WR_st + PnL-sign WR_pnl per Session 131 decision to report both conventions).**
+
+| Band | N | WR_pnl | WR_st | mean | median | total |
+|---:|---:|---:|---:|---:|---:|---:|
+| [0.60, 0.70) | 7 | 42.9% | 14.3% | **+$7.80** | −$2.20 | +$54.63 |
+| [0.70, 0.80) | 3 | (N<5) | | | | |
+| [0.80, 0.90) | 1 | (N<5) | | | | |
+| [0.90, 1.00] | 26 | 34.6% | 3.8% | **−$2.68** | −$2.00 | −$69.80 |
+
+The distribution is **bimodal**: 7 trades cluster at ~0.65; 26 trades cluster at clamped 1.0; sparse middle. The shape is "top-bucket-only effect", NOT a clean monotonic negative slope. Table B (DQS bands) shows the same shape — confidence and DQS are tightly correlated in this cohort. WR_st (status='won' / N) is much lower than WR_pnl because 32 of 37 trades are exited_early (PnL>0 counts as "win" under WR_pnl).
+
+**Table C — statistical significance (split at conf=0.75, matches S130 convention; cohort median is 1.0, degenerate).**
+
+| Group | N | mean | total |
+|---:|---:|---:|---:|
+| conf > 0.75 | 28 | **−$2.21** | −$62.00 |
+| conf ≤ 0.75 | 9 | **+$6.31** | +$56.83 |
+
+S130 numbers reconciled **exactly** (verification gate cleared).
+
+| Test | Result |
+|---|---|
+| Welch's t (mean diff = −$8.53) | t = −1.030, dof = 8.3, **p = 0.303** (two-sided, normal-approx) |
+| Mann-Whitney U | U = 109.5, **p = 0.559** |
+| Bootstrap 95% CI on diff [10000 resamples, seed=131] | (−$26.12, **+$2.68**) — INCLUDES zero |
+| AUX split (clamped=1.0 vs unclamped<1.0): bootstrap CI | (−$19.04, +$0.12) — still includes zero (barely) |
+
+The inversion's direction is consistent but its magnitude is **not statistically significant** at conventional thresholds.
+
+**Table D — sport breakdown (split at conf=0.75).**
+
+| Sport | N | total | mean | high(N) mean | low(N) mean | inversion? |
+|---|---:|---:|---:|---:|---:|---|
+| atp | 18 | **−$54.20** | −$3.01 | (18) −$3.01 | (0) — | n/a (no low-conf trades) |
+| nba | 7 | −$14.00 | −$2.00 | (5) −$2.32 | (2) −$1.20 | YES (mild, N=2 low) |
+| ipl | 6 | **+$56.83** | +$9.47 | (0) — | (6) +$9.47 | n/a (no high-conf trades) |
+| nhl | 3 | +$7.00 | (N<5 skipped) | | | |
+| ufc | 3 | −$0.80 | (N<5 skipped) | | | |
+
+**The "high-conf loses / low-conf wins" pattern is structurally "ATP loses / IPL wins"** with confidence riding along for the ride. ATP's confidence is uniformly high (post-S97 ATP is disabled — historic cohort frozen with whatever confidences fired before the disable); IPL's confidence is uniformly lower (post-S112 IPL is freshly enabled — its trades sit in a different confidence band). NBA is the only sport with both high and low confidence within the cohort, and its inversion (high −$2.32 vs low −$1.20) is tiny on N=5/N=2.
+
+**Table E — time-in-trade & exit-reason mix (split at conf=0.75).**
+
+| | conf_high (N=28) | conf_low (N=9) |
+|---|---:|---:|
+| mean duration | 25.1 min | 39.2 min |
+| median duration | 7.1 min | 10.6 min |
+
+Exit-reason cross-tab:
+
+| category | conf_high | conf_low |
+|---|---:|---:|
+| AUTO_CUT_LOSS_NO_BID | 3 | 0 |
+| DOLLAR STOP | 0 | 4 |
+| NEAR-SETTLE | 2 | 0 |
+| OPP RUN EXIT | 0 | 1 |
+| STOP-LOSS | 13 | 1 |
+| TAKE PROFIT | 4 | 0 |
+| TRAILING STOP | 2 | 0 |
+| (UNKNOWN / NONE) | 4 | 3 |
+
+conf_high is dominated by STOP-LOSS (13/28, mostly ATP), conf_low by DOLLAR STOP (4/9, mostly IPL with sub-$5 caps biting). Different exit mechanics but consistent with sport-level structural differences (tennis matches play differently from IPL).
+
+**Table F — reconstructed wp bias and Brier per confidence band.**
+
+| Conf band | N | mean_bias | Brier | sources |
+|---|---:|---:|---:|---|
+| [0.60, 0.70) | 7 | −0.0609 | 0.0239 | backsolve_exact=6, native=1 |
+| [0.70, 0.80) | 3 | +0.0226 | 0.0042 | backsolve_exact=3 |
+| [0.90, 1.00] | 26 | **+0.1491** | **0.0965** | backsolve_clamped_lowerbound=23, backsolve_exact=1, native=2 |
+
+High-conf band shows positive bias (+0.149: model over-estimates win prob by ~15pp) and higher Brier (0.097). Because 23 of 26 high-conf trades use clamped lower-bound reconstruction, the +0.149 is a **lower bound** on the true bias — actual model bias on these trades is even larger. Directionally supports the wp-quality hypothesis as a contributing (not dominant) mechanism.
+
+**Table G — Brier eval gate check (S99 watch-list pulled forward).**
+
+| Cohort | N | Brier | bias | S99 gate verdict |
+|---|---:|---:|---:|---|
+| Native estimated_win_prob | 4 | 0.0263 | −0.0582 | BELOW N≥30 gate (need 26 more) |
+| Reconstructed full | 37 | **0.0736** | +0.0899 | **OK_for_sizing** (≤ 0.20) |
+
+Bucketed Brier (by reconstructed estimated_win_prob):
+
+| Range | N | mean_ewp | mean_outcome | bias | Brier |
+|---|---:|---:|---:|---:|---:|
+| [0.45, 0.65) | 1 | 0.5000 | 0.6700 | −0.1700 | 0.0289 |
+| [0.65, 0.85) | 29 | 0.7368 | 0.6193 | +0.1175 | 0.0910 |
+| [0.85, 0.95) | 7 | 0.8886 | 0.8757 | +0.0129 | 0.0079 |
+
+The wp model is **well-calibrated overall** — Brier of 0.0736 is far better than random (random = 0.25). Largest miscalibration is in the [0.65, 0.85) bucket (29 of 37 trades), with +0.12 bias (model predicts ~74% win prob but outcome is ~62%). The very-high-conf bucket [0.85, 0.95) is well-calibrated. The wp model is **not** the dominant mechanism for the inversion; it has a contributory miscalibration in the mid-high range.
+
+**Table H — counterfactual filter sweep (only enter trades where confidence ≤ threshold).**
+
+| Threshold | N_rejected | N_remaining | Total | Per-trade | Δ/trade vs baseline |
+|---:|---:|---:|---:|---:|---:|
+| baseline | 0 | 37 | −$5.17 | −$0.14 | — |
+| ≤ 0.70 | 30 | 7 | **+$54.63** | **+$7.80** | **+$7.94** |
+| ≤ 0.75 | 28 | 9 | +$56.83 | +$6.31 | +$6.45 |
+| ≤ 0.80 | 27 | 10 | +$58.23 | +$5.82 | +$5.96 |
+| ≤ 0.85 | 26 | 11 | +$64.63 | +$5.88 | +$6.02 |
+| ≤ 0.90 | 26 | 11 | +$64.63 | +$5.88 | +$6.02 |
+
+All thresholds 0.70–0.90 clear the S130 actionability gate (Δ/trade ≥ +$1.00) by a wide margin. **BUT** the improvement is colinear with sport: all rejected trades are ATP-dominated. The filter would re-implement "ban ATP / keep IPL" which is already in production via S97 + S112.
+
+**Classification rationale.** Outcome (f) mixed, primarily (c) sport-driven.
+- NOT (a): bootstrap CI includes zero; Welch t p=0.303 fails the <0.10 bar. Per-trade Δ in H is large but confounded.
+- (b) applies: directional inversion holds in higher-resolution buckets but stat tests are borderline. Watch-list extension is the right output.
+- (c) applies as primary: per-sport breakdown shows the confidence-axis effect is largely a sport-axis effect.
+- NOT (d): formula confirmed correct, S130 numbers reconciled exactly, finer buckets don't make the signal disappear (the bimodal cluster shape is real, not a coarse-bucket artifact).
+- NOT (e) primary: reconstructed Brier=0.0736 places wp model in OK_for_sizing band. There IS a +0.12 mid-range bias (Table G bucketed) — a contributory but not dominant mechanism.
+- (f) is the cleanest fit: combination of (b) + (c) with a small contribution from (e).
+
+**Most surprising finding.** ATP cohort is **frozen at high confidence** post-S97 disable (no new ATP trades since 2026-05-11), and IPL cohort is **freshly enabled at lower confidence** post-S112 (2026-05-11). The "confidence inversion" is a snapshot artifact of these two timing events colliding inside the same N=37 window — not a structural property of the scoring formula. As ATP stays disabled and IPL accumulates more trades, the sport-confidence colinearity will tighten further before it loosens (need a sport with mixed confidence to break the colinearity).
+
+**Most actionable finding.** None for blanket confidence filtering. The Brier bucketed analysis (Table G) is the strongest actionable signal: the [0.65, 0.85) wp bucket has +12pp bias on N=29. If a future session investigates wp-model tuning, that's where to start. But the bias is small in absolute terms (Brier 0.091 is still well-calibrated by macro standards) and 23/29 trades in that bucket are clamped-lowerbound reconstructions — a v2 estimated_win_prob model would need richer post-S99 native data before tuning.
+
+**Direction-setting conclusion.** This closes the live_momentum leak investigation arc opened by S40 (Win:Loss magnitude leak):
+- TP/SL ratio axis — ruled out (S129 Pattern C).
+- Exit-firing axis — ruled out (S41 counterfactual).
+- Sizing axis — ruled out (S130 Pattern C).
+- Scoring-direction (confidence/DQS) axis — **not a structural leak**; signal is sport-confidence colinearity (this session).
+
+**Remaining un-investigated axis**: per-sport entry quality (specifically: ATP's frozen high-conf-losing cohort is a candidate for the S97 disable re-validation — already covered by S97 watch-list at N≥15 UFC + the ongoing ATP shadow_trades.jsonl accumulation). No new axis opened by S131.
+
+**Watch-list trigger.** Re-run [tools/_oneoff_session_131_scoring_inversion.py](tools/_oneoff_session_131_scoring_inversion.py) when post-S50 cohort N≥75 (roughly 2× today's 37). Re-open the scoring-direction investigation only if (a) bootstrap 95% CI on conf_high vs conf_low diff excludes zero AFTER controlling for sport (sport-stratified bootstrap), OR (b) reconstructed Brier > 0.25 (worse-than-random wp model), OR (c) a sport with mixed confidence levels accumulates N≥20 and shows clean within-sport inversion. Otherwise the scoring-direction axis stays closed.
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` → **1767 passed** in 37.82s.
+- Post-edit pytest: re-run after ship (Task 6).
+- Script execution: `python3 tools/_oneoff_session_131_scoring_inversion.py` ran clean; all 8 analyses (A–H) produced; cohort N=37 confirmed; S130 numbers reconciled exactly.
+- Dashboard updates: S99 Brier-eval metric updated with S131 pulled-forward measurement; new S131 entry appended to [bot/state/active_observations.json](bot/state/active_observations.json) with 4 metrics tracking statistical significance, sport colinearity, reconstructed Brier, and counterfactual actionability.
+
+**What this session did NOT do.**
+- No changes to [bot/live_watcher.py](bot/live_watcher.py), [bot/game_context.py](bot/game_context.py), [bot/strategies/live_momentum.py](bot/strategies/live_momentum.py), [bot/sizing.py](bot/sizing.py), or [bot/config.py](bot/config.py).
+- No changes to `MOMENTUM_DISABLED_SPORTS`, sport profiles, confidence formula, dqs formula, or wp model.
+- No production state files changed except the operator-curated [bot/state/active_observations.json](bot/state/active_observations.json) (S99 metric update + new S131 entry).
+- No bot restart. No test changes. No confidence-band filter shipped.
+- The S99 May 25 native Brier-eval trigger is **preserved** as the strict ship-bar; S131's reconstructed measurement is a pulled-forward read, not a replacement.

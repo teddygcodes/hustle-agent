@@ -162,8 +162,8 @@
       {
         "name": "Brier score on resolved live_momentum proxy calibration (watch-list trigger)",
         "expectation": "re-evaluate proxy model after 14d (target 2026-05-25). If Brier <= 0.20 across >= 30 resolved trades, the proxy is calibrated enough to consider confidence-weighted sizing in a future session. Brier > 0.25 means worse-than-random \u2014 investigate the v1 math identity (likely a game_context.win_probability quality issue, not a proxy bug).",
-        "current_value": "S115 (2026-05-12) measurement: N=2, Brier=0.1434, Bias=0.1540 (PAPER-BAA84AF2 IPL pred=0.500 lost; PAPER-54CA70B8 NBA pred=0.808 won). Far below N>=30 threshold; no anomalies in proxy distribution. Re-eval 2026-05-25 unchanged.",
-        "last_updated": "2026-05-12T03:51:39+00:00"
+        "current_value": "S131 (2026-05-13) pulled-forward measurement: native estimated_win_prob cohort N=4 (Brier=0.0263, bias=-0.0582) \u2014 BELOW S99 N>=30 gate. Reconstructed N=37 cohort (back-solved wp_edge from confidence/dqs for 14 trades, clamped-lowerbound for 23 trades): Brier=0.0736, bias=+0.0899 \u2014 within OK_for_sizing band (<=0.20). Original 2026-05-25 native-gate trigger superseded by S131 mixed-mechanism finding (see S131 entry). Native cohort will still reach N>=30 organically; preserve original gate as the strict ship-bar.",
+        "last_updated": "2026-05-13T16:00:00+00:00"
       }
     ]
   },
@@ -780,6 +780,38 @@
         "expectation": "Post-S54 Kelly-band Q3 (fractions 0.0013-0.0015) had total_pnl=-$49.00 (N=8, mean=-$6.12, p95_loss=-$16.40 \u2014 the cohort's single biggest loss) vs Q1+Q2+Q4 combined total=+$27.64. If Q3 reverses to non-negative on re-measurement, the cohort's single-tail concentration was a small-N artifact, not structural. If Q3 stays the worst quartile with growing N, sizing-cap investigation worth re-opening with finer band granularity (deciles).",
         "current_value": "Q3 N=8 total=-$49.00; Q1+Q2+Q4 combined total=+$27.64 on 2026-05-13",
         "last_updated": "2026-05-13T10:57:17Z"
+      }
+    ]
+  },
+  {
+    "session": 131,
+    "shipped_at": "2026-05-13T16:00:00+00:00",
+    "description": "live_momentum scoring-direction investigation pulling forward S130 confidence/DQS inverse-signal sub-finding. Outcome (f) mixed, primarily (c) sport-driven: the apparent 'high-conf trades structurally lose' pattern is colinear with sport (ATP N=18 100% conf>0.75 100% losing; IPL N=6 100% conf<=0.75 100% winning). Statistical significance on the confidence axis alone is borderline (Welch t p=0.303, Mann-Whitney p=0.559, bootstrap 95% CI ($-26.12, $+2.68) INCLUDES zero on N=37). Reconstructed Brier=0.0736 (OK_for_sizing) \u2014 wp model is not the dominant mechanism. Blanket confidence-band filter NOT recommended; per-sport investigation is the right follow-up shape. Analysis script at tools/_oneoff_session_131_scoring_inversion.py.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "live_momentum_confidence_inversion_statistical_significance",
+        "expectation": "Re-investigate when post-S50 cohort N >= 75 (roughly 2x today's 37). At that N, Welch t and bootstrap 95% CI become meaningful even with the bimodal cluster shape. Re-investigation should re-run tools/_oneoff_session_131_scoring_inversion.py and compare. Threshold for action: bootstrap 95% CI excludes zero AND counterfactual filter sweep at threshold X still produces per-trade delta >= +$1.00 AFTER controlling for sport. Otherwise inversion axis stays closed.",
+        "current_value": "S131 (2026-05-13) post-S50 N=37: conf>0.75 N=28 mean=-$2.21 vs conf<=0.75 N=9 mean=+$6.31, diff=-$8.53. Welch t p=0.303, Mann-Whitney p=0.559, bootstrap 95% CI ($-26.12, $+2.68) \u2014 INCLUDES zero. Directional but not statistically significant.",
+        "last_updated": "2026-05-13T16:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_sport_confidence_colinearity",
+        "expectation": "Track whether the sport-confidence colinearity persists as cohort grows. ATP and IPL are post-S97 disable/enable-affected sports \u2014 natural cohort balance should emerge over 30d. If ATP cohort accumulates with mixed confidence levels (not all clamped at 1.0) AND mean P&L stays negative, the per-sport investigation has evidence to act on; if ATP doesn't accumulate (still disabled), open a per-sport-confidence-tuning session for IPL specifically.",
+        "current_value": "S131 (2026-05-13): ATP N=18 all confidence>0.75, mean=-$3.01 (post-S97 disable cuts off new ATP trades \u2014 cohort frozen). IPL N=6 all confidence<=0.75, mean=+$9.47 (post-S112 IPL enable continues). NBA N=7 mild inversion (high(5) -$2.32 vs low(2) -$1.20). NHL N=3, UFC N=3 thin.",
+        "last_updated": "2026-05-13T16:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_wp_model_calibration_reconstructed",
+        "expectation": "S131 reconstructed-cohort Brier=0.0736 places wp model in OK_for_sizing band per S99 gate (<=0.20). 23 of 37 trades are clamped-lowerbound reconstructions \u2014 actual model bias on those trades is greater than the +0.0899 measured. Re-measure with the native S99 cohort once it reaches N>=30 (S99 watch-list trigger, unchanged). If native Brier diverges materially from reconstructed (>0.05 absolute), reconstruction methodology needs review.",
+        "current_value": "S131 (2026-05-13): native N=4 Brier=0.0263 bias=-0.0582 (below gate); reconstructed N=37 Brier=0.0736 bias=+0.0899 (OK_for_sizing). Bucketed Brier shows largest miscalibration in [0.65, 0.85) bucket (N=29, mean_ewp=0.737, mean_outcome=0.619, bias=+0.118).",
+        "last_updated": "2026-05-13T16:00:00+00:00"
+      },
+      {
+        "name": "live_momentum_confidence_filter_counterfactual_actionability",
+        "expectation": "Counterfactual filter sweep (Analysis H) shows all thresholds 0.70-0.90 produce per-trade delta >= +$5.90 on the N=37 cohort \u2014 far above the S130 $1.00 actionability gate. BUT the improvement is colinear with rejecting ATP trades (all conf>0.75). Do NOT ship a blanket confidence filter from this signal alone. Filter would functionally re-implement 'ban ATP' which is already in place via S97. Re-evaluate only if (a) the sport-controlled per-trade delta still exceeds $1.00 at the next re-investigation, OR (b) ATP re-enables and the cohort re-balances naturally.",
+        "current_value": "S131 (2026-05-13): threshold=0.70 keeps 7 trades (per-trade +$7.80), 0.85 keeps 11 trades (per-trade +$5.88). All actionable thresholds reject 100% of ATP. Confounded \u2014 no action.",
+        "last_updated": "2026-05-13T16:00:00+00:00"
       }
     ]
   }
