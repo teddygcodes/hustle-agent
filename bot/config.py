@@ -287,6 +287,16 @@ MOMENTUM_DQS_THRESHOLD   = 0.40  # minimum dip quality score to buy (0-1 scale) 
 MOMENTUM_DQS_TRAIL_STOP  = 6     # trailing stop: 6¢ from peak — DATA v4: only positive trail value (+0.28c/trade)
                                  # 4c too tight (noise), 8c too wide (gives back gains)
 
+# Session 137 dip classifier (forward-only telemetry; no behavior change).
+# Thresholds anchored on the broad cohort: live_momentum trades with
+# timestamp >= 2026-05-05, status in {won,lost,exited_early},
+# sport not in MOMENTUM_DISABLED_SPORTS. Phase-0 measurement: broad-cohort
+# N=16 (5 joined within ±60s decision↔bet window) — N<10 trigger applied,
+# defaults used. Re-anchor when post-S137 forward cohort reaches N>=40.
+DIP_CLASSIFIER_WIDE_SPREAD_CENTS = 5    # default (Phase-0 N=5 joined < 10 → defaults). Joined p75 spread = 1.
+DIP_CLASSIFIER_THIN_VOLUME       = 50   # default (Phase-0 N=5 joined < 10 → defaults). Joined p25 volume = 3.37M.
+DIP_CLASSIFIER_DQS_MIN           = 0.40 # True mirror of MOMENTUM_DQS_THRESHOLD per session-plan direction.
+
 # Tier 2.4 (Apr 16): lightweight quality gate for sports that skip the full DQS
 # (tennis). Rejects "flat" dips where the last 6 ticks have <2c total range —
 # that's effectively a set break / changeover with no information content.
