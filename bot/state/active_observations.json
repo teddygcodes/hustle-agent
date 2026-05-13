@@ -861,9 +861,9 @@
       },
       {
         "name": "vig_stack_futures lean-in surface (Operating Posture)",
-        "expectation": "vig_stack_futures path was identified at S133 as a high-magnitude / high-variance surface (N=10, mean +$26.47/trade, but individual trades swing +/-$200+). Per CLAUDE.md Operating Posture, do not lock in or fix; investigate the mechanism. Re-investigate scope: when vig_stack_futures N>=15 OR when total accumulates beyond +$500 / below -$200. The 8 KXMLBGAME trades carry opp_type='vig_stack_futures' in trade_history.json (2 of 10 paper rows are pre-opp_type tagging). Next investigation should answer: (1) is the +EV concentrated in 1-2 trades or distributed? (2) does the high-variance reflect MLB-game-winner mispricing or a sizing/exit-timing artifact? (3) are NHL/NBA per-game tickers similarly underscanned (per CLAUDE.md Operating Posture: 'where else could this work?').",
-        "current_value": "S133 (2026-05-13): KXMLBGAME N=10, total +$264.65, mean +$26.47/trade, WR 50% (P&L>0). All trades NO-side. Distribution: 5 wins (+$4.77, +$172.52, +$296.92, +$204.30, +$48.02) and 5 losses (-$6.46, -$5.95, -$199.88, -$199.68, -$49.91). Bootstrap 95% CI [-$66.48, +$123.24] spans 0 \u2014 magnitude real, sign noisy.",
-        "last_updated": "2026-05-13T22:00:00+00:00"
+        "expectation": "S134 completed the focused investigation opened by S133. Do NOT add vig_stack_futures to _VIG_STACK_OPP_TYPES on the current evidence: auto-exit beat held-to-settlement by +$248.45 on the 6 computable early-exit trades. Next work should be a separate scope-expansion simulation for NBA/NHL per-game ladders with futures auto-exit behavior preserved, not an exemption-set fix. Re-open if post-S134 KXMLBGAME auto-exit counterfactual reverses negative on N>=10 EE trades OR if a scope-expansion sim shows NBA/NHL per-game structural arb with positive held/exit policy.",
+        "current_value": "S134 (2026-05-13): KXMLBGAME N=10, total +$264.65, mean +$26.47/trade, median -$0.59. Removing top winner flips total to -$32.27; trimmed top+bottom mean stays +$20.95. EE actual +$461.45 vs held CF +$213.00 (delta +$248.45), so futures auto-exit omission is currently a feature. KXNBAGAME/KXNHLGAME are present in universe (439/436 scan IDs) with no vig_stack decisions and rough YES-sum>100 rates of 97.1%/95.3%.",
+        "last_updated": "2026-05-13T23:30:00+00:00"
       },
       {
         "name": "Battle Scar #9 exemption integrity (regression-lock)",
@@ -882,6 +882,32 @@
         "expectation": "S133 counterfactual floor sweep at 0.93 / 0.94 / 0.95 / 0.96 / 0.97 produced a non-monotone \u0394 pattern (0.94 \u0394 -$1.43; 0.95 \u0394 +$1.31 \u2014 passes +$1 gate; 0.96/0.97 N=0). The 0.95 result is likely sampling noise on N=26 (current floor admits N=71). Do NOT raise the floor on this signal alone. Re-run if post-Apr-20 volatile cohort grows to N>=120 AND the 0.95 \u0394 holds or grows; only then promote to a floor-tuning session.",
         "current_value": "S133 (2026-05-13): floor 0.93 (current) admits N=71 total +$201.45 mean +$2.84; floor 0.95 admits N=26 total +$106.50 mean +$4.10 (\u0394 +$1.31). Non-monotone via 0.94 \u0394 -$1.43. Floor 0.96+ admits N=0 \u2014 would kill the strategy on the volatile axis.",
         "last_updated": "2026-05-13T22:00:00+00:00"
+      }
+    ]
+  },
+  {
+    "session": 134,
+    "shipped_at": "2026-05-13T23:30:00+00:00",
+    "description": "vig_stack_futures lean-in investigation. Outcome B, classification (f) Mixed with primary (d): auto-exit on futures is currently useful, not an exemption bug. KXMLBGAME cohort remains N=10 / total +$264.65 / mean +$26.47, but +EV is top-winner concentrated: median -$0.59 and total excluding the top winner -$32.27. EE counterfactual is decisive: actual EE total +$461.45 vs held-to-settlement +$213.00 on N=6, delta +$248.45, so adding vig_stack_futures to _VIG_STACK_OPP_TYPES would have hurt. Mechanism is real two-rung per-game ladder vig in nearest universe snapshots, but realized P&L is dominated by game outcome and auto-exit timing. Scope surface remains: KXNBAGAME/KXNHLGAME appear in universe with frequent rough YES-sum>100 signatures but no vig_stack decision rows. No config change, no exemption-set edit, no scope expansion, no bot restart. Analysis script at tools/_oneoff_session_134_vig_stack_futures.py.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "vig_stack_futures auto-exit counterfactual",
+        "expectation": "Keep vig_stack_futures OUT of _VIG_STACK_OPP_TYPES unless a future re-run shows actual EE materially worse than held-to-settlement on N>=10 computable EE trades. Current evidence says auto-exit is protective for this path.",
+        "current_value": "S134 (2026-05-13): 6 EE trades, actual +$461.45 vs held CF +$213.00, delta +$248.45. Apr-30 SFPHI was the load-bearing protective example: actual +$172.52 vs held CF -$199.76.",
+        "last_updated": "2026-05-13T23:30:00+00:00"
+      },
+      {
+        "name": "vig_stack_futures concentration risk",
+        "expectation": "Do not treat KXMLBGAME as distributed +EV until total P&L remains positive after removing the top winner on N>=20 OR bootstrap CI excludes zero. Until then, the cohort is an interesting lead, not a sizing/scope mandate.",
+        "current_value": "S134 (2026-05-13): N=10 total +$264.65 mean +$26.47 median -$0.59; top 3 winners +$673.74, bottom 3 losers -$449.47; excluding top winner total -$32.27; trimmed top+bottom total +$167.61.",
+        "last_updated": "2026-05-13T23:30:00+00:00"
+      },
+      {
+        "name": "NBA/NHL per-game vig_stack scope watch",
+        "expectation": "Queue a separate simulation-only session if prioritizing scope expansion: replay post-Apr-29 KXNBAGAME/KXNHLGAME per-game ladders with explicit auto-exit policy preserved. Do not ship scanner expansion directly from rough YES-sum counts.",
+        "current_value": "S134 (2026-05-13): KXNBAGAME universe rows 6,890 across 439 scan IDs, KXNHLGAME rows 5,418 across 436 scan IDs; both have 0 vig_stack decision rows and 0 scanned_by attribution. Rough post-Apr-29 event YES-sum>100 rates: KXNBAGAME 97.1% (2,518/2,594), KXNHLGAME 95.3% (2,184/2,291).",
+        "last_updated": "2026-05-13T23:30:00+00:00"
       }
     ]
   }

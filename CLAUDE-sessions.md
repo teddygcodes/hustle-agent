@@ -7208,3 +7208,78 @@ The strategic question this opens: **vig_stack is the workhorse and is healthy. 
 - The vig_stack_futures lean-in surface was **identified but NOT pursued** in this session — it gets its own scoped follow-up per the spec "investigation-only" boundary. Per CLAUDE.md Operating Posture, the followup question to bring in: "are NHL/NBA/NFL per-game winners scanned by `vig_stack_futures` path? If not, why?"
 - CLAUDE.md updates: refresh to "Money (The Honest Numbers)" section reflecting the vig_stack flip (Apr-20 −$110.62 → post-Filter-F +$1,064.57); new Open Loops entry for the vig_stack_futures lean-in investigation. No restructure.
 
+### ☑ Session 134 — vig_stack_futures lean-in investigation (2026-05-13, Outcome B — classification (f) Mixed, primary (d) auto-exit is useful)
+
+**Decision: Outcome B / classification (f) Mixed.** S133 correctly surfaced `vig_stack_futures` as a high-magnitude lead, but S134 does **not** support an exemption-set fix or immediate scope expansion. The KXMLBGAME cohort is still N=10 / total **+$264.65** / mean **+$26.47**, but the signal is top-winner concentrated: median **-$0.59**, top 3 winners **+$673.74**, bottom 3 losers **-$449.47**, and removing the single top winner flips total P&L to **-$32.27**. The strongest finding is Analysis D: the 6 early-exit trades did materially better with actual auto-exit (**+$461.45**) than they would have by holding to settlement (**+$213.00**), delta **+$248.45**. Therefore `vig_stack_futures` should **stay out** of `_VIG_STACK_OPP_TYPES` for now. The mechanism is still worth leaning into carefully: nearest universe snapshots reconstruct real two-rung per-game YES-sum >100c ladders, and KXNBAGAME/KXNHLGAME per-game markets show frequent rough YES-sum>100 signatures while receiving no vig_stack decisions. The right follow-up is a simulation-only NBA/NHL per-game scope session with futures auto-exit behavior preserved, not a live scanner expansion.
+
+**Phase 0 premises (verified).**
+- `CLAUDE.md` Operating Posture still names `KXMLBGAME-26APR291840SFPHI-PHI` as the Apr-30 +$172 example and preserves the "two cancelling bugs" frame.
+- `_VIG_STACK_OPP_TYPES = ("vig_stack_no", "vig_stack_series")`; `vig_stack_futures` remains excluded at [bot/main.py](bot/main.py).
+- `bot/strategies/vig_stack_series.py` still has split classification surfaces: `name_for()` special-cases KXMLBGAME/KXNBAGAME/KXNHLGAME as `vig_stack_series`, while the accept path emits `opp_type_full = "vig_stack_futures" if is_futures else "vig_stack_series"`.
+- Cohort: settled `paper_trades.json` `type=="vig_stack"` N=231. KXMLBGAME / explicit futures cohort N=10; 8 rows join to `trade_history.opp_type=="vig_stack_futures"`, 2 rows are missing explicit historical opp_type tagging.
+- Baseline pytest from Phase 0: **1767 passed**.
+
+**Analysis script.** New one-off script at [tools/_oneoff_session_134_vig_stack_futures.py](tools/_oneoff_session_134_vig_stack_futures.py). It is pure stdlib and read-only against `paper_trades.json`, `trade_history.json`, `positions.json`, `clv.json`, current + archived `decisions.jsonl`, and current + archived `universe.jsonl`. Output captured at `/tmp/session_134_output.txt`.
+
+**Table A — all 10 trades, sorted by P&L.**
+
+| Ticker | Entry | Contracts | Status / exit | P&L |
+|---|---:|---:|---|---:|
+| KXMLBGAME-26MAY061905TEXNYY-NYY | 35.0c | 571 | auto_take_profit | +$296.92 |
+| KXMLBGAME-26MAY092110ATLLAD-LAD | 44.0c | 454 | auto_take_profit | +$204.30 |
+| KXMLBGAME-26APR291840SFPHI-PHI | 44.0c | 454 | auto_take_profit | +$172.52 |
+| KXMLBGAME-26MAY101610STLSD-STL | 51.0c | 98 | won | +$48.02 |
+| KXMLBGAME-26APR211840STLMIA-MIA | 47.0c | 9 | won | +$4.77 |
+| KXMLBGAME-26MAY011905BALNYY-NYY | 37.0c | 17 | auto_cut_loss | -$5.95 |
+| KXMLBGAME-26MAY011910SFTB-TB | 38.0c | 17 | auto_cut_loss_no_bid | -$6.46 |
+| KXMLBGAME-26MAY121840COLPIT-PIT | 31.0c | 161 | lost | -$49.91 |
+| KXMLBGAME-26MAY082210ATLLAD-LAD | 39.0c | 512 | lost | -$199.68 |
+| KXMLBGAME-26MAY051905TEXNYY-NYY | 38.0c | 526 | auto_cut_loss_no_bid | -$199.88 |
+
+**Table B/C — distribution and sport family.**
+- Distribution: total **+$264.65**, mean **+$26.47**, median **-$0.59**, top 3 **+$673.74**, bottom 3 **-$449.47**, excluding top winner **-$32.27**, trim top+bottom **+$167.61** / robust mean **+$20.95** on N=8.
+- Sport family: 100% KXMLBGAME / MLB game. No KXNBAGAME, KXNHLGAME, or KXNFLGAME trades in the settled futures cohort.
+- Interpretation: interesting magnitude, but not distributed enough for a confident lean-in by itself.
+
+**Table D — early-exit counterfactual.**
+
+| Ticker | Exit reason | Actual | Held-to-settlement CF | Actual-CF |
+|---|---|---:|---:|---:|
+| KXMLBGAME-26MAY061905TEXNYY-NYY | auto_take_profit | +$296.92 | +$371.15 | -$74.23 |
+| KXMLBGAME-26MAY092110ATLLAD-LAD | auto_take_profit | +$204.30 | +$254.24 | -$49.94 |
+| KXMLBGAME-26APR291840SFPHI-PHI | auto_take_profit | +$172.52 | -$199.76 | +$372.28 |
+| KXMLBGAME-26MAY011905BALNYY-NYY | auto_cut_loss | -$5.95 | -$6.29 | +$0.34 |
+| KXMLBGAME-26MAY011910SFTB-TB | auto_cut_loss_no_bid | -$6.46 | -$6.46 | +$0.00 |
+| KXMLBGAME-26MAY051905TEXNYY-NYY | auto_cut_loss_no_bid | -$199.88 | -$199.88 | +$0.00 |
+
+Total actual EE **+$461.45** vs held CF **+$213.00**, delta **+$248.45**. This is the decisive "do not fix the exemption omission" result. The canonical Apr-30 SFPHI winner is exactly why: actual +$172.52, but held-to-settlement on NO would have been -$199.76 because `market_result=yes`.
+
+**Table E — mechanism story on load-bearing trades.**
+- `KXMLBGAME-26MAY061905TEXNYY-NYY`: nearest ladder 3.3 minutes from entry, YES_sum 108c, cheapest NO 35c, reconstructed NO_fair 38.89c vs NO_ask 35c, structural edge real. It settled NO; holding would have been +$371.15, auto_take_profit banked +$296.92.
+- `KXMLBGAME-26MAY092110ATLLAD-LAD`: nearest ladder 27.0 minutes from entry, YES_sum 109c, cheapest NO 44c, reconstructed NO_fair 45.87c vs NO_ask 44c, structural edge real. It settled NO; holding would have been +$254.24, auto_take_profit banked +$204.30.
+- `KXMLBGAME-26APR291840SFPHI-PHI`: nearest ladder in available universe logs is 233.6 minutes from entry, YES_sum 101c, cheapest NO 44c; archived decision at entry had `edge=0.0137` but lacked ladder-context fields because it predates S100. It settled YES; auto_take_profit avoided a -$199.76 hold-to-settlement loss.
+- Large losers `KXMLBGAME-26MAY082210ATLLAD-LAD` and `KXMLBGAME-26MAY051905TEXNYY-NYY` also reconstruct as real YES-sum >100c ladders near entry, but both selected NOs settled against us. Mechanism conclusion: the ladder vig is real, but realized P&L is dominated by game outcome plus auto-exit timing.
+
+**Table F/H — scope scan.**
+- Decisions: KXMLBGAME has 20 `vig_stack_futures` rows with 7 accepts and 4 `vig_stack_series` rows with 3 accepts. KXNBAGAME/KXNHLGAME/KXNFLGAME have **0 vig_stack decision rows**.
+- Universe coverage: KXMLBGAME 36,588 rows / 440 scan IDs / 36,554 rows with `scanned_by`; KXNBAGAME 6,890 rows / 439 scan IDs / 0 `scanned_by`; KXNHLGAME 5,418 rows / 436 scan IDs / 0 `scanned_by`; KXNFLGAME 0 rows.
+- Rough post-Apr-29 event YES-sum >100 rates: KXMLBGAME 13,849/14,844 = **93.3%**; KXNBAGAME 2,518/2,594 = **97.1%**; KXNHLGAME 2,184/2,291 = **95.3%**.
+- Interpretation: NBA/NHL per-game scope is a real search-frontier candidate, but the evidence is only rough universe math. It warrants simulation, not direct scanner expansion.
+
+**Classification rationale.**
+- **(d) applies as primary:** actual EE beat held-to-settlement by +$248.45, so the futures exemption omission is currently a feature.
+- **Real but concentrated:** structural ladder vig exists in reconstructed nearest snapshots, but +EV does not survive top-winner removal.
+- **Scope watch applies:** NBA/NHL per-game markets are present and show rough vig signatures, but are not scanned by vig_stack.
+- **Recommendation:** no `_VIG_STACK_OPP_TYPES` change, no config change, no live scope expansion. Follow-up session shape: replay/simulate NBA/NHL per-game ladders with explicit auto-exit policy preserved.
+
+**Tests and verification.**
+- Baseline before edits: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed**.
+- Script execution: `python3 tools/_oneoff_session_134_vig_stack_futures.py | tee /tmp/session_134_output.txt` ran clean.
+- Post-edit pytest: `python3 -m pytest tests/ --tb=no -q 2>&1 | tail -5` -> **1767 passed** in 43.25s.
+
+**What this session did NOT do.**
+- No changes to [bot/config.py](bot/config.py).
+- No changes to [bot/main.py](bot/main.py) or `_VIG_STACK_OPP_TYPES`.
+- No changes to [bot/strategies/vig_stack_series.py](bot/strategies/vig_stack_series.py).
+- No scope expansion and no scanner behavior change.
+- No bot restart.
