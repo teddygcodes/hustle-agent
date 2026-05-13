@@ -7315,3 +7315,53 @@ Total actual EE **+$461.45** vs held CF **+$213.00**, delta **+$248.45**. This i
 - `launchctl kickstart -k gui/501/com.hustle-agent.bot`.
 - Glint wrapper PID `9553` / bot child PID `9580` after restart.
 - `bot/logs/bot.log` showed fresh startup at `18:31:30`, Telegram connected, and `LIVE_SCAN_TELEMETRY` at `18:32:12`.
+
+### ☑ Session 136 — entry-price ceiling HOLD (Phase 0 N-blocked)
+
+**Decision.** HOLD on the S38c `MOMENTUM_LEADER_MAX` / entry-price ceiling axis. No `MOMENTUM_LEADER_MAX` config, no live_watcher gate, no restart. The axis is tracked as ruled-out-pending-N and counts toward the S135 live_momentum kill-rule body of evidence.
+
+**Phase 0 re-run.** Source: [bot/state/paper_trades.json](bot/state/paper_trades.json), settled rows only (`status in {won, lost, exited_early}`), `type == "live_momentum"`. The strict S135 kill-rule cohort remains N-thin: post-S97 enabled-sport rows with `timestamp >= 2026-05-11` have **N=5**, total **-$6.85**, mean **-$1.37/trade**. Zero trades have `entry_price >= 0.85`, so the ceiling axis is not evaluable on the strict trigger cohort.
+
+**New rows since planner snapshot.** The broader post-bankroll enabled-sport cohort is now **N=25** vs the planner note's N=24 because `PAPER-A67119C1` settled on 2026-05-13T01:35:54Z (`KXNHLGAME-26MAY12BUFMTL-BUF`, entry 0.75, pnl +$3.20). This increases the `[0.75,0.80)` bucket by one positive trade and does not change the ceiling-sweep sign.
+
+**Strict post-S97 enabled-sport bucket histogram (`timestamp >= 2026-05-11`).**
+
+| bucket | N | total_pnl | mean_pnl | ids |
+|---|---:|---:|---:|---|
+| `[0.65,0.70)` | 4 | -$10.05 | -$2.51 | `PAPER-0FFE23B3(0.69,-8.67)`, `PAPER-BAA84AF2(0.69,-5.78)`, `PAPER-54CA70B8(0.68,+6.40)`, `PAPER-18EFD162(0.68,-2.00)` |
+| `[0.75,0.80)` | 1 | +$3.20 | +$3.20 | `PAPER-A67119C1(0.75,+3.20)` |
+
+| ceiling | kept_N | rejected_N | rejected_pnl | net_effect_if_ceiling | sign |
+|---:|---:|---:|---:|---:|---|
+| 0.80 | 5 | 0 | +$0.00 | +$0.00 | ZERO |
+| 0.85 | 5 | 0 | +$0.00 | +$0.00 | ZERO |
+| 0.88 | 5 | 0 | +$0.00 | +$0.00 | ZERO |
+
+**Broader post-bankroll enabled-sport bucket histogram (`timestamp >= 2026-04-29`).**
+
+| bucket | N | total_pnl | mean_pnl | ids |
+|---|---:|---:|---:|---|
+| `[0.65,0.70)` | 9 | -$22.82 | -$2.54 | `PAPER-CBC836F7(0.65,-13.00)`, `PAPER-7974E4BA(0.69,+4.03)`, `PAPER-0ACB480E(0.69,-2.00)`, `PAPER-1C8F10E0(0.68,-2.20)`, `PAPER-46D8723E(0.67,+0.40)`, `PAPER-0FFE23B3(0.69,-8.67)`, `PAPER-BAA84AF2(0.69,-5.78)`, `PAPER-54CA70B8(0.68,+6.40)`, `PAPER-18EFD162(0.68,-2.00)` |
+| `[0.70,0.75)` | 7 | +$46.65 | +$6.66 | `PAPER-6E59D630(0.71,+0.68)`, `PAPER-D6F286FB(0.74,-4.20)`, `PAPER-32F75088(0.74,+4.68)`, `PAPER-4ED8A0CC(0.72,-14.40)`, `PAPER-C95915A5(0.74,+70.20)`, `PAPER-8D6A080A(0.71,-0.20)`, `PAPER-AB3DDBA7(0.71,-10.11)` |
+| `[0.75,0.80)` | 5 | +$14.59 | +$2.92 | `PAPER-4A514FE0(0.75,+5.07)`, `PAPER-75EEA594(0.75,+6.12)`, `PAPER-475B5728(0.77,-1.00)`, `PAPER-2DFE3CCC(0.79,+1.20)`, `PAPER-A67119C1(0.75,+3.20)` |
+| `[0.80,0.85)` | 2 | +$2.23 | +$1.11 | `PAPER-6E57A18B(0.83,+3.23)`, `PAPER-469ABD43(0.83,-1.00)` |
+| `[0.85,0.90)` | 2 | +$3.80 | +$1.90 | `PAPER-96663D6F(0.88,+2.40)`, `PAPER-D3BD74E3(0.86,+1.40)` |
+
+| ceiling | kept_N | rejected_N | rejected_pnl | net_effect_if_ceiling | sign |
+|---:|---:|---:|---:|---:|---|
+| 0.80 | 21 | 4 | +$6.03 | -$6.03 | NEGATIVE |
+| 0.85 | 23 | 2 | +$3.80 | -$3.80 | NEGATIVE |
+| 0.88 | 24 | 1 | +$2.40 | -$2.40 | NEGATIVE |
+
+**Contamination check.** `paper_trades.entry_price` is written from `price_cents` in `executor.execute_trade()` after the sizing/execution path has selected the paper order price, and `trade_history.price_cents` / `positions.price_cents` match the same values for live_momentum spot checks. Paper fill simulation stores the same `price_cents` on the order and marks fills from that stored price. This is not the Session 15 live-order microstructure `limit_price_echo` caveat; that caveat applies to live Kalshi terminal microstructure, while this Phase 0 reads the paper execution ledger.
+
+**Interpretation.** AI #3's concrete `MAX=0.88` recommendation is contradicted by current realized data: in the broader current cohort, imposing 0.88 would reject one winning trade and cost $2.40; 0.85 and 0.80 are also negative. AI #4's lower-bound direction is only weakly supported: the current `[0.65,0.70)` bucket is negative, but it is still small-N and contaminated by adjacent sport/timing changes. Per the S130 lesson, no lower-bound or upper-bound tuning ships from this slice.
+
+**Watch-list.** Re-test the entry-price ceiling axis at the 2026-06-15 S135 kill-rule trigger date OR when the post-S97 enabled-sport cohort reaches N>=40, whichever comes first. Escalate earlier if a single bucket in `[0.85,1.00)` accumulates >=10 settled trades at mean P&L/trade <= -$0.50.
+
+**Docs/state.**
+- [CLAUDE.md](CLAUDE.md): added S136 as an Operational Hygiene Open Loops item and marked it as one ruled-out-pending-N axis toward the S135 kill rule.
+- [README.md](README.md): synced current-status header and Recent Improvements through May 13, including the S135 README-skip catch-up.
+- [bot/state/active_observations.json](bot/state/active_observations.json): added the S136 N>=40 / high-price-bucket watch.
+
+**Tests / restart.** `python3 -m pytest tests/ --tb=no -q` -> **1770 passed in 44.19s**. No production code changed; no restart.
