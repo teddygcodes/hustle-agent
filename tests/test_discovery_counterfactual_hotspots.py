@@ -319,16 +319,81 @@ def test_disabled_sport_set_imported_from_bot_config():
 
 
 def test_normalize_sport_for_disabled_check():
-    """Helper strips _game / _futures suffixes; passes other sports through."""
-    assert _normalize_sport_for_disabled_check("nba_game") == "nba"
-    assert _normalize_sport_for_disabled_check("nba_futures") == "nba"
-    assert _normalize_sport_for_disabled_check("mlb_game") == "mlb"
-    assert _normalize_sport_for_disabled_check("nhl_futures") == "nhl"
+    """Session 141: checks the raw sport against MOMENTUM_DISABLED_SPORTS FIRST,
+    falls back to suffix-strip only when raw misses but the stripped form lands
+    in the set. Pre-S141 the function unconditionally stripped _game/_futures
+    before the membership check, silently mis-classifying nba_game cohorts
+    (added to the set in S97) as not-disabled."""
+    # Raw forms that ARE in the disabled set today — return the raw value.
+    # nba_game is the S141-relevant case: pre-fix this returned "nba" (not in set).
+    assert _normalize_sport_for_disabled_check("nba_game") == "nba_game"
+    assert _normalize_sport_for_disabled_check("atp") == "atp"
     assert _normalize_sport_for_disabled_check("atp_challenger") == "atp_challenger"
     assert _normalize_sport_for_disabled_check("wta") == "wta"
+    assert _normalize_sport_for_disabled_check("wta_challenger") == "wta_challenger"
+
+    # Raw forms NOT in the set, where stripping also doesn't land in the set —
+    # return the original raw value (no silent normalization for display).
+    # Pre-S141 these stripped to "nba" / "mlb" / "nhl" (all not in set) but the
+    # display value got rewritten anyway. Post-fix the display tag stays honest.
+    assert _normalize_sport_for_disabled_check("nba_futures") == "nba_futures"
+    assert _normalize_sport_for_disabled_check("mlb_game") == "mlb_game"
+    assert _normalize_sport_for_disabled_check("mlb_futures") == "mlb_futures"
+    assert _normalize_sport_for_disabled_check("nhl_game") == "nhl_game"
+    assert _normalize_sport_for_disabled_check("nhl_futures") == "nhl_futures"
+
+    # Sports with no per-game/futures suffix — return raw regardless of set membership.
     assert _normalize_sport_for_disabled_check("ufc") == "ufc"
+    assert _normalize_sport_for_disabled_check("ipl") == "ipl"
     assert _normalize_sport_for_disabled_check("weather_high") == "weather_high"
     assert _normalize_sport_for_disabled_check(None) is None
+
+
+def test_normalize_sport_strip_fallback_for_legacy_data():
+    """Session 141: the strip-fallback path only fires when raw misses but
+    the stripped form lands in the set. This dead-codes most of today's cases
+    (the set already carries 'nba_game' directly), but keeps a safety net for
+    legacy data or future set shapes where a flat form like 'atp' is in the
+    set and a hypothetical 'atp_game' could arrive. Pin the behavior so a
+    future refactor doesn't accidentally drop the fallback."""
+    # MOMENTUM_DISABLED_SPORTS today has 'atp' (flat). If the classifier ever
+    # emitted 'atp_game' or 'atp_futures', the fallback should strip to 'atp'.
+    # We can't construct that today (atp tickers don't trigger _game suffix),
+    # but the function's fallback contract is independent of current data shape.
+    assert _normalize_sport_for_disabled_check("atp_game") == "atp"
+    assert _normalize_sport_for_disabled_check("atp_futures") == "atp"
+    assert _normalize_sport_for_disabled_check("wta_game") == "wta"
+    assert _normalize_sport_for_disabled_check("wta_futures") == "wta"
+
+
+def test_session_141_demotion_fires_for_nba_game_cohort():
+    """Session 141 integration test: a synthetic CF row with sport='nba_game'
+    triggers the disabled-sport demotion path. Pre-S141 this test would have
+    failed — _normalize_sport_for_disabled_check stripped 'nba_game' → 'nba'
+    before the membership check, so this_cohort_is_disabled_sport stayed False
+    and the cohort's severity didn't demote.
+
+    Closes the test gap S140's coder flagged: every disabled-sport demotion
+    test pre-S141 used WTA (no _game suffix), which doesn't exercise the
+    stripping bug surface."""
+    # 7 yes at +15, 3 no at +5. mean=+12¢, +CLV=100%, n_no=3 — clears entry bar.
+    rows = []
+    for i in range(7):
+        rows.append(_cf(f"KXNBAGAME-Y{i}", "no_leader", 15, market_result="yes"))
+    for i in range(3):
+        rows.append(_cf(f"KXNBAGAME-N{i}", "no_leader", 5, market_result="no"))
+    findings = CounterfactualHotspots().run(_ctx(clv=rows))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f.evidence["sport"] == "nba_game"
+    # The demotion path's key flag: post-S141 this is True (was False pre-fix).
+    assert f.evidence["this_cohort_is_disabled_sport"] is True, (
+        "nba_game is in MOMENTUM_DISABLED_SPORTS post-S97 — disabled-sport "
+        "demotion must fire. Pre-S141 the suffix-strip turned 'nba_game' → "
+        "'nba' before the set check, silently mis-classifying it."
+    )
+    # Single-sport positive: notable base + 1 disabled-sport demote → info.
+    assert f.severity == "info"
 
 
 def test_trimmed_mean_with_n_lt_3():

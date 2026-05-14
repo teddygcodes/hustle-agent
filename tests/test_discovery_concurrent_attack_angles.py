@@ -208,9 +208,14 @@ def _build_concurrent_scenario(*, n_pairs: int, mean_clv: float,
 
 
 def test_concurrent_fire_candidate_positive():
-    """5 NBA-game wins + 5 concurrent CFs at +6¢ mean, n_no=2 → emit NOTABLE."""
+    """5 NHL-game wins + 5 concurrent CFs at +6¢ mean, n_no=2 → emit NOTABLE.
+
+    Session 141: switched from KXNBAGAME (nba_game disabled post-S97 → 1 demote
+    → info) to KXNHLGAME (nhl_game NOT disabled → stays at notable). The test
+    is about the entry-bar clearing path, not the disabled-sport demotion."""
     trades, cfs, universe_rows = _build_concurrent_scenario(
         n_pairs=5, mean_clv=6.0, n_no_in_pairs=2,
+        primary_ticker_prefix="KXNHLGAME",
     )
     ctx = _ctx(paper_trades=trades, clv=cfs, universe_rows=universe_rows)
     findings = ConcurrentAttackAngles().run(ctx)
@@ -296,9 +301,15 @@ def test_concurrent_fire_severity_demotion_cross_family_negative():
 
 
 def test_concurrent_fire_severity_high_when_strong_signal():
-    """18 pairs, +12¢ mean, +CLV 100%, n_no=6 → HIGH base, no demotion."""
+    """18 pairs, +12¢ mean, +CLV 100%, n_no=6 → HIGH base, no demotion.
+
+    Session 141: switched from default KXNBAGAME (nba_game disabled post-S97 →
+    demoted to notable) to KXNHLGAME (nhl_game NOT disabled → stays HIGH).
+    This test exercises the no-demotion path; sport choice must NOT be in
+    MOMENTUM_DISABLED_SPORTS."""
     trades, cfs, universe_rows = _build_concurrent_scenario(
         n_pairs=18, mean_clv=12.0, n_no_in_pairs=6,
+        primary_ticker_prefix="KXNHLGAME",
     )
     ctx = _ctx(paper_trades=trades, clv=cfs, universe_rows=universe_rows)
     findings = ConcurrentAttackAngles().run(ctx)
@@ -399,10 +410,13 @@ def test_disabled_sport_demotion_applies():
     # positive so no extra demote) → info.
     assert cf_dis[0].severity == "info"
 
-    # Comparable NBA cohort — NBA not in MOMENTUM_DISABLED_SPORTS
+    # Comparable NHL cohort — nhl_game NOT in MOMENTUM_DISABLED_SPORTS.
+    # Session 141: switched from KXNBAGAME because nba_game IS in the set
+    # post-S97; this slot is the "enabled control" so it must use a sport
+    # the disable set does not contain.
     trades_en, cfs_en, universe_en = _build_concurrent_scenario(
         n_pairs=8, mean_clv=12.0, n_no_in_pairs=4,
-        primary_ticker_prefix="KXNBAGAME",
+        primary_ticker_prefix="KXNHLGAME",
     )
     ctx_en = _ctx(paper_trades=trades_en, clv=cfs_en, universe_rows=universe_en)
     findings_en = ConcurrentAttackAngles().run(ctx_en)

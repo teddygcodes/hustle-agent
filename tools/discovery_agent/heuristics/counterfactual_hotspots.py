@@ -48,19 +48,32 @@ _SEVERITY_LADDER = ("high", "notable", "info")
 def _normalize_sport_for_disabled_check(sport: str | None) -> str | None:
     """Map _sport_classifier output to bot.config.MOMENTUM_DISABLED_SPORTS vocab.
 
-    The bot's disabled set has flat names ('atp_challenger', 'wta', 'nba'); the
-    discovery agent's classifier emits per-game/futures variants ('nba_game',
-    'nba_futures', 'mlb_game', etc.). Strip those suffixes so the comparison
-    works. Other sports (atp_challenger, wta, ufc, ipl, weather_high, index,
-    None) pass through unchanged — pass-through rather than crash means an
-    unrecognized future sport family flows to `in MOMENTUM_DISABLED_SPORTS`
-    returning False, which is the safe default.
+    Session 141: check the fine-grained sport against the disabled set FIRST.
+    S97 (2026-05-11) added per-game suffixes ('nba_game') to MOMENTUM_DISABLED_SPORTS,
+    so the pre-S141 unconditional suffix-strip turned 'nba_game' → 'nba' before
+    the membership check, silently mis-classifying nba_game cohorts as
+    not-disabled. The Session 47 demotion ladder relies on this function
+    returning a value that's actually IN the set when the sport is disabled.
+
+    Fallback path (strip _game / _futures and retry) is retained for legacy
+    data where the disabled set still uses a flat name (e.g. 'atp_challenger',
+    'wta'). The fallback only returns the stripped form if it lands in the set;
+    otherwise it returns the original raw value so downstream consumers using
+    the return as a display tag don't see a silent normalization.
+
+    Other sports (atp_challenger, wta, ufc, ipl, weather_high, index, None)
+    pass through unchanged.
     """
     if sport is None:
         return None
+    if sport in MOMENTUM_DISABLED_SPORTS:
+        return sport
     for suffix in ("_game", "_futures"):
         if sport.endswith(suffix):
-            return sport[: -len(suffix)]
+            stripped = sport[: -len(suffix)]
+            if stripped in MOMENTUM_DISABLED_SPORTS:
+                return stripped
+            return sport
     return sport
 
 
