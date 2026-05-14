@@ -85,6 +85,7 @@ def test_invalid_date_arg_exits_2(capsys):
 
 def test_default_date_is_yesterday_in_et(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(helpers, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(daily_report, "update_report_calendar_last_run", lambda *a, **k: True)
     # Stub the section renderers so this test runs fast and doesn't fail on
     # whatever live state happens to look like today.
     for _, fn_name in helpers.SHARED_SECTIONS:
@@ -294,6 +295,7 @@ def test_footer_carries_iso_timestamp(tmp_path):
 
 def test_stdout_matches_file_content(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(helpers, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(daily_report, "update_report_calendar_last_run", lambda *a, **k: True)
     # Stub all renderers for speed.
     for _, fn_name in helpers.SHARED_SECTIONS:
         monkeypatch.setattr(helpers, fn_name, lambda *a, **k: "# stub\n")
@@ -308,6 +310,7 @@ def test_stdout_matches_file_content(tmp_path, monkeypatch, capsys):
 
 def test_daily_report_writes_to_expected_path(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(helpers, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(daily_report, "update_report_calendar_last_run", lambda *a, **k: True)
     for _, fn_name in helpers.SHARED_SECTIONS:
         monkeypatch.setattr(helpers, fn_name, lambda *a, **k: "# stub\n")
 

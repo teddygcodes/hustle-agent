@@ -6,6 +6,8 @@ import datetime as dt
 import traceback
 from pathlib import Path
 
+from tools._calendar_stamp import update_report_calendar_last_run
+
 from .context import DEFAULT_REPO, DiscoveryContext
 from .findings import Finding, classify_findings, load_prior_findings, write_findings_jsonl
 from .heuristics.cadence_outcome import CadenceOutcome
@@ -252,6 +254,10 @@ def run(repo: Path = DEFAULT_REPO) -> dict:
     _write_markdown(
         discovery_dir / f"discovery_report_{today}.md",
         ctx, new, stable, resolved, errors,
+    )
+    update_report_calendar_last_run(
+        "Discovery agent",
+        calendar_path=repo / "REPORT_CALENDAR.md",
     )
 
     return {

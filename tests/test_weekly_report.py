@@ -115,6 +115,7 @@ def test_regime_by_flag_passthrough(tmp_path, stub_heavy_sections):
 
 def test_stdout_matches_file_content(tmp_path, monkeypatch, capsys, stub_heavy_sections):
     monkeypatch.setattr(helpers, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(weekly_report, "update_report_calendar_last_run", lambda *a, **k: True)
     week_end = helpers.last_sunday_in_et()
     rc = weekly_report.main(["--week-end", week_end.date().isoformat()])
     assert rc == 0

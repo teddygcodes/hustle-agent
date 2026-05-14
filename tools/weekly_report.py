@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools import _report_helpers as helpers  # noqa: E402
+from tools._calendar_stamp import update_report_calendar_last_run  # noqa: E402
 
 NEXT_SESSION_PLACEHOLDER = 36  # surface in §16 retuning candidates; edit manually if a session ships first.
 
@@ -396,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     week_end = args.week_end or helpers.last_sunday_in_et(now_utc)
 
     out_path = build_report(week_end, regime_by=args.regime_by, now_utc=now_utc)
+    update_report_calendar_last_run("Weekly report", now_utc=now_utc)
     sys.stdout.write(out_path.read_text())
     return 0
 

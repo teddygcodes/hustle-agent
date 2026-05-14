@@ -23,6 +23,7 @@ tools/strategy_lab/reports_out/*
 # _report_helpers.py force-add; if you add a new tool that's imported by tests
 # or referenced in CLAUDE.md as a deliverable, add an exception here too).
 !tools/_report_helpers.py
+!tools/_calendar_stamp.py
 !tools/daily_report.py
 !tools/weekly_report.py
 !tools/glint_status.py
