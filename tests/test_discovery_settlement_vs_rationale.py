@@ -133,7 +133,12 @@ def test_disabled_sport_settlement_regression():
         timestamp="2026-05-05T12:00:00+00:00",  # post-disable entry — real regression
     )
     findings = SettlementVsRationale().run(_make_ctx([legacy, real]))
-    pattern2 = [f for f in findings if "disabled_sport_settlement" in f.title]
+    # Session 140: filter by exact title prefix "disabled_sport_settlement:"
+    # (with colon) to exclude the new aggregate row ("disabled_sport_settlement_attrition:")
+    # which routes pre-disable rows to INFO severity instead of silently dropping them.
+    pattern2 = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
     assert len(pattern2) == 1, (
         f"only the post-disable entry should fire (1 finding); legacy entry "
         f"must be filtered. Got: {[f.title for f in pattern2]}"
@@ -196,10 +201,18 @@ def test_disabled_sport_deploy_window_race_excluded():
         ),
     ]
     findings = SettlementVsRationale().run(_make_ctx(entries))
-    pattern2 = [f for f in findings if "disabled_sport_settlement" in f.title]
-    assert pattern2 == [], (
+    # Session 140: same tightening as test_disabled_sport_settlement_regression.
+    # The 3 deploy-window-race entries are pre-disable, so they're now routed
+    # to the disabled_sport_settlement_attrition aggregate (INFO). That's
+    # acceptable — they still aren't firing as CRITICAL false positives,
+    # which is what S57 locked in. The aggregate row is a separate concern.
+    pattern2_critical = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert pattern2_critical == [], (
         f"deploy-window-race entries (pre-commit b1f08ff @ 2026-04-21T02:31:54 "
-        f"UTC) must NOT fire as regressions. Got: {[f.title for f in pattern2]}"
+        f"UTC) must NOT fire as CRITICAL regressions. Got: "
+        f"{[f.title for f in pattern2_critical]}"
     )
 
 
@@ -219,10 +232,260 @@ def test_disabled_sport_post_commit_entry_still_fires():
         resolved_at="2026-04-21T05:00:00+00:00",
     )
     findings = SettlementVsRationale().run(_make_ctx([post_commit]))
-    pattern2 = [f for f in findings if "disabled_sport_settlement" in f.title]
+    # Session 140: same tightening as the regression test above.
+    pattern2 = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
     assert len(pattern2) == 1
     assert pattern2[0].severity == "critical"
     assert pattern2[0].evidence["sport"] == "wta_challenger"
+
+
+# -------- Session 140: Pattern 2 dual-defect fix tests --------
+
+def test_pattern2_nba_post_disable_fires_critical():
+    """S140 locks in the vocabulary fix.
+
+    Pre-S140, settlement_vs_rationale imported _ticker_to_sport from bot.regime
+    which returns 'nba' (coarse) for KXNBAGAME-* tickers. The S97 disable set
+    uses 'nba_game'. So `"nba" not in MOMENTUM_DISABLED_SPORTS` → return [] →
+    every NBA live_momentum settlement was silently invisible, hiding real
+    post-disable bug indicators. Post-S140 the heuristic uses the discovery-
+    layer sport_from_ticker_distinguished() which returns 'nba_game', matching
+    the disable set, so post-disable NBA entries fire CRITICAL as designed.
+    """
+    post_disable = _trade(
+        ticker="KXNBAGAME-26MAY11OKCLAL-OKC",
+        type_="live_momentum",
+        contracts=20,
+        entry_price=0.72,
+        pnl=-14.40,
+        status="lost",
+        timestamp="2026-05-11T15:00:00+00:00",  # 30 min post-S97 commit
+        resolved_at="2026-05-12T04:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([post_disable]))
+    pattern2 = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert len(pattern2) == 1, (
+        f"NBA post-S97-disable entry must fire CRITICAL. Got: "
+        f"{[f.title for f in findings]}"
+    )
+    assert pattern2[0].severity == "critical"
+    assert pattern2[0].evidence["sport"] == "nba_game"
+    assert pattern2[0].evidence["ticker"] == "KXNBAGAME-26MAY11OKCLAL-OKC"
+
+
+def test_pattern2_nba_pre_disable_demoted():
+    """S140: NBA pre-disable entry routes to aggregate INFO, not CRITICAL."""
+    pre_disable = _trade(
+        ticker="KXNBAGAME-26MAY10-LAKBOS",
+        type_="live_momentum",
+        contracts=20,
+        entry_price=0.71,
+        pnl=-14.20,
+        status="lost",
+        timestamp="2026-05-10T20:00:00+00:00",  # 18+ hours before S97 commit
+        resolved_at="2026-05-11T05:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([pre_disable]))
+    pattern2_critical = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert pattern2_critical == [], (
+        f"NBA pre-S97-disable entry must NOT fire CRITICAL. Got: "
+        f"{[f.title for f in pattern2_critical]}"
+    )
+    attrition = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement_attrition:")
+    ]
+    assert len(attrition) == 1
+    assert attrition[0].severity == "info"
+    assert attrition[0].evidence["by_sport"] == {"nba_game": 1}
+
+
+def test_pattern2_atp_pre_disable_demoted():
+    """S140 ATP attrition: mirrors a real 2026-05-13 discovery report row.
+
+    Without the S140 fix, this trade fired CRITICAL because atp was missing
+    from MOMENTUM_DISABLED_SINCE (S97 added atp to MOMENTUM_DISABLED_SPORTS
+    on May 11 but didn't update SINCE). One of 22 such rows that drowned
+    §9's HIGH-severity surface.
+    """
+    pre_disable_atp = _trade(
+        ticker="KXATPMATCH-26MAY08PRIDJO-DJO",
+        type_="live_momentum",
+        contracts=20,
+        entry_price=0.81,
+        pnl=-16.20,
+        status="lost",
+        timestamp="2026-05-08T16:00:00+00:00",  # 3+ days pre-S97 commit
+        resolved_at="2026-05-09T04:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([pre_disable_atp]))
+    pattern2_critical = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert pattern2_critical == [], (
+        f"ATP pre-S97-disable entry must NOT fire CRITICAL. Got: "
+        f"{[f.title for f in pattern2_critical]}"
+    )
+    attrition = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement_attrition:")
+    ]
+    assert len(attrition) == 1
+    assert attrition[0].evidence["by_sport"] == {"atp": 1}
+
+
+def test_pattern2_atp_post_disable_fires_critical():
+    """S140 bookend: an ATP entry AFTER the S97 re-disable commit MUST fire
+    CRITICAL. Locks in that the cutoff is tight enough to catch real
+    post-re-disable regressions if any ever fire.
+    """
+    post_disable_atp = _trade(
+        ticker="KXATPMATCH-26MAY12-POSTS97",
+        type_="live_momentum",
+        contracts=20,
+        entry_price=0.75,
+        pnl=-15.0,
+        status="lost",
+        timestamp="2026-05-12T12:00:00+00:00",  # 22h post-S97 commit
+        resolved_at="2026-05-13T04:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([post_disable_atp]))
+    pattern2 = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert len(pattern2) == 1
+    assert pattern2[0].severity == "critical"
+    assert pattern2[0].evidence["sport"] == "atp"
+    assert pattern2[0].evidence["ticker"] == "KXATPMATCH-26MAY12-POSTS97"
+
+
+def test_pattern2_aggregate_info_row_emitted():
+    """S140: multi-sport attrition produces ONE aggregate INFO row with
+    by_sport counts.
+
+    Fixture: 3 ATP + 2 NBA pre-disable trades. Expect exactly one
+    `disabled_sport_settlement_attrition` Finding of severity 'info'
+    summarizing all 5; zero CRITICAL rows from Pattern 2.
+    """
+    atp_attrition = [
+        _trade(
+            ticker=f"KXATPMATCH-26MAY0{i + 5}-T{i}",
+            type_="live_momentum",
+            contracts=10,
+            entry_price=0.80,
+            pnl=-8.0,
+            status="lost",
+            timestamp=f"2026-05-0{i + 5}T14:00:00+00:00",
+            resolved_at=f"2026-05-0{i + 5}T18:00:00+00:00",
+            trade_id=f"PAPER-TEST-ATP-{i}",
+        )
+        for i in range(3)
+    ]
+    nba_attrition = [
+        _trade(
+            ticker=f"KXNBAGAME-26MAY0{i + 8}-T{i}",
+            type_="live_momentum",
+            contracts=10,
+            entry_price=0.75,
+            pnl=-7.50,
+            status="lost",
+            timestamp=f"2026-05-0{i + 8}T14:00:00+00:00",
+            resolved_at=f"2026-05-0{i + 8}T22:00:00+00:00",
+            trade_id=f"PAPER-TEST-NBA-{i}",
+        )
+        for i in range(2)
+    ]
+    findings = SettlementVsRationale().run(_make_ctx(atp_attrition + nba_attrition))
+
+    pattern2_critical = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert pattern2_critical == [], (
+        f"All 5 fixtures are pre-disable; zero CRITICAL expected. Got: "
+        f"{[f.title for f in pattern2_critical]}"
+    )
+
+    attrition = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement_attrition:")
+    ]
+    assert len(attrition) == 1
+    f = attrition[0]
+    assert f.severity == "info"
+    assert f.evidence["n_attrition"] == 5
+    assert f.evidence["by_sport"] == {"atp": 3, "nba_game": 2}
+    assert f.evidence["_fingerprint_keys"] == ["run_date", "disable_map_digest"]
+    # Title carries the by-sport breakdown for at-a-glance scanning.
+    assert "5 pre-disable settlements" in f.title
+    assert "3 atp" in f.title
+    assert "2 nba_game" in f.title
+
+
+def test_pattern2_aggregate_not_emitted_when_empty():
+    """S140: the aggregate INFO row only fires when there's attrition to
+    report. Fixture: a vig_stack trade + a UFC live_momentum trade (UFC is
+    NOT in MOMENTUM_DISABLED_SPORTS as of S140). Expect zero attrition rows.
+    """
+    vigstack = _trade(
+        ticker="KXHIGHMIA-26MAY10-B85",
+        type_="vig_stack",
+        contracts=100,
+        entry_price=0.95,
+        pnl=5.0,
+        status="won",
+        side="no",
+    )
+    ufc = _trade(
+        ticker="KXUFCFIGHT-26MAY11ABCDEF-ABC",
+        type_="live_momentum",
+        contracts=10,
+        entry_price=0.80,
+        pnl=2.0,
+        status="won",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([vigstack, ufc]))
+    attrition = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement_attrition:")
+    ]
+    assert attrition == [], (
+        f"No disabled-sport trades in fixture; aggregate must not fire. Got: "
+        f"{[f.title for f in attrition]}"
+    )
+
+
+def test_pattern2_missing_entered_at_emits_defensive_critical():
+    """S140 defensive behavior: when timestamp is None, we can't prove
+    pre-disable, so we err on the side of surfacing the row as CRITICAL.
+
+    Pre-S140 the heuristic silently filtered missing timestamps; that was
+    wrong because missing data should not hide potential bugs. Locks in the
+    new defensive emission.
+    """
+    no_timestamp = _trade(
+        ticker="KXATPMATCH-26MAY12-NOTS",
+        type_="live_momentum",
+        contracts=10,
+        entry_price=0.75,
+        pnl=-7.5,
+        status="lost",
+        timestamp=None,
+        resolved_at="2026-05-13T04:00:00+00:00",
+    )
+    findings = SettlementVsRationale().run(_make_ctx([no_timestamp]))
+    pattern2 = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement:")
+    ]
+    assert len(pattern2) == 1
+    assert pattern2[0].severity == "critical"
+    assert pattern2[0].evidence["sport"] == "atp"
+    # Aggregate must NOT contain this trade (we couldn't classify it as attrition).
+    attrition = [
+        f for f in findings if f.title.startswith("disabled_sport_settlement_attrition:")
+    ]
+    assert attrition == []
 
 
 # -------- Test 3: outsized_notional_post_size_multiplier regression --------

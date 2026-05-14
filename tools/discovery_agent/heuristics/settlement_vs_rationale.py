@@ -29,6 +29,8 @@ modifying config dicts (read-only), Glint Analyst LLM (deferred).
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+from collections import Counter
 
 try:
     from bot.config import (
@@ -38,7 +40,20 @@ try:
         SPORT_PROFILES,
         VIG_STACK_FAMILY_MAX_POSITION_DOLLARS,
     )
+    # Coarse (bot-layer) classifier — needed by Pattern 3 because SPORT_PROFILES
+    # in bot/config.py keys by coarse names ('nba', 'nhl', 'mlb'). Pattern 3
+    # reads size_multiplier from that dict, so it must use the coarse classifier.
     from bot.regime import _ticker_to_sport
+    # Session 140: distinguished (discovery-layer) classifier — needed by
+    # Pattern 2 because MOMENTUM_DISABLED_SPORTS in bot/config.py uses
+    # fine-grained names ('nba_game' post-S97). The bot's coarse classifier
+    # returns 'nba' for KXNBAGAME-* which silently misses every NBA
+    # live_momentum settlement against the disable set, leaving 2 real
+    # post-disable bug indicators invisible. CLAUDE.md "Canonical Data Schema
+    # Reference → Ticker prefix → sport map": "Discovery agent uses
+    # sport_from_ticker_distinguished(); bot code uses _TICKER_PREFIX_TO_SPORT.
+    # Don't conflate; reuse the right one for the layer."
+    from .._sport_classifier import sport_from_ticker_distinguished
     _CONFIG_AVAILABLE = True
 except Exception:
     # Graceful degradation: if bot.config can't be imported (e.g., during a
@@ -54,6 +69,9 @@ except Exception:
     PAPER_STARTING_BALANCE = 0.0
 
     def _ticker_to_sport(ticker):  # type: ignore[no-redef]
+        return None
+
+    def sport_from_ticker_distinguished(ticker):  # type: ignore[no-redef]
         return None
 
 from ..findings import Finding
@@ -89,14 +107,52 @@ SESSION_53_DEPLOY_TS = dt.datetime(
 # discipline: when the heuristic's date math drifts from production's
 # actual timeline, fix the heuristic, not the data.
 #
+# Session 140 (May 13 2026): extended with atp + nba_game. S97 (May 11 2026)
+# re-disabled atp (had been re-enabled by S38a on Apr 29) AND added nba_game
+# on per-sport breakeven-WR analysis. Commit f4df898 timestamp 2026-05-11
+# 10:30:06 -0400 = 2026-05-11 14:30:06 UTC. Pre-S140 the dict had only the S2
+# entries, so Pattern 2 emitted ZERO findings for nba_game (vocabulary
+# mismatch — see Session 140 import comment above) AND flagged all 22 settled
+# ATP trades as CRITICAL false positives (atp not in this dict → filter skipped).
+#
+# Assumption: only the most-recent disable date matters. For atp specifically,
+# the S2 disable (2026-04-21 02:31:54 UTC) → S38a re-enable (2026-04-29) →
+# S97 re-disable (2026-05-11 14:30:06 UTC) history is collapsed to the S97
+# timestamp. Positions entered during the Apr-29 → May-11 re-enabled window
+# are legitimate, and their subsequent settlement under the S97 re-disable is
+# expected attrition — implicit because their `timestamp` field is
+# < 2026-05-11T14:30Z and the pre-disable check filters them. If a sport ever
+# needs full disable/enable timeline tracking (e.g. to flag entries DURING a
+# past disabled window that has since been re-enabled), upgrade to a
+# list-of-events schema in a separate session.
+#
 # Sources:
 #   atp_challenger, wta, wta_challenger — git blame bot/config.py:172
 #     b1f08ff (Tyler Gilstrap 2026-04-20 22:31:54 -0400) blanket tennis kill
+#   atp, nba_game — git log f4df898
+#     f4df898 (Tyler Gilstrap 2026-05-11 10:30:06 -0400) S97 re-disable + add
 MOMENTUM_DISABLED_SINCE = {
     "atp_challenger": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
     "wta": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
     "wta_challenger": dt.datetime(2026, 4, 21, 2, 31, 54, tzinfo=dt.timezone.utc),
+    "atp": dt.datetime(2026, 5, 11, 14, 30, 6, tzinfo=dt.timezone.utc),
+    "nba_game": dt.datetime(2026, 5, 11, 14, 30, 6, tzinfo=dt.timezone.utc),
 }
+
+
+def _disable_map_digest() -> str:
+    """8-char SHA1 digest of MOMENTUM_DISABLED_SINCE contents.
+
+    Used as part of the Session 140 attrition aggregate's fingerprint so the
+    row bumps when the disable map changes (re-disable, re-enable, new add).
+    Sorted by sport so dict ordering doesn't drift the digest.
+    """
+    raw = "|".join(
+        f"{sport}={ts.isoformat()}"
+        for sport, ts in sorted(MOMENTUM_DISABLED_SINCE.items())
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
+
 
 # ----- Pattern 3 sizing tolerance -----
 PATTERN3_KELLY_VARIANCE_TOLERANCE = 1.2
@@ -251,13 +307,23 @@ class SettlementVsRationale:
             return []
         paper_trades = ctx.paper_trades or []
         findings: list[Finding] = []
+        # Session 140: collect Pattern 2 pre-disable attrition during the
+        # per-trade loop, emit one aggregate INFO row after the loop. Each
+        # individual pre-disable settlement is "expected attrition" (the
+        # position was entered while the sport was enabled and is now closing
+        # under the disable), not actionable. Surfacing them all as CRITICAL
+        # drowned the §9 HIGH surface — pre-S140 ATP alone was 22 rows.
+        pattern2_attrition: list[dict] = []
 
         for trade in paper_trades:
             if not _is_settled(trade):
                 continue
             findings.extend(self._check_pattern1(trade, paper_trades))
-            findings.extend(self._check_pattern2(trade))
+            findings.extend(self._check_pattern2(trade, pattern2_attrition))
             findings.extend(self._check_pattern3(trade))
+
+        if pattern2_attrition:
+            findings.append(self._make_pattern2_attrition_finding(pattern2_attrition))
 
         return findings
 
@@ -326,11 +392,18 @@ class SettlementVsRationale:
 
     # -------- Pattern 2: disabled_sport_settlement --------
 
-    def _check_pattern2(self, trade: dict) -> list[Finding]:
+    def _check_pattern2(
+        self, trade: dict, attrition_rows: list[dict]
+    ) -> list[Finding]:
         if trade.get("type") != "live_momentum":
             return []
         ticker = trade.get("ticker", "")
-        sport = _ticker_to_sport(ticker)
+        # Session 140: use the distinguished classifier so KXNBAGAME-* → 'nba_game'
+        # (matches MOMENTUM_DISABLED_SPORTS post-S97). Pre-S140 this used the
+        # coarse bot.regime._ticker_to_sport which returns 'nba' → silently
+        # filtered out every NBA live_momentum settlement, hiding 2 real
+        # post-disable bug indicators.
+        sport = sport_from_ticker_distinguished(ticker)
         if sport is None or sport not in MOMENTUM_DISABLED_SPORTS:
             return []
 
@@ -340,11 +413,26 @@ class SettlementVsRationale:
         # canonical paper_trades.json schema) vs MOMENTUM_DISABLED_SINCE.
         # If the sport isn't in the SINCE map (unknown disable date), default
         # to flagging to be safe — better a noisy critical than a missed regression.
+        # Session 140: pre-disable entries now route to the attrition aggregate
+        # row instead of being silently dropped, so the operator sees that the
+        # filter is doing its job (vs. wondering whether disabled_sport_settlement
+        # has stopped firing for legitimate reasons).
         disabled_since = MOMENTUM_DISABLED_SINCE.get(sport)
         if disabled_since is not None:
             entry_ts = _parse_ts(trade.get("timestamp"))
-            if entry_ts is None or entry_ts < disabled_since:
-                return []  # legacy pre-disable entry, not a regression
+            # Missing entry_ts → emit defensively (CRITICAL). We can't prove
+            # it's pre-disable, so err on the side of surfacing. Pre-S140
+            # behavior silently filtered missing timestamps; that was wrong
+            # because missing data should not hide potential bugs.
+            if entry_ts is not None and entry_ts < disabled_since:
+                attrition_rows.append({
+                    "ticker": ticker,
+                    "sport": sport,
+                    "entered_at": trade.get("timestamp"),
+                    "settled_at": trade.get("resolved_at") or trade.get("timestamp"),
+                    "disabled_since": disabled_since.isoformat(),
+                })
+                return []  # legacy pre-disable entry, demoted to aggregate
 
         evidence = {
             "ticker": ticker,
@@ -352,7 +440,7 @@ class SettlementVsRationale:
             "entered_at": trade.get("timestamp"),
             "settled_at": trade.get("resolved_at") or trade.get("timestamp"),
             "disable_list_current": sorted(MOMENTUM_DISABLED_SPORTS),
-            "disable_session_ref": "Session 38a/38a-2",
+            "disable_session_ref": "Session 38a/38a-2 / Session 97 (S140 review)",
             "_fingerprint_keys": ["ticker", "sport", "settled_at"],
         }
 
@@ -373,6 +461,67 @@ class SettlementVsRationale:
                 f"the gate fired or was bypassed."
             ),
         )]
+
+    def _make_pattern2_attrition_finding(
+        self, attrition_rows: list[dict]
+    ) -> Finding:
+        """Aggregate INFO row summarizing N pre-disable settlements per run.
+
+        Emitted once per run when at least one settled live_momentum trade on
+        a currently-disabled sport was entered BEFORE the disable. Keeps the
+        original per-trade CRITICAL fingerprints unused (so they aren't
+        accidentally suppressed by dedup) while giving the operator one line
+        of evidence that the filter is doing its job.
+
+        Fingerprint stability: (run_date, disable_map_digest). The pair makes
+        the row stable within a UTC day, fresh across days, and bumps when the
+        disable map itself changes — so a future re-disable or re-enable
+        invalidates the fingerprint cleanly.
+        """
+        by_sport = Counter(r["sport"] for r in attrition_rows)
+        summary_str = ", ".join(
+            f"{n} {sport}" for sport, n in sorted(by_sport.items())
+        )
+        entered_ats = [
+            r["entered_at"] for r in attrition_rows if r.get("entered_at")
+        ]
+        earliest = min(entered_ats) if entered_ats else None
+        latest = max(entered_ats) if entered_ats else None
+        digest = _disable_map_digest()
+        run_date = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
+
+        evidence = {
+            "n_attrition": len(attrition_rows),
+            "by_sport": dict(by_sport),
+            "earliest_entered_at": earliest,
+            "latest_entered_at": latest,
+            "disable_map_digest": digest,
+            "run_date": run_date,
+            "_fingerprint_keys": ["run_date", "disable_map_digest"],
+        }
+
+        return Finding(
+            heuristic=self.name,
+            severity="info",
+            title=(
+                f"disabled_sport_settlement_attrition: "
+                f"{len(attrition_rows)} pre-disable settlements ({summary_str})"
+            ),
+            summary=(
+                f"{len(attrition_rows)} live_momentum settlements on currently-disabled "
+                f"sports were entered BEFORE the sport was disabled (expected attrition, "
+                f"not regressions). By sport: {summary_str}. Pattern 2's pre-disable "
+                f"filter at MOMENTUM_DISABLED_SINCE demoted these from CRITICAL → INFO "
+                f"aggregate (Session 140)."
+            ),
+            evidence=evidence,
+            suggested_action=(
+                "No action required — these are expected attrition under current "
+                "disable rules. If 'n_attrition' grows unexpectedly OR a sport's "
+                "earliest_entered_at is later than its disabled_since timestamp, "
+                "investigate (the pre-disable filter may have a date bug)."
+            ),
+        )
 
     # -------- Pattern 3: outsized_notional_post_size_multiplier --------
 
