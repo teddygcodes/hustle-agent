@@ -1799,11 +1799,14 @@ def test_tick_record_includes_dqs_field_when_computed(monkeypatch):
     from bot import live_watcher
     from bot import game_context
 
-    # Build watcher: NBA profile (no skip_dqs), price history shows a 5¢ dip
-    # (recent_high=70, current=65 → dip=5, in [4,8] window).
+    # Build watcher: NHL profile (no skip_dqs), price history shows a 5¢ dip
+    # (recent_high=70, current=65 → dip=5, in [4,8] window). Session 141
+    # changed this from NBA per-game (KXNBAGAME) to NHL per-game (KXNHLGAME)
+    # because S97's nba_game disable now correctly fires under fine-grained
+    # classification; NHL per-game stays enabled and exercises the same DQS path.
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26APR30TEST-LAL",
+        sport="nhl",
+        ticker="KXNHLGAME-26APR30TEST-TOR",
         price_history=[70, 70, 69, 70, 70],
         yes_ask=65,
     )
@@ -1834,9 +1837,12 @@ def test_dqs_fail_decision_extra_includes_session96_context(monkeypatch):
     import asyncio
     from bot import game_context, live_watcher
 
+    # Session 141: switched from NBA per-game (KXNBAGAME) to NHL per-game
+    # (KXNHLGAME) — see test_tick_record_includes_dqs_field_when_computed
+    # for rationale (S97's nba_game disable now correctly fires).
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26MAY10TEST-LAL",
+        sport="nhl",
+        ticker="KXNHLGAME-26MAY10TEST-TOR",
         price_history=[70, 70, 69, 70, 70],
         yes_ask=65,
         opp_yes_ask=34,
@@ -1855,7 +1861,7 @@ def test_dqs_fail_decision_extra_includes_session96_context(monkeypatch):
     )
     extra = reject.kwargs["extra"]
     assert extra["context_available"] is True
-    assert extra["leader_ticker"] == "KXNBAGAME-26MAY10TEST-LAL"
+    assert extra["leader_ticker"] == "KXNHLGAME-26MAY10TEST-TOR"
     assert extra["leader_price"] == 65
     assert extra["opponent_price"] == 34
     assert extra["spread_cents"] == 1
@@ -1870,9 +1876,11 @@ def test_opponent_side_dip_too_big_logs_context_without_entry(monkeypatch):
     import asyncio
     from bot import live_watcher
 
+    # Session 141: switched from NBA per-game to NHL per-game — see
+    # test_tick_record_includes_dqs_field_when_computed for rationale.
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26MAY10TEST-LAL",
+        sport="nhl",
+        ticker="KXNHLGAME-26MAY10TEST-TOR",
         price_history=[50, 50, 50, 50, 50],
         yes_ask=50,
         opp_yes_ask=65,
@@ -2004,10 +2012,11 @@ def test_dqs_does_not_change_entry_decision(monkeypatch):
     from bot import live_watcher
     from bot import game_context
 
-    # Build NBA tick with eligible 5¢ dip
+    # Build NHL tick with eligible 5¢ dip. Session 141: switched from NBA
+    # per-game to NHL per-game — see test_tick_record_includes_dqs_field_when_computed.
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26APR30TEST-CONVICTION",
+        sport="nhl",
+        ticker="KXNHLGAME-26APR30TEST-CONVICTION",
         price_history=[70, 70, 69, 70, 70, 70],
         yes_ask=65,
     )
@@ -2115,9 +2124,11 @@ def test_reentry_blocked_after_loss_recorded_session90(monkeypatch):
     from bot import live_watcher
     from bot import game_context
 
+    # Session 141: switched from NBA per-game to NHL per-game — see
+    # test_tick_record_includes_dqs_field_when_computed for rationale.
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26MAY09TEST-LAL",
+        sport="nhl",
+        ticker="KXNHLGAME-26MAY09TEST-TOR",
         price_history=[70, 70, 70, 70, 70],
         yes_ask=65,
         entry_count=1,  # one prior entry already happened
@@ -2164,9 +2175,11 @@ def test_reentry_allowed_when_no_losses_recorded_session90(monkeypatch):
     from bot import live_watcher
     from bot import game_context
 
+    # Session 141: switched from NBA per-game to NHL per-game — see
+    # test_tick_record_includes_dqs_field_when_computed for rationale.
     w = _build_momentum_watcher(
-        sport="nba",
-        ticker="KXNBAGAME-26MAY09TEST-LAL",
+        sport="nhl",
+        ticker="KXNHLGAME-26MAY09TEST-TOR",
         price_history=[70, 70, 70, 70, 70],
         yes_ask=65,
         entry_count=1,  # one prior winning entry
@@ -2781,3 +2794,111 @@ def test_session_99_proxy_returns_none_when_game_ctx_absent():
     assert proxy["confidence_components"]["reason"] == "missing_required_input"
     assert proxy["confidence_components"]["wp_edge_present"] is False
     assert proxy["confidence_components"]["leader_price_present"] is True
+
+
+# ---------------------------------------------------------------------------
+# Session 141: fine-grained sport classifier at the disable-check site.
+#
+# S97 (2026-05-11) added "nba_game" to MOMENTUM_DISABLED_SPORTS. The pre-S141
+# check read self.sport (coarse, "nba"), so "nba" not in {... "nba_game" ...}
+# silently no-op'd and 3 KXNBAGAME-* trades entered post-S97. S141 introduces
+# bot/sport_classifier.sport_from_ticker_fine which maps the ticker to the
+# fine-grained tag ("nba_game" / "nba_futures" / etc.), with coarse-self.sport
+# fallback for tickers outside the per-game/futures table.
+#
+# These three tests pin behavior at the _tick_momentum end-to-end path:
+#   (1) regression-lock the fix:  KXNBAGAME-* rejects as sport_disabled
+#       even when self.sport is the coarse "nba".
+#   (2) confirm no over-disable:  KXNHLGAME-* admits (nhl_game NOT in set).
+#   (3) coarse fallback still works: KXATPMATCH-* with self.sport="atp"
+#       still rejects (fine-classifier returns None, falls back to coarse).
+# ---------------------------------------------------------------------------
+
+
+def test_session_141_kxnbagame_rejects_at_disable_gate_via_fine_classifier(monkeypatch):
+    """S141: KXNBAGAME-* ticker with coarse self.sport='nba' rejects at the
+    disable gate because the fine classifier maps it to 'nba_game', which IS
+    in MOMENTUM_DISABLED_SPORTS post-S97. Pre-S141 this gate silently no-op'd
+    — the 3 NEW NBA CRITICAL rows in the S140 §9 diff are the cost."""
+    import asyncio
+    from bot import live_watcher
+
+    w = _build_momentum_watcher(
+        sport="nba",  # coarse — what self.sport actually carries
+        ticker="KXNBAGAME-26MAY13CLEDET-DET",
+        price_history=[70, 70, 69, 70, 70],
+        yes_ask=65,
+    )
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    sport_disabled_calls = [
+        c for c in w._log_decision_dampened.call_args_list
+        if c.kwargs.get("reason") == "sport_disabled"
+    ]
+    assert len(sport_disabled_calls) == 1, (
+        f"expected exactly one sport_disabled reject for KXNBAGAME-* (sport='nba'); "
+        f"got {len(sport_disabled_calls)}. Pre-S141 this was 0 (silent no-op)."
+    )
+    gates = sport_disabled_calls[0].kwargs["gates"]
+    assert gates == {"can_enter": False, "sport_enabled": False}
+    # Entry must NOT have fired.
+    w._auto_bet_momentum.assert_not_called()
+
+
+def test_session_141_kxnhlgame_admits_at_disable_gate_no_over_disable(monkeypatch):
+    """S141: KXNHLGAME-* ticker maps to 'nhl_game', which is NOT in
+    MOMENTUM_DISABLED_SPORTS. The fine classifier must NOT over-disable —
+    NHL per-game is the most profitable live_momentum cohort and must flow
+    past the disable gate."""
+    import asyncio
+    from bot import live_watcher
+
+    w = _build_momentum_watcher(
+        sport="nhl",
+        ticker="KXNHLGAME-26MAY13TORBOS-TOR",
+        price_history=[70, 70, 69, 70, 70],
+        yes_ask=65,
+    )
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    sport_disabled_calls = [
+        c for c in w._log_decision_dampened.call_args_list
+        if c.kwargs.get("reason") == "sport_disabled"
+    ]
+    assert sport_disabled_calls == [], (
+        f"KXNHLGAME-* must NOT trigger sport_disabled (nhl_game not in disable set); "
+        f"got {len(sport_disabled_calls)} sport_disabled reject(s) — fix is over-disabling."
+    )
+
+
+def test_session_141_kxatpmatch_rejects_via_coarse_fallback(monkeypatch):
+    """S141: KXATPMATCH-* is outside the per-game/futures fine table, so
+    sport_from_ticker_fine returns None and the disable check falls back to
+    coarse self.sport='atp', which IS in MOMENTUM_DISABLED_SPORTS. The pre-S141
+    behavior is preserved for sports that already had a coarse-tag match."""
+    import asyncio
+    from bot import live_watcher
+
+    w = _build_momentum_watcher(
+        sport="atp",
+        ticker="KXATPMATCH-26MAY13ALCJOK-ALC",
+        price_history=[70, 70, 69, 70, 70],
+        yes_ask=65,
+    )
+    monkeypatch.setattr(live_watcher, "_log_tick", lambda d: None)
+
+    asyncio.run(w._tick_momentum())
+
+    sport_disabled_calls = [
+        c for c in w._log_decision_dampened.call_args_list
+        if c.kwargs.get("reason") == "sport_disabled"
+    ]
+    assert len(sport_disabled_calls) == 1, (
+        f"KXATPMATCH-* with sport='atp' must still reject via the coarse-fallback "
+        f"path; got {len(sport_disabled_calls)} sport_disabled reject(s)."
+    )
+    w._auto_bet_momentum.assert_not_called()

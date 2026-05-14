@@ -54,6 +54,7 @@ from bot.clv import (
 )
 from bot.live_momentum_proxy import estimate_live_momentum_win_prob
 from bot.dip_classifier import classify_dip
+from bot.sport_classifier import sport_from_ticker_fine
 from collections import deque
 
 logger = logging.getLogger("glint.live_watcher")
@@ -1529,11 +1530,21 @@ class LiveGameWatcher:
         # listed in MOMENTUM_DISABLED_SPORTS. Exits are unaffected — _check_exit
         # does not consult this flag, so already-open positions still close on
         # TP / SL / trailing normally.
+        #
+        # Session 141: use fine-grained classifier so per-game tickers
+        # (KXNBAGAME) check against "nba_game" and futures (KXNBA) check against
+        # "nba_futures". The coarse self.sport ("nba") would silently miss the
+        # nba_game disable that S97 added to the set. Fall back to coarse when
+        # the ticker isn't in the per-game/futures table (e.g. atp, ufc, ipl).
+        _disable_check_sport = (
+            sport_from_ticker_fine(self.ticker)
+            or (self.sport or "").lower()
+        )
         can_enter = (
             self._entry_count < MOMENTUM_MAX_ENTRIES
             and self._cooldown_remaining <= 0
             and not self.bets_placed  # one position at a time
-            and (self.sport or "").lower() not in MOMENTUM_DISABLED_SPORTS
+            and _disable_check_sport not in MOMENTUM_DISABLED_SPORTS
             and len(self._entry_losses) < MOMENTUM_REENTRY_LOSS_LIMIT  # Session 90 breaker
         )
 
@@ -1604,7 +1615,11 @@ class LiveGameWatcher:
 
         if not can_enter:
             sport_lc = (self.sport or "").lower()
-            if sport_lc in MOMENTUM_DISABLED_SPORTS:
+            # Session 141: gate decision uses the fine-grained tag computed
+            # above so the reject reason matches the entry-gate decision.
+            # sport_lc (coarse) is preserved for downstream shadow-trade /
+            # journal emission paths whose persisted schema stays coarse.
+            if _disable_check_sport in MOMENTUM_DISABLED_SPORTS:
                 _reason = "sport_disabled"
                 _gates = {"can_enter": False, "sport_enabled": False}
             elif self._entry_count >= MOMENTUM_MAX_ENTRIES:
