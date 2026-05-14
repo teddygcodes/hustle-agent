@@ -950,5 +950,37 @@
         "last_updated": "2026-05-13T23:59:30+00:00"
       }
     ]
+  },
+  {
+    "session": 141,
+    "shipped_at": "2026-05-13T00:00:00+00:00",
+    "description": "Bot disable check uses fine-grained sport classifier (KXNBAGAME -> nba_game); counterfactual_hotspots normalizer no longer strips _game suffix before MOMENTUM_DISABLED_SPORTS check",
+    "observation_window_days": 14,
+    "metrics": [
+      {
+        "name": "post-S141 KXNBAGAME-* entries in paper_trades.json",
+        "expectation": "0 new entries with ticker prefix KXNBAGAME-* and timestamp >= 2026-05-13. Any new entry means the fix did not take effect; investigate immediately (bot may not have restarted, or watcher path bypasses the disable gate).",
+        "current_value": "0 new entries observed (post-restart; baseline established)",
+        "last_updated": "2026-05-13T00:00:00+00:00"
+      },
+      {
+        "name": "S135 kill-rule cohort denominator re-measurement (2026-05-27)",
+        "expectation": "Trailing 14d cohort growth (sport not in MOMENTUM_DISABLED_SPORTS AND timestamp >= 2026-05-11) should consist exclusively of genuinely-enabled sports (ipl / nhl_game / ufc / etc.). Pre-S141 N=5 with 2 contaminating KXNBAGAME rows; clean post-S141 baseline.",
+        "current_value": "Pre-S141 N=5 (contaminated): 2x nba_game mis-labeled as sport='nba', 1x ipl, 2x nhl_game/ipl. True post-S97 enabled-sport N=3.",
+        "last_updated": "2026-05-13T00:00:00+00:00"
+      },
+      {
+        "name": "counterfactual_hotspots nba_game cohort severity",
+        "expectation": "Any nba_game CF cohort that clears the entry bar must report this_cohort_is_disabled_sport=True and severity demoted by at least one step (Session 47 ladder). Pre-S141 this was silently False because _normalize_sport_for_disabled_check stripped 'nba_game' -> 'nba' before the set check.",
+        "current_value": "n/a (next discovery run: 2026-05-14 06:00 ET)",
+        "last_updated": "2026-05-13T00:00:00+00:00"
+      },
+      {
+        "name": "fine-grained classifier prefix coverage",
+        "expectation": "Any new ticker prefix added to Kalshi's universe (e.g. NFL, WNBA, future sport) must be registered in BOTH bot/sport_classifier._FINE_GRAINED_PREFIXES AND tools/discovery_agent/_sport_classifier._VARIANT_OVERRIDES in the same session. Otherwise the fine classifier returns None for new prefixes and the disable check falls through to coarse self.sport, which may admit a trade the disable set intended to block.",
+        "current_value": "Today's coverage: KXMLBGAME, KXNBAGAME, KXNHLGAME, KXMLB, KXNBA, KXNHL (6 prefixes both sides).",
+        "last_updated": "2026-05-13T00:00:00+00:00"
+      }
+    ]
   }
 ]

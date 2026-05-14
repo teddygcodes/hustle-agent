@@ -1022,7 +1022,9 @@ metadata. Do not write zeros or invented contract counts.
 | `KXHIGH*` | weather_high | `KXLOW*` | weather_low |
 | `KXINX*` | index | | |
 
-**Discovery agent uses `tools/discovery_agent/_sport_classifier.sport_from_ticker_distinguished()` for the per-game vs futures distinction. Bot code uses `bot/scanner.py`/`bot/live_watcher.py` `_TICKER_PREFIX_TO_SPORT` (coarser — doesn't distinguish per-game from futures). Don't conflate; reuse the right one for the layer.**
+**Discovery agent uses `tools/discovery_agent/_sport_classifier.sport_from_ticker_distinguished()` for the per-game vs futures distinction. Bot code uses `bot/regime.py` `SPORT_PREFIXES` (coarser — doesn't distinguish per-game from futures) as the canonical map for the 5 regime-axis writers. Don't conflate; reuse the right one for the layer.**
+
+**Session 141 (2026-05-13) addendum — disable-check call sites use fine-grained classification.** `bot/sport_classifier.sport_from_ticker_fine()` mirrors the discovery-side `_VARIANT_OVERRIDES` (KXNBAGAME → nba_game, KXNBA → nba_futures, MLB/NHL likewise). It's called at `bot/live_watcher.py` `_tick_momentum` (entry-gate site + reject-reason site) with coarse `self.sport` fallback for tickers outside the per-game/futures table. **Persisted schema is unchanged** — `paper_trades.json:sport` stays coarse ("nba"), `decisions.jsonl.extra.sport` stays coarse. Only the disable-check DECISION uses the fine-grained tag. Forward-only; pre-S141 records retain the coarse `sport="nba"` even when the ticker prefix is KXNBAGAME-*. The bot/discovery patterns are intentionally mirrored, not extracted (CLAUDE.md final note 11) — if a new ticker prefix lands, both `bot/sport_classifier._FINE_GRAINED_PREFIXES` and `tools/discovery_agent/_sport_classifier._VARIANT_OVERRIDES` must be updated in the same session.
 
 ### How to use this section
 
@@ -1220,7 +1222,7 @@ Items where Outcome B was filed but no data accumulates passively.
 
 Items observed during operation but not prioritized for a session. No calendar trigger.
 
-- **live_momentum kill rule fires 2026-06-15 at N>=80 OR re-set on substrate ship** — see "Strategy Termination Rules" section. Trigger cohort: settled post-S97 live_momentum trades with `status in {won, lost, exited_early}`, sport not in `MOMENTUM_DISABLED_SPORTS`, and `timestamp >= 2026-05-11`.
+- **live_momentum kill rule fires 2026-06-15 at N>=80 OR re-set on substrate ship** — see "Strategy Termination Rules" section. Trigger cohort: settled post-S97 live_momentum trades with `status in {won, lost, exited_early}`, sport not in `MOMENTUM_DISABLED_SPORTS`, and `timestamp >= 2026-05-11`. **S141 (2026-05-13) note**: the cohort filter reads the coarse persisted `sport` field on `paper_trades.json`, which silently included 3 pre-S141 KXNBAGAME-* trades labeled `sport="nba"` (true sport: `nba_game`, in the disabled set). Pre-S141 cohort N was 5 with 2 contaminating rows; true post-S97 enabled-sport N is 3. Forward-only fix: post-S141, no new nba_game entries can pollute the cohort because the disable check now correctly fires. The 3 contaminating rows are not backfilled (CLAUDE.md forward-only rule). The 2026-06-15 trigger date and N>=80 threshold are unchanged — re-measure at 2026-05-27 to track whether cohort growth shape changes materially.
 
 - **S136 entry-price ceiling axis (S38c) — HOLD on Phase 0 N-thinness.** Re-test at the 2026-06-15 kill-rule trigger date OR when the post-S97 enabled-sport cohort reaches N>=40. AI #3's `MAX=0.88` recommendation is contradicted by data at this N; AI #4's MIN-raise direction is weakly supported by the `[0.65,0.70)` bleeder bucket but N-thin per the S130 contamination lesson. Counts as one ruled-out-pending-N axis toward the S135 kill rule.
 
