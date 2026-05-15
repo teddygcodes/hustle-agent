@@ -84,6 +84,16 @@ PATTERN1_HIGH_CAP_TIER_DOLLARS = 150   # only flag mid/healthy tiers; skip $50 a
 
 # ----- Pattern 1 demotion -----
 LOOKBACK_DAYS = 14
+# Session 142 (2026-05-15): widened demotion criterion. Pre-S142 the rule was
+# "family_pnl_sum > 0 AND n_tail == 1" — narrow, only single-tail-in-positive.
+# S142 Phase 0 found Pattern 1 emitting HIGH on KXHIGHMIA-T93 (n_tail=2 in 14d,
+# family positive) when post-S100 cohort lose rate at entry>=0.85 is 6.2% —
+# below the 7-15% expected at 85-93¢ NO entry. The losses are structural cost
+# per Battle Scar #10, not gate mis-tuning. Cluster strength (n_tail), not
+# family P&L direction, is what justifies HIGH severity. With n_tail < 4 in
+# 14d we lack enough cross-cohort signal to confidently say this is a pattern
+# worth HIGH attention.
+PATTERN1_TAIL_DEMOTE_THRESHOLD_14D = 4
 SESSION_53_DEPLOY_TS = dt.datetime(
     2026, 5, 4, 23, 43, 0, tzinfo=dt.timezone.utc
 )  # bot-restart timestamp, not commit-time
@@ -250,8 +260,12 @@ def _severity_pattern1(
     """Compute Pattern 1 severity + cross-cohort context dict.
 
     Default base = high. Demote +1 per:
-      - Family aggregate (last 14d) > 0 AND tail-loss count in window == 1
-        (single tail event in otherwise-profitable family).
+      - tail-loss count in 14d window < PATTERN1_TAIL_DEMOTE_THRESHOLD_14D
+        (cluster strength below the bar for HIGH-severity attention).
+        Session 142 widened from the pre-S142 "family_pnl_sum > 0 AND
+        n_tail == 1" criterion — cluster strength, not family P&L direction,
+        is what justifies HIGH; tail losses in positive families are
+        structural cost (Battle Scar #10) absorbed by the family math.
       - Settled within 24h after Session 53 deploy AND notional > current cap
         (legacy pre-cap position — Session 53 explicitly excluded these from
         the intervention's scope; not a config-rationale contradiction).
@@ -278,7 +292,7 @@ def _severity_pattern1(
     base_idx = _SEVERITY_LADDER.index("high")
     demote = 0
 
-    if family_pnl_sum > 0 and n_tail == 1:
+    if n_tail < PATTERN1_TAIL_DEMOTE_THRESHOLD_14D:
         demote += 1
 
     if (

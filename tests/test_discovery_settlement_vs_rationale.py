@@ -553,10 +553,20 @@ def test_demotion_single_tail_in_positive_family():
     assert aus_findings[0].evidence["family_recent_pnl_sum"] > 0
 
 
-# -------- Test 5: no demotion when 2+ tail losses in family --------
+# -------- Test 5: no demotion when n_tail >= PATTERN1_TAIL_DEMOTE_THRESHOLD_14D --------
 
 def test_no_demotion_multiple_tail_in_family():
-    """2 tail losses + 3 winners → severity stays HIGH (pattern, not outlier)."""
+    """4 tail losses + 3 winners → last tail's severity stays HIGH.
+
+    Session 142 widened the demote criterion from "family_pnl_sum > 0 AND
+    n_tail == 1" to "n_tail < PATTERN1_TAIL_DEMOTE_THRESHOLD_14D". The
+    threshold is 4 (cluster strength bar for HIGH-severity attention). The
+    LAST tail's 14d window sees all 4 tails, so n_tail=4 (at the ceiling) →
+    no demote → HIGH. The earlier 3 tails see only their predecessors, so
+    n_tail in {1,2,3} → demote → notable on those rows. This locks in the
+    "at-threshold ceiling" half of the contract; the subthreshold half is
+    in test_demotion_below_threshold_n_tail below.
+    """
     tails = [
         _trade(
             ticker=f"KXHIGHAUS-26MAY0{i + 5}-TAIL{i}",
@@ -569,7 +579,7 @@ def test_no_demotion_multiple_tail_in_family():
             resolved_at=f"2026-05-0{i + 5}T12:00:00+00:00",
             trade_id=f"PAPER-TEST-AUS-TAIL-{i}",
         )
-        for i in range(2)
+        for i in range(4)
     ]
     winners = [
         _trade(
@@ -586,35 +596,73 @@ def test_no_demotion_multiple_tail_in_family():
         for i in range(3)
     ]
     findings = SettlementVsRationale().run(_make_ctx(tails + winners))
-    # Both tail trades should fire pattern 1; both should remain HIGH.
-    # Note on windowing: each trade's lookback only sees PAST trades (ts <=
-    # ref_ts), so the earlier tail's window sees n_tail=1 and the later
-    # tail's window sees n_tail=2. Severity stays HIGH on both anyway because
-    # family aggregate is NEGATIVE (3 × $50 wins - 2 × $200 losses = -$250,
-    # or -$50 in the earlier-tail window) — the first demotion clause
-    # requires aggregate > 0. Legacy clause doesn't fire (post-deploy + 24h
-    # window). The point this test locks in: "2+ tail losses present →
-    # severity does not demote on either trade."
     aus_findings = [f for f in findings if "tail_loss_in_high_cap_family" in f.title]
-    assert len(aus_findings) == 2
-    for f in aus_findings:
-        assert f.severity == "high", (
-            f"expected high (negative aggregate + non-legacy → no demotion), "
-            f"got {f.severity} for {f.title}"
-        )
-    # Later tail's window sees both tails — locks in the n_tail >= 2 evidence
-    # is reachable (so the underlying counter math works).
+    assert len(aus_findings) == 4
+    # Last tail's window sees all 4 tails → n_tail=4 → at threshold → HIGH.
     later_tail = max(
         aus_findings, key=lambda f: f.evidence.get("settled_at", "")
     )
-    assert later_tail.evidence["family_recent_tail_losses"] == 2
+    assert later_tail.evidence["family_recent_tail_losses"] == 4
+    assert later_tail.severity == "high", (
+        f"expected high (n_tail=4 at threshold → no demote), "
+        f"got {later_tail.severity}"
+    )
+
+
+# -------- Test 5b: demotion when n_tail < PATTERN1_TAIL_DEMOTE_THRESHOLD_14D (S142) --------
+
+def test_demotion_below_threshold_n_tail():
+    """2 or 3 tail losses in 14d window → demote HIGH → NOTABLE.
+
+    Session 142 widened the demote criterion. Pre-S142 this case (multiple
+    tails in a net-negative family) stayed HIGH because the demote clause
+    required `family_pnl_sum > 0 AND n_tail == 1`. Post-S142 the demote
+    clause is `n_tail < 4` (cluster strength alone), so any window with
+    fewer than 4 at-cap tails demotes regardless of family P&L direction.
+    Rationale: at the post-S100 cohort lose rate of 6.2% on entry>=0.85
+    (S142 Phase 0.4), tail losses are structural cost per Battle Scar #10;
+    cluster strength is what justifies HIGH severity, not P&L sign.
+    """
+    tails = [
+        _trade(
+            ticker=f"KXHIGHAUS-26MAY0{i + 5}-TAIL{i}",
+            type_="vig_stack",
+            contracts=200,
+            entry_price=1.00,
+            pnl=-200.00,
+            status="lost",
+            timestamp=f"2026-05-0{i + 5}T08:00:00+00:00",
+            resolved_at=f"2026-05-0{i + 5}T12:00:00+00:00",
+            trade_id=f"PAPER-TEST-AUS-SUBT-{i}",
+        )
+        for i in range(3)
+    ]
+    findings = SettlementVsRationale().run(_make_ctx(tails))
+    aus_findings = [f for f in findings if "tail_loss_in_high_cap_family" in f.title]
+    assert len(aus_findings) == 3
+    # Last tail's window sees all 3 tails → n_tail=3 → below threshold → notable.
+    later_tail = max(
+        aus_findings, key=lambda f: f.evidence.get("settled_at", "")
+    )
+    assert later_tail.evidence["family_recent_tail_losses"] == 3
+    assert later_tail.severity == "notable", (
+        f"expected notable (n_tail=3 below S142 threshold of 4 → demote), "
+        f"got {later_tail.severity}"
+    )
 
 
 # -------- Test 6: pre-Session-53 legacy excluded --------
 
 def test_pre_session_53_legacy_excluded():
     """Tail loss settled <24h post-deploy with notional > current cap →
-    demoted (legacy pre-cap position; Session 53 explicitly excluded these)."""
+    demoted (legacy pre-cap position; Session 53 explicitly excluded these).
+
+    Session 142 widened the subthreshold demote criterion to "n_tail < 4",
+    so this isolated legacy case now hits BOTH demote clauses (subthreshold
+    cluster + legacy pre-cap). Cumulative demote = 2 → HIGH → notable → info.
+    INFO is correct here: the row is doubly background — one-time legacy
+    artifact AND insufficient cluster strength to flag.
+    """
     # Session 53 deploy = 2026-05-04T23:43:00+00:00. Settle within 24h (May 5
     # mid-afternoon UTC), notional > cap (KXHIGHMIA cap is $200).
     legacy = _trade(
@@ -630,12 +678,11 @@ def test_pre_session_53_legacy_excluded():
     findings = SettlementVsRationale().run(_make_ctx([legacy]))
     legacy_findings = [f for f in findings if "tail_loss_in_high_cap_family" in f.title]
     assert len(legacy_findings) == 1
-    # Pre-Session-53 legacy demotion fires (notional > cap AND settled <24h
-    # post-deploy). family_pnl_sum is non-positive (only this trade in window
-    # except its own loss) so the first demotion clause does NOT fire — only
-    # the legacy clause. Demote HIGH → NOTABLE.
-    assert legacy_findings[0].severity == "notable", (
-        f"expected notable (legacy pre-cap demotion), got {legacy_findings[0].severity}"
+    # Both demote clauses fire: subthreshold (n_tail=1 < 4) AND legacy
+    # (notional > cap AND settled <24h post-deploy). Cumulative demote = 2.
+    assert legacy_findings[0].severity == "info", (
+        f"expected info (subthreshold + legacy double-demote), "
+        f"got {legacy_findings[0].severity}"
     )
 
 
@@ -793,9 +840,10 @@ def test_pattern1_per_finding_trigger_unchanged():
 
     KXHIGHMIA at-cap tail loss alone (no winners, no EE-noise). Trigger MUST
     still fire (per-finding gate at _check_pattern1 lines 247-254 was already
-    at-cap-correct; Session 67 refactor must not perturb it). With aggregate
-    negative (single tail loss in window) and no demotion clause firing,
-    severity stays HIGH.
+    at-cap-correct; Session 67 refactor must not perturb it). Session 142
+    widened the demote criterion to "n_tail < 4" (was: "family_pnl_sum > 0
+    AND n_tail == 1"), so an isolated tail now demotes to NOTABLE regardless
+    of family P&L sign — cluster strength alone justifies HIGH severity.
 
     Lock-in: refactor of _severity_pattern1 line 195 (counter helper swap)
     does NOT break the per-finding trigger.
@@ -819,11 +867,10 @@ def test_pattern1_per_finding_trigger_unchanged():
     )
     f = trigger_findings[0]
     assert "tail_loss_in_high_cap_family" in f.title
-    # No demotion: family_pnl_sum == -$199.95 (negative) AND no legacy
-    # exclusion fires (settle is post Session-53 deploy + 24h).
-    assert f.severity == "high", (
-        f"isolated tail in negative-aggregate family should stay HIGH "
-        f"(no demotion clause fires). Got {f.severity}."
+    # Session 142: n_tail=1 < threshold of 4 → demote → notable.
+    assert f.severity == "notable", (
+        f"isolated tail (n_tail=1 < S142 threshold of 4) must demote "
+        f"HIGH → NOTABLE. Got {f.severity}."
     )
     # n_tail == 1 (the trigger itself) — counter shape unchanged on
     # this clean case.
