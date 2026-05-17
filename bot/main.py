@@ -1447,8 +1447,11 @@ class GlintBot:
                                     ea.get("entry_edge", 0) * 100,
                                     ea.get("current_edge", ea.get("price_move", 0)) * 100)
 
-                # Related market scan — find sibling props on same events
-                related = scan_related_markets()
+                # Related market scan — find sibling props on same events.
+                # Session 148: wrap the sync get_markets-per-event call in
+                # run_in_executor (Battle Scar #13). Mirrors the S39 pattern.
+                loop = asyncio.get_event_loop()
+                related = await loop.run_in_executor(None, scan_related_markets)
                 for rel in related:
                     _add_to_pending(rel)
                 if related:

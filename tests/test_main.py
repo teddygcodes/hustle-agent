@@ -424,6 +424,172 @@ def test_main_loop_aborts_long_snapshot_after_outer_timeout(tmp_path, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# Session 148 — fleet-wide run_in_executor audit (Battle Scar #13 follow-through)
+# ---------------------------------------------------------------------------
+#
+# Each of the 4 sync entry points called from `async _main_loop` must dispatch
+# through `loop.run_in_executor` so their synchronous Kalshi HTTP calls don't
+# block the event loop and starve _heartbeat_loop / _live_scan_loop /
+# _position_check_loop / Telegram polling. The May 2026 CLOSE_WAIT leak
+# (forensics: bot/state/forensics/2026-05-17-secondary-leak/) was caused by 4
+# unwrapped entry points. S148 closes the audit per Battle Scar #13.
+#
+# Pattern mirrors S39's test_main_loop_runs_snapshot_universe_via_executor.
+
+
+class _S148ExitSignal(Exception):
+    """Sentinel raised by fake asyncio.sleep to exit _main_loop after one
+    iteration has run all the way through the target site. The polling sleep
+    loop at bot/main.py:1552 has no `_running` check, so a custom exception
+    is the cleanest exit hook for tests that need to reach sites AFTER
+    `scan_cycle` without taking the scan_failed short-circuit."""
+
+
+class _S148Notifier:
+    paused = False
+
+    async def send_message(self, *_, **__):
+        pass
+
+
+def _build_s148_bot():
+    from bot import main as botmain
+
+    bot = botmain.GlintBot.__new__(botmain.GlintBot)
+    bot._running = True
+    bot.notifier = _S148Notifier()
+    bot._active_watchers = {}
+    return bot, botmain
+
+
+def _stub_s148_main_loop_environment(monkeypatch, bot, botmain):
+    """Apply all stubs needed to let _main_loop reach the end of one iteration
+    without exercising real Kalshi / Telegram / state-file paths. Individual
+    tests override one target function with a thread-capturing fake (primary)
+    or a raising fake (companion); the rest stay no-op.
+    """
+    # snapshot_universe is already wrapped (S39 + S98); stub it to return 0.
+    monkeypatch.setattr(botmain._universe, "snapshot_universe", lambda _scan_id: 0)
+    monkeypatch.setattr(botmain._universe, "get_buffered_markets", lambda _scan_id: [])
+    monkeypatch.setattr(botmain._universe, "flush_universe", lambda _scan_id: 0)
+    monkeypatch.setattr(botmain._universe, "on_market_seen", lambda *a, **kw: None)
+
+    # Default: scan_cycle succeeds with empty opportunities so execution flows
+    # past it. The scan_cycle test overrides this with a thread-capturing fake.
+    monkeypatch.setattr(
+        botmain,
+        "scan_cycle",
+        lambda **_kw: {"scan_interval": 1800, "opportunities": []},
+    )
+
+    monkeypatch.setattr(botmain, "update_daily_log", lambda: None)
+    monkeypatch.setattr(botmain, "resolve_trades", lambda: [])
+    monkeypatch.setattr(botmain, "check_clv_settlements", lambda: [])
+    monkeypatch.setattr(botmain, "check_fills", lambda: [])
+    monkeypatch.setattr(botmain, "update_positions", lambda **_kw: [])
+    monkeypatch.setattr(botmain, "recheck_open_edges", lambda: [])
+    monkeypatch.setattr(botmain, "scan_related_markets", lambda: [])
+    monkeypatch.setattr(botmain, "check_trailing_stops", lambda: [])
+    monkeypatch.setattr(botmain, "check_mm_fills", lambda: [])
+    monkeypatch.setattr(
+        botmain, "scan_market_making_opportunities", lambda **_kw: []
+    )
+
+    monkeypatch.setattr(botmain._outcome_tracker, "check_and_resolve", lambda: 0)
+    monkeypatch.setattr(
+        botmain._outcome_tracker, "log_calibration_summary", lambda: None
+    )
+
+    monkeypatch.setattr(botmain, "_load_bot_state", lambda: {})
+    monkeypatch.setattr(botmain, "_save_bot_state", lambda _state: None)
+
+    class _NoopLock:
+        def touch(self):
+            pass
+
+    monkeypatch.setattr(botmain, "LOCK_FILE", _NoopLock())
+
+    async def fake_scheduled(_self):
+        return None
+
+    monkeypatch.setattr(botmain, "check_scheduled_events", fake_scheduled)
+
+    # PAPER_MODE balance lookup happens on the bot instance.
+    bot._get_paper_balance = lambda: 1000.0
+
+    # Exit hook: first asyncio.sleep call raises _S148ExitSignal. This hits
+    # the polling sleep loop at line ~1552 after all target sites have run.
+    async def fake_sleep(_secs):
+        raise _S148ExitSignal()
+
+    monkeypatch.setattr(botmain.asyncio, "sleep", fake_sleep)
+
+
+def test_main_loop_runs_scan_related_markets_via_executor(monkeypatch):
+    """Session 148: _main_loop must dispatch scan_related_markets through
+    loop.run_in_executor so the synchronous get_markets call inside doesn't
+    block the asyncio event loop — the May 2026 CLOSE_WAIT leak symptom
+    (Battle Scar #13).
+    """
+    import threading
+
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    threads_seen: list[str] = []
+
+    def fake_scan_related():
+        threads_seen.append(threading.current_thread().name)
+        return []
+
+    monkeypatch.setattr(botmain, "scan_related_markets", fake_scan_related)
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    assert threads_seen, "scan_related_markets was not called"
+    assert all(t != "MainThread" for t in threads_seen), (
+        f"scan_related_markets ran on {threads_seen!r} — expected an executor "
+        f"worker thread. The Session 148 run_in_executor wrap may have "
+        f"regressed; this would re-introduce the CLOSE_WAIT leak (Battle "
+        f"Scar #13)."
+    )
+
+
+def test_main_loop_continues_when_scan_related_markets_raises_in_executor(monkeypatch):
+    """Session 148: if scan_related_markets raises while running in the
+    executor, _main_loop's `try/except Exception` at bot/main.py:1456 must
+    catch it and let the loop continue to the next step (eventually reaching
+    the polling asyncio.sleep that triggers _S148ExitSignal). Verifies
+    executor-propagated exceptions are caught identically to direct sync
+    exceptions."""
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    def boom_scan_related():
+        raise RuntimeError("test stub: scan_related_markets blows up")
+
+    monkeypatch.setattr(botmain, "scan_related_markets", boom_scan_related)
+
+    raised_exit = False
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        raised_exit = True
+
+    assert raised_exit, (
+        "scan_related_markets RuntimeError should be caught by the try/except "
+        "at bot/main.py:1456 and _main_loop should continue past it, "
+        "eventually reaching the polling asyncio.sleep that raises "
+        "_S148ExitSignal. If _S148ExitSignal was NOT raised, the RuntimeError "
+        "propagated out of _main_loop — the try/except may have regressed or "
+        "the executor wrap may be mishandling exceptions."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------
 
