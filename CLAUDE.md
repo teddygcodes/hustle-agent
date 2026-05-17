@@ -489,6 +489,22 @@ May 7 incident: each bot restart between 23:43:45 and 00:00:10 May 6-7 produced 
 
 Regression tests at `tests/test_main.py::test_stop_cancels_*` (5 cases — cancel/order/empty/exception/timeout). Property test for the post-restart 0-error gate is the live verification.
 
+### 18. Kalshi `_load_config` concurrent-open EDEADLK + 429 amplification (Session 146, May 17, 2026)
+
+May 16-17 outage: the bot wedged from ~23:18 in a sustained `OSError: [Errno 11] Resource deadlock avoided` storm visible in `bot/logs/bot.log` and tracebacks at `bot/state/forensics/2026-05-17-edeadlk/`. Every traceback collapsed to `agent/kalshi_client.py:59` — concurrent `_load_config()` calls (one per `get_market` / `get_markets` / `get_market_orderbook` / `get_events` / `get_trades` / `_require_auth`) opening `config/kalshi.json` from 5-15 ThreadPoolExecutor workers simultaneously. Under Python 3.14 on macOS APFS, concurrent `json.load(f)` on the same path trips the kernel-level fcntl deadlock detector. Trigger: Kalshi 429 retry storm from the `_kalshi_get` 2/3/5s backoff loop multiplied in-flight call count, which amplified the latent EDEADLK.
+
+**Lineage.** S39 (Apr 30) wrapped `snapshot_universe` in `run_in_executor` (Battle Scar #13). S143 (May 16) wrapped `scan_live_matches.get_markets` the same way. Both moved sync HTTP off the event loop — architecturally correct — but each post-wrap call still re-opened the config file. The EDEADLK was latent in agent/ and only surfaced once concurrency rose past the fcntl detector's threshold under retry-storm load.
+
+**Rule:** any process-lifetime configuration read must be cached. The fix at `agent/kalshi_client.py` uses double-checked locking around a module-level `_CONFIG_CACHE`; `reset_clients()` clears it for tests. Forensic repro (40 concurrent `_load_config` threads on Python 3.14) pre-fix fires EDEADLK reliably; post-fix completes 40/40 with zero errors.
+
+**Companion piece: rate limiter.** `agent/kalshi_rate_limiter.py` adds a process-wide concurrent-call cap (`KALSHI_MAX_CONCURRENT=2`) plus token bucket (`KALSHI_RATE_TOKENS=20` / `KALSHI_RATE_WINDOW_SEC=60`) applied via `@with_rate_limit` to every public Kalshi entry point in `agent/kalshi_client.py`. Defaults are deliberately conservative — Kalshi does not publish per-key limits and the bot was in a fragile 429-storm state at ship time. Watch-list trigger 2026-05-24 (7d): if zero 429s in the window, loosen to `MAX_CONCURRENT=3` / `RATE_TOKENS=30`.
+
+**`_kalshi_get` retry now honors `Retry-After`.** If Kalshi returns a 429 with `Retry-After: N`, the daemon-thread worker sleeps `min(N, 29)` instead of the 2/3/5s fallback. Capped to stay inside `_KALSHI_TOTAL_TIMEOUT_SEC=30`'s wall-clock budget (S101).
+
+**Out of scope for S146 (deferred):** bot-side `bot_state.json` mirror for `kalshi_throttled_until` / `kalshi_throttled_count_24h` (the Battle Scar #15 Telegram pattern). Separate instrumentation session if operator observability becomes useful.
+
+**Regression tests.** `tests/test_kalshi_rate_limiter.py` (7 cases — semaphore cap, token bucket exhaustion, refill rate, acquire-timeout, decorator slot release on success + exception). `tests/test_kalshi.py::TestConfigCache` (3 cases — single-open across N reads, reset_clients clears cache, 20-thread contention opens file exactly once). `tests/test_kalshi.py::TestKalshiGet429Backoff` (3 cases — Retry-After honored, fallback when header missing, exhausts after 3 attempts).
+
 ---
 
 ## Data-Driven Tuning (The Apr 14 Audit)

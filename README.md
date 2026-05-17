@@ -757,7 +757,8 @@ hustle-agent/
 │       └── .gitkeep
 │
 ├── agent/
-│   ├── kalshi_client.py     # Kalshi REST API (used by bot for all API calls)
+│   ├── kalshi_client.py     # Kalshi REST API (used by bot for all API calls). Session 146 (May 17 2026): _load_config now caches with double-checked locking after concurrent json.load(f) opens of config/kalshi.json from ThreadPoolExecutor workers hit Python 3.14's fcntl deadlock detector (EDEADLK storm 2026-05-17, forensics at bot/state/forensics/2026-05-17-edeadlk/). Every public function (get_market(s), get_balance, place_order, etc.) is wrapped in @with_rate_limit. _kalshi_get's 429 retry now honors Retry-After header
+│   ├── kalshi_rate_limiter.py  # Session 146: process-wide concurrent-call cap (KALSHI_MAX_CONCURRENT=2) + token bucket (KALSHI_RATE_TOKENS=20/60s). Conservative defaults; loosen via watch-list after 7d of zero-429 evidence. Battle Scar #18
 │   ├── parlay.py            # Parlay title parser + multi-leg pricer
 │   ├── player_stats.py      # Player prop probability estimator
 │   ├── engine.py            # Original reasoning loop (Claude API)

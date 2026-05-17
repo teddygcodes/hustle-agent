@@ -93,6 +93,184 @@ class TestKalshiConfig:
 
 
 # ---------------------------------------------------------------------------
+# Session 146: _load_config cache (EDEADLK fix)
+# ---------------------------------------------------------------------------
+
+class TestConfigCache:
+
+    def _write_config(self, isolated_fs):
+        config_dir = isolated_fs / "config"
+        config_file = config_dir / "kalshi.json"
+        config_file.write_text(json.dumps({
+            "provider": "kalshi",
+            "api_key_id": "test-key",
+            "private_key_path": "config/test.pem",
+            "environment": "demo",
+            "status": "configured",
+        }))
+        return config_file
+
+    def test_load_config_caches_after_first_read(self, isolated_fs, monkeypatch):
+        self._write_config(isolated_fs)
+        kalshi_client.reset_clients()
+        opens: list[str] = []
+        real_open = open
+
+        def spy_open(path, *args, **kwargs):
+            opens.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", spy_open)
+        kalshi_client._load_config()
+        kalshi_client._load_config()
+        kalshi_client._load_config()
+        kalshi_json_opens = [p for p in opens if p.endswith("kalshi.json")]
+        assert len(kalshi_json_opens) == 1, (
+            f"opened {len(kalshi_json_opens)} times -- cache regressed"
+        )
+
+    def test_reset_clients_clears_config_cache(self, isolated_fs, monkeypatch):
+        self._write_config(isolated_fs)
+        kalshi_client.reset_clients()
+        opens: list[str] = []
+        real_open = open
+
+        def spy_open(path, *args, **kwargs):
+            opens.append(str(path))
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", spy_open)
+        first = kalshi_client._load_config()
+        kalshi_client.reset_clients()
+        second = kalshi_client._load_config()
+        assert first == second  # same content
+        kalshi_json_opens = [p for p in opens if p.endswith("kalshi.json")]
+        # Reset cleared the cache, so a second open should have happened.
+        assert len(kalshi_json_opens) == 2, (
+            f"expected 2 opens after reset, got {len(kalshi_json_opens)}"
+        )
+
+    def test_concurrent_load_config_opens_file_once(self, isolated_fs, monkeypatch):
+        import threading as _threading
+        self._write_config(isolated_fs)
+        kalshi_client.reset_clients()
+        opens: list[str] = []
+        real_open = open
+        gate = _threading.Event()
+
+        def spy_open(path, *args, **kwargs):
+            # Stall the first open so concurrent callers all queue on the lock.
+            opens.append(str(path))
+            gate.wait(timeout=1.0)
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr("builtins.open", spy_open)
+        results: list[dict] = []
+
+        def w():
+            results.append(kalshi_client._load_config())
+
+        threads = [_threading.Thread(target=w) for _ in range(20)]
+        for t in threads:
+            t.start()
+        # Brief moment for all threads to contend on the lock, then release.
+        import time as _time
+        _time.sleep(0.1)
+        gate.set()
+        for t in threads:
+            t.join(timeout=2.0)
+        assert len(results) == 20
+        kalshi_json_opens = [p for p in opens if p.endswith("kalshi.json")]
+        assert len(kalshi_json_opens) == 1, (
+            f"concurrent contention opened {len(kalshi_json_opens)} times"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Session 146: _kalshi_get 429 Retry-After honoring
+# ---------------------------------------------------------------------------
+
+class TestKalshiGet429Backoff:
+    """Verify _kalshi_get's worker honors Retry-After and falls back cleanly."""
+
+    def _make_429(self, retry_after=None):
+        import urllib.error
+
+        class _Headers:
+            def __init__(self, ra):
+                self._ra = ra
+
+            def get(self, key, default=None):
+                if key == "Retry-After" and self._ra is not None:
+                    return str(self._ra)
+                return default
+
+        return urllib.error.HTTPError(
+            url="https://x", code=429, msg="rate limit",
+            hdrs=_Headers(retry_after), fp=None,
+        )
+
+    def test_honors_retry_after_header(self, monkeypatch):
+        import urllib.request
+        sleeps: list[float] = []
+        call_count = {"n": 0}
+
+        def fake_urlopen(req, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise self._make_429(retry_after=2)
+            # second attempt succeeds
+            class _OK:
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): return False
+                def read(self_inner): return b'{"ok": true}'
+            return _OK()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        import time as _time
+        monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+        result = kalshi_client._kalshi_get("/test", {})
+        assert result == {"ok": True}
+        assert sleeps and abs(sleeps[0] - 2.0) < 0.01
+
+    def test_falls_back_to_exponential_when_header_missing(self, monkeypatch):
+        import urllib.request
+        sleeps: list[float] = []
+        call_count = {"n": 0}
+
+        def fake_urlopen(req, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                raise self._make_429(retry_after=None)
+            class _OK:
+                def __enter__(self_inner): return self_inner
+                def __exit__(self_inner, *a): return False
+                def read(self_inner): return b'{"ok": true}'
+            return _OK()
+
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        import time as _time
+        monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+        result = kalshi_client._kalshi_get("/test", {})
+        assert result == {"ok": True}
+        # 2 ** 0 + 1 = 2, then 2 ** 1 + 1 = 3
+        assert sleeps[0] == 2 and sleeps[1] == 3
+
+    def test_raises_after_three_consecutive_429s(self, monkeypatch):
+        import urllib.request
+
+        def fake_urlopen(req, **kwargs):
+            raise self._make_429(retry_after=None)
+
+        import time as _time
+        monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+        monkeypatch.setattr(_time, "sleep", lambda s: None)
+        with pytest.raises(Exception) as exc_info:
+            kalshi_client._kalshi_get("/test", {})
+        assert "429" in str(exc_info.value) or "rate limit" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
 # Public endpoints (mocked)
 # ---------------------------------------------------------------------------
 

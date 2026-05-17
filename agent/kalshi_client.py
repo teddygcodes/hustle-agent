@@ -16,6 +16,8 @@ from pathlib import Path
 
 import certifi
 
+from agent.kalshi_rate_limiter import with_rate_limit
+
 # Session 101: per-request total wall-clock cap for _kalshi_get. urlopen's
 # socket-level timeout=10 catches connect failures and full stalls, but is a
 # per-recv timeout: a server that drips response bytes (1 byte per few seconds)
@@ -53,11 +55,29 @@ _auth_client = None
 # Config
 # ---------------------------------------------------------------------------
 
+_CONFIG_CACHE: dict | None = None
+_CONFIG_LOCK = threading.Lock()
+
+
 def _load_config() -> dict:
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
-    return {}
+    """Cached read of config/kalshi.json. Session 146: opening this file
+    concurrently from many ThreadPoolExecutor workers trips macOS's fcntl
+    deadlock detector under Python 3.14 (forensics:
+    bot/state/forensics/2026-05-17-edeadlk/). Cache + lock means the file
+    opens exactly once per process; subsequent reads are dict lookups.
+    Tests call reset_clients() to clear; production never needs to."""
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    with _CONFIG_LOCK:
+        if _CONFIG_CACHE is not None:
+            return _CONFIG_CACHE
+        if CONFIG_FILE.exists():
+            with open(CONFIG_FILE, "r") as f:
+                _CONFIG_CACHE = json.load(f)
+        else:
+            _CONFIG_CACHE = {}
+        return _CONFIG_CACHE
 
 
 def _get_base_url(config: dict) -> str:
@@ -114,10 +134,11 @@ def _get_auth_client(config: dict = None) -> KalshiClient:
 
 
 def reset_clients():
-    """Reset cached clients (useful for tests or config changes)."""
-    global _public_client, _auth_client
+    """Reset cached clients and config (useful for tests or config changes)."""
+    global _public_client, _auth_client, _CONFIG_CACHE
     _public_client = None
     _auth_client = None
+    _CONFIG_CACHE = None
 
 
 # ---------------------------------------------------------------------------
@@ -161,8 +182,19 @@ def _kalshi_get(path: str, params: dict = None) -> dict:
                         return
                 except urllib.error.HTTPError as e:
                     if e.code == 429:
-                        wait = 2 ** attempt + 1  # 2s, 3s, 5s
-                        print(f"  [Kalshi] 429 rate limit on {path} — retrying in {wait}s (attempt {attempt+1}/3)")
+                        retry_after_hdr = e.headers.get("Retry-After") if e.headers else None
+                        try:
+                            retry_after = float(retry_after_hdr) if retry_after_hdr else None
+                        except (TypeError, ValueError):
+                            retry_after = None
+                        if retry_after is not None:
+                            wait = min(retry_after, float(_KALSHI_TOTAL_TIMEOUT_SEC - 1))
+                        else:
+                            wait = 2 ** attempt + 1  # 2s, 3s, 5s when no header
+                        print(
+                            f"  [Kalshi] 429 rate limit on {path} — retrying in {wait:.1f}s "
+                            f"(attempt {attempt+1}/3, retry_after={retry_after_hdr!r})"
+                        )
                         _time.sleep(wait)
                         continue
                     state["exception"] = e
@@ -232,6 +264,7 @@ def _parse_market(m: dict) -> dict:
 # Public endpoints (no auth required)
 # ---------------------------------------------------------------------------
 
+@with_rate_limit
 def get_markets(query: str = "", status: str = "open", limit: int = 20,
                 cursor: str = None, event_ticker: str = None,
                 series_ticker: str = None) -> dict:
@@ -263,6 +296,7 @@ def get_markets(query: str = "", status: str = "open", limit: int = 20,
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_market(ticker: str) -> dict:
     """Get detailed info on a specific market. No auth needed."""
     config = _load_config()
@@ -276,6 +310,7 @@ def get_market(ticker: str) -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_market_orderbook(ticker: str, depth: int = 10) -> dict:
     """Get current orderbook for a market. No auth needed."""
     if not KALSHI_SDK_AVAILABLE:
@@ -295,6 +330,7 @@ def get_market_orderbook(ticker: str, depth: int = 10) -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_events(status: str = None, limit: int = 20, cursor: str = None,
                series_ticker: str = None) -> dict:
     """Browse event categories. No auth needed."""
@@ -328,6 +364,7 @@ def get_events(status: str = None, limit: int = 20, cursor: str = None,
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_trades(ticker: str, limit: int = 20) -> dict:
     """Get recent trades for a market. No auth needed."""
     if not KALSHI_SDK_AVAILABLE:
@@ -372,6 +409,7 @@ def _require_auth():
     return client, None
 
 
+@with_rate_limit
 def get_balance() -> dict:
     """Get Kalshi account balance. Auth required."""
     client, err = _require_auth()
@@ -390,6 +428,7 @@ def get_balance() -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def place_order(ticker: str, side: str, count: int, price_cents: int,
                 action: str = "buy") -> dict:
     """Place an order on Kalshi. Auth required.
@@ -445,6 +484,7 @@ def place_order(ticker: str, side: str, count: int, price_cents: int,
         return {"error": f"Kalshi order failed: {str(e)}"}
 
 
+@with_rate_limit
 def cancel_order(order_id: str) -> dict:
     """Cancel a resting order. Auth required."""
     client, err = _require_auth()
@@ -458,6 +498,7 @@ def cancel_order(order_id: str) -> dict:
         return {"error": f"Kalshi cancel failed: {str(e)}"}
 
 
+@with_rate_limit
 def get_order(order_id: str) -> dict:
     """Get status of a specific order including fill info. Auth required."""
     client, err = _require_auth()
@@ -486,6 +527,7 @@ def get_order(order_id: str) -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_orders(ticker: str = None, status: str = None) -> dict:
     """Get orders, optionally filtered by ticker and/or status. Auth required."""
     client, err = _require_auth()
@@ -521,6 +563,7 @@ def get_orders(ticker: str = None, status: str = None) -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_positions(event_ticker: str = None) -> dict:
     """Get current open positions. Auth required."""
     client, err = _require_auth()
@@ -549,6 +592,7 @@ def get_positions(event_ticker: str = None) -> dict:
         return {"error": f"Kalshi API error: {str(e)}"}
 
 
+@with_rate_limit
 def get_portfolio_history(limit: int = 50) -> dict:
     """Get trade fill history. Auth required."""
     client, err = _require_auth()
