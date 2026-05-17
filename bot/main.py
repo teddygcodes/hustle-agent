@@ -1370,7 +1370,11 @@ class GlintBot:
             # Step 4b: Check CLV settlements
             # ----------------------------------------------------------
             try:
-                newly_settled = check_clv_settlements()
+                # Session 148: wrap the sync get_market loop inside
+                # check_clv_settlements (clv.py:504) in run_in_executor
+                # (Battle Scar #13). Mirrors the S39 pattern.
+                loop = asyncio.get_event_loop()
+                newly_settled = await loop.run_in_executor(None, check_clv_settlements)
                 for clv_entry in newly_settled:
                     clv_cents = clv_entry.get("clv_cents", 0)
                     ticker = clv_entry["ticker"]
