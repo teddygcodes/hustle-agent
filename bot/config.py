@@ -457,6 +457,35 @@ for _alias in ("atp", "atp_challenger", "wta", "wta_challenger"):
 NWS_BIAS_CORRECTION = 1.5     # Degrees F — documented NWS warm bias
 # WEATHER_STD_DEV removed — sigma is computed dynamically in math_engine.py
 
+# ---------------------------------------------------------------------------
+# Per-rung-kind forecast margins for the vig_stack forecast-in-bucket gate
+# (Session 144, 2026-05-16).
+#
+# Replaces the hardcoded `2` at bot/strategies/vig_stack_series.py:563 which
+# applied uniformly to BOTH B-buckets (1°F-wide "between" contracts) AND
+# T-thresholds (open-ended >= contracts). The uniform ±2°F margin caught
+# observed B-rung losses but missed three KXHIGHMIA T-threshold full-cap
+# losses in 11 days (~$600 total, all NO entries 0.75-0.95) where Miami's
+# NWS forecast was 3°F below the threshold and Miami hit ≥ threshold.
+#
+# Phase 0 verified-loss cohort (KXHIGHMIA T-side, post-S100):
+#   - T93 → NWS 90°F (delta=3, actual ≥ 93°F)   — full-cap loss 2026-05-14
+#   - T92 → NWS 89°F (delta=3, actual ≥ 92°F)   — full-cap loss 2026-05-15
+#   - T87 → NWS unrecoverable (pre-S100), reconstruction suggests delta≈3
+#
+# Margin=4 (strict less-than: `delta < margin`) blocks both verified delta=3
+# losses while the two verified wins in the same 4-trade cohort survive
+# (both delta=4 exactly). Per-city margin map deliberately NOT shipped —
+# cohort too small (N=4 completed) to justify per-family overrides.
+#
+# B-rung margin remains 2°F: B-buckets are 1°F wide, so a ±2°F margin
+# catches forecasts within ±2°F of either edge. No B-rung loss in the S144
+# cohort. B-rung gate semantics preserved byte-identical (inclusive <=) —
+# T-rung uses strict less-than because both Phase 0 wins sit on the
+# delta=4 boundary.
+FORECAST_NEAR_BUCKET_MARGIN = 2     # B-rungs (1°F "between" buckets, inclusive ±)
+FORECAST_NEAR_THRESHOLD_MARGIN = 4  # T-rungs (open-ended ≥, strict less-than)
+
 # NWS city coordinates for Kalshi weather markets
 NWS_CITIES = {
     "NYC":     (40.7829, -73.9654),    # Central Park

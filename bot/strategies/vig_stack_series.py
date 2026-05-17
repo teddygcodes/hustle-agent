@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from bot.config import (
+    FORECAST_NEAR_BUCKET_MARGIN,
+    FORECAST_NEAR_THRESHOLD_MARGIN,
     INDEX_RANGE_SERIES_TICKERS,
     SPORTS_FUTURES_TICKERS,
     VIG_STACK_MIN_NO_ENTRY_PRICE,
@@ -29,7 +31,7 @@ from bot.config import (
 )
 from bot.math_engine import _self_check_edge
 from bot.strategies import Market, Opportunity
-from bot.vig_stack_ladder_context import compute_ladder_context
+from bot.vig_stack_ladder_context import _parse_strike, compute_ladder_context
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,8 @@ def _fetch_vig_stack_forecasts() -> dict[str, float]:
 # rows record earlier gates as True (passed), the rejecting gate as
 # False, downstream gates omitted.
 _VIG_STACK_GATES = [
-    "low_liquidity", "no_vig", "market_closed", "forecast_in_bucket",
+    "low_liquidity", "no_vig", "market_closed",
+    "forecast_in_bucket", "forecast_near_threshold",
     "no_price_too_low", "price_floor", "edge_below_threshold", "self_check",
 ]
 _VIG_STACK_REASON_TO_GATE = {
@@ -142,6 +145,7 @@ _VIG_STACK_REASON_TO_GATE = {
     "no_vig": "no_vig",
     "market_closed": "market_closed",
     "forecast_in_bucket": "forecast_in_bucket",
+    "forecast_near_threshold": "forecast_near_threshold",
     "no_price_too_low": "no_price_too_low",
     "no_price_below_floor": "price_floor",
     "non_stable_below_weather_floor": "price_floor",
@@ -264,7 +268,9 @@ class VigStackSeries:
     @staticmethod
     def _fresh_telem() -> dict[str, dict[str, int]]:
         keys = ["checked", "surfaced", "low_liquidity", "no_vig",
-                "market_closed", "forecast_in_bucket", "no_price_too_low",
+                "market_closed",
+                "forecast_in_bucket", "forecast_near_threshold",
+                "no_price_too_low",
                 "no_price_below_floor", "non_stable_below_weather_floor",
                 "edge_below_threshold", "self_check_failed"]
         return {
@@ -554,34 +560,63 @@ class VigStackSeries:
         no_edge = no_fair_prob - no_ask_prob
         relative_no_edge = no_edge / no_ask_prob if no_ask_prob > 0 else 0.0
 
-        # forecast_in_bucket gate (weather only)
+        # Forecast-side gate (weather only) — Session 144 branches on rung_kind.
+        # B-rungs (1°F "between" buckets): preserve byte-identical inclusive
+        # ±FORECAST_NEAR_BUCKET_MARGIN window. T-rungs (open-ended ≥-threshold):
+        # widen to FORECAST_NEAR_THRESHOLD_MARGIN with strict less-than on the
+        # below-threshold side, preserving the existing above-threshold blocking.
+        # Three KXHIGHMIA T-side full-cap losses (~$600 total) at NWS delta=3°F
+        # motivated the widening; both Phase 0 wins sit at delta=4 exactly so
+        # strict less-than is required.
         if is_weather and series_ticker in self._nws_forecasts:
             forecast_temp = self._nws_forecasts[series_ticker]
             bucket = _parse_weather_bucket(ticker)
             if bucket:
                 lo, hi = bucket
-                if lo - 2 <= forecast_temp <= hi + 2:
-                    logger.info(
-                        "VigStack FORECAST SKIP: %s — NWS=%s°F lands near "
-                        "bucket %.0f–%.0f°F (±2° margin)",
-                        ticker, forecast_temp, lo, hi,
-                    )
-                    self._telem[sub]["forecast_in_bucket"] += 1
+                _, rung_kind = _parse_strike(ticker)
+                if rung_kind == "T":
+                    margin = FORECAST_NEAR_THRESHOLD_MARGIN
+                    reason = "forecast_near_threshold"
+                    # delta = T - forecast; positive when below threshold.
+                    # `delta < margin` blocks: (a) any above-threshold case
+                    # (delta < 0), matching pre-S144 behavior; (b) the new
+                    # below-threshold-within-margin case (0 ≤ delta < margin).
+                    gate_fires = (lo - forecast_temp) < margin
+                else:
+                    margin = FORECAST_NEAR_BUCKET_MARGIN
+                    reason = "forecast_in_bucket"
+                    gate_fires = (lo - margin) <= forecast_temp <= (hi + margin)
+                if gate_fires:
+                    if rung_kind == "T":
+                        logger.info(
+                            "VigStack FORECAST SKIP: %s — NWS=%s°F within "
+                            "%d°F of T=%.0f°F threshold",
+                            ticker, forecast_temp, margin, lo,
+                        )
+                    else:
+                        logger.info(
+                            "VigStack FORECAST SKIP: %s — NWS=%s°F lands near "
+                            "bucket %.0f–%.0f°F (±%d° margin)",
+                            ticker, forecast_temp, lo, hi, margin,
+                        )
+                    self._telem[sub][reason] += 1
                     decisions.log_decision(
                         ticker=ticker,
                         opp_type=opp_type,
                         edge=round(relative_no_edge, 4),
-                        gates=_vig_stack_gate_fingerprint("forecast_in_bucket"),
+                        gates=_vig_stack_gate_fingerprint(reason),
                         decision="reject",
-                        reason="forecast_in_bucket",
+                        reason=reason,
                         extra={"forecast_temp": forecast_temp,
                                "bucket_lo": lo, "bucket_hi": hi,
                                "distance": round(_forecast_distance_from_bucket(forecast_temp, lo, hi), 2),
+                               "margin": margin,
+                               "rung_kind": rung_kind,
                                "close_ts": market.close_ts},
                     )
                     self._rejected_opps.append(self._build_reject_opp(
                         ladder, market, no_ask, no_fair_cents, relative_no_edge,
-                        "forecast_in_bucket"))
+                        reason))
                     return None
 
         # Skip near-zero-price NO contracts (YES near-certain)

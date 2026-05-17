@@ -475,3 +475,163 @@ def test_reject_decision_extras_unchanged_by_session_100() -> None:
                 f"reject {c['reason']} for {c['ticker']} unexpectedly "
                 f"carries Session 100 key {k}={extra[k]}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Session 144 — per-rung-kind forecast margin (T widens 2°F → 4°F)
+# ---------------------------------------------------------------------------
+
+from bot.config import (
+    FORECAST_NEAR_BUCKET_MARGIN,
+    FORECAST_NEAR_THRESHOLD_MARGIN,
+)
+
+
+def test_forecast_margin_constants_have_session_144_values() -> None:
+    """S144: B-rung margin stays 2°F (working); T-rung widens to 4°F after 3
+    KXHIGHMIA T-threshold full-cap losses in 11 days (~$600 total) where Miami's
+    NWS forecast was 3°F below the threshold and Miami hit ≥ threshold. The
+    hardcoded ±2 at vig_stack_series.py:563 missed deltas of 3 by 1°F.
+    Phase 0 verified MARGIN=4 (strict less-than) blocks both verified losses
+    (T93→90°F, T92→89°F, both delta=3) without blocking the 2 wins (both
+    delta=4 exactly)."""
+    assert FORECAST_NEAR_BUCKET_MARGIN == 2
+    assert FORECAST_NEAR_THRESHOLD_MARGIN == 4
+
+
+def _run_with_forecasts(
+    market_dicts: list[dict],
+    forecasts: dict[str, float],
+) -> list[dict]:
+    """Drive VigStackSeries with a populated NWS forecast dict so the forecast
+    gate actually fires (existing _run_capturing_extras mocks forecasts to {})."""
+    universe = _markets_to_market_objs(market_dicts)
+    captured: list[dict] = []
+
+    def capture(**kw):
+        captured.append({
+            "ticker": kw.get("ticker", ""),
+            "reason": kw.get("reason", ""),
+            "decision": kw.get("decision", ""),
+            "extra": kw.get("extra"),
+        })
+
+    s = VigStackSeries()
+    with patch(
+        "bot.strategies.vig_stack_series._fetch_vig_stack_forecasts",
+        return_value=dict(forecasts),
+    ), patch("bot.decisions.log_decision", side_effect=capture), \
+         patch("bot.clv.record_counterfactual_skip"):
+        candidates = s.candidate_markets(universe)
+        for m in candidates:
+            s.evaluate(m)
+        s.finalize("test_scan")
+    return captured
+
+
+def _b_rung_scenario(series: str, *, b_value: float) -> list[dict]:
+    """5-rung KXHIGH ladder with one target B-rung + fillers ensuring vig ~135¢."""
+    target_ticker = f"{series}-26MAY16-B{b_value}"
+    fillers = [
+        (f"{series}-26MAY16-T55", 25, 75),
+        (f"{series}-26MAY16-B60.5", 30, 70),
+        (f"{series}-26MAY16-T75", 25, 75),
+        (f"{series}-26MAY16-T80", 30, 70),
+    ]
+    return [
+        _market(ticker=target_ticker, series_ticker=series, yes_ask=25, no_ask=75),
+        *(_market(ticker=t, series_ticker=series, yes_ask=ya, no_ask=na)
+          for t, ya, na in fillers),
+    ]
+
+
+def _t_rung_scenario(series: str, *, t_value: int) -> list[dict]:
+    """5-rung KXHIGH ladder with one target T-rung + fillers ensuring vig ~135¢."""
+    target_ticker = f"{series}-26MAY16-T{t_value}"
+    fillers = [
+        (f"{series}-26MAY16-T55", 25, 75),
+        (f"{series}-26MAY16-B60.5", 30, 70),
+        (f"{series}-26MAY16-B70.5", 25, 75),
+        (f"{series}-26MAY16-B80.5", 30, 70),
+    ]
+    return [
+        _market(ticker=target_ticker, series_ticker=series, yes_ask=25, no_ask=75),
+        *(_market(ticker=t, series_ticker=series, yes_ask=ya, no_ask=na)
+          for t, ya, na in fillers),
+    ]
+
+
+def test_b_rung_blocked_within_two_degree_margin() -> None:
+    """B-rung [74,75] with forecast 73 (1°F below lo edge) → REJECT
+    (forecast_in_bucket). Regression-lock: B-rung gate semantics preserved
+    byte-identical (inclusive ±2°F)."""
+    markets = _b_rung_scenario("KXHIGHMIA", b_value=74.5)
+    captured = _run_with_forecasts(markets, {"KXHIGHMIA": 73.0})
+    target = "KXHIGHMIA-26MAY16-B74.5"
+    target_calls = [c for c in captured if c["ticker"] == target]
+    assert any(
+        c["decision"] == "reject" and c["reason"] == "forecast_in_bucket"
+        for c in target_calls
+    ), f"expected forecast_in_bucket reject for {target}, got {target_calls}"
+
+
+def test_b_rung_admitted_outside_margin() -> None:
+    """B-rung [74,75] with forecast 71 (3°F below lo edge) → gate silent.
+    Regression-lock: confirms B-side margin was NOT silently widened."""
+    markets = _b_rung_scenario("KXHIGHMIA", b_value=74.5)
+    captured = _run_with_forecasts(markets, {"KXHIGHMIA": 71.0})
+    target = "KXHIGHMIA-26MAY16-B74.5"
+    target_calls = [c for c in captured if c["ticker"] == target]
+    assert not any(
+        c["decision"] == "reject" and c["reason"] == "forecast_in_bucket"
+        for c in target_calls
+    ), f"B-rung at delta=3°F should NOT trip ±2°F margin; got {target_calls}"
+
+
+def test_t_rung_blocked_within_four_degree_margin() -> None:
+    """T93 with forecast 90 (delta=3, strict-less-than: 3<4) → REJECT
+    (forecast_near_threshold). Phase 0 verified KXHIGHMIA T93 loss case.
+    Load-bearing assertion: this is THE behavior the fix exists to add."""
+    markets = _t_rung_scenario("KXHIGHMIA", t_value=93)
+    captured = _run_with_forecasts(markets, {"KXHIGHMIA": 90.0})
+    target = "KXHIGHMIA-26MAY16-T93"
+    target_calls = [c for c in captured if c["ticker"] == target]
+    assert any(
+        c["decision"] == "reject" and c["reason"] == "forecast_near_threshold"
+        for c in target_calls
+    ), (
+        f"expected forecast_near_threshold reject for {target} at delta=3°F; "
+        f"got {target_calls}"
+    )
+
+
+def test_t_rung_admitted_outside_four_degree_margin() -> None:
+    """T93 with forecast 88 (delta=5, strict-less-than: 5≥4) → gate silent.
+    Verifies the fix does not over-block legitimate T-side admits."""
+    markets = _t_rung_scenario("KXHIGHMIA", t_value=93)
+    captured = _run_with_forecasts(markets, {"KXHIGHMIA": 88.0})
+    target = "KXHIGHMIA-26MAY16-T93"
+    target_calls = [c for c in captured if c["ticker"] == target]
+    assert not any(
+        c["decision"] == "reject"
+        and c["reason"] in {"forecast_in_bucket", "forecast_near_threshold"}
+        for c in target_calls
+    ), f"T-rung at delta=5°F should NOT trip 4°F margin; got {target_calls}"
+
+
+def test_t_rung_boundary_at_delta_four_admits() -> None:
+    """T93 with forecast 89 (delta=4 exactly, strict-less-than: 4<4 is False)
+    → gate silent. Phase 0 cohort: both verified wins are delta=4 exactly;
+    strict-less-than preserves them. Regression-lock the boundary direction."""
+    markets = _t_rung_scenario("KXHIGHMIA", t_value=93)
+    captured = _run_with_forecasts(markets, {"KXHIGHMIA": 89.0})
+    target = "KXHIGHMIA-26MAY16-T93"
+    target_calls = [c for c in captured if c["ticker"] == target]
+    assert not any(
+        c["decision"] == "reject"
+        and c["reason"] in {"forecast_in_bucket", "forecast_near_threshold"}
+        for c in target_calls
+    ), (
+        f"T-rung at delta=4°F (boundary) should ADMIT under strict less-than; "
+        f"got {target_calls}"
+    )
