@@ -1,0 +1,38 @@
+{
+  "Session_38a-2_L2052": {
+    "resolved_at": "2026-05-17T07:00:00+00:00",
+    "reason": "axis_ruled_out",
+    "resolved_by": "S147",
+    "rationale": "wta disabled at S97 (2026-05-11) per bot/config.py:239 MOMENTUM_DISABLED_SPORTS. Re-enable requires an explicit future operator session, not automatic on cohort growth. No re-enable signal in S98-S146. Trigger axis closed.",
+    "trigger_text_snippet": "Re-evaluate wta-main when settled wta CFs reach n=80 OR mean CLV crosses positive territory.",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  },
+  "Session_38a-2_L2067": {
+    "resolved_at": "2026-05-17T07:00:00+00:00",
+    "reason": "parent_axis_closed",
+    "resolved_by": "S147",
+    "rationale": "Lever (per-sport MOMENTUM_LEADER_MIN for WTA) is moot while parent sport wta is disabled (S97). Tuning a per-sport threshold on a disabled sport produces no live behavior change. Classifier at tools/glint_status.py:1008 collapses this entry to the wta-main TRIGGERED branch because the trigger text references the Apr 30 'settled wta CFs reach' trigger as parent context, so the dashboard detail matches L2052; the underlying lever is still distinct. Retired alongside L2052; re-actionable only if wta is explicitly re-enabled.",
+    "trigger_text_snippet": "May 1 update: re-evaluate per-sport MOMENTUM_LEADER_MIN for WTA if no_leader/wta sub-cohort reaches n=30 with sustained +mean CLV at 14d.",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  },
+  "Session_41_L2381": {
+    "resolved_at": "2026-05-17T07:00:00+00:00",
+    "reason": "axis_ruled_out",
+    "resolved_by": "S147",
+    "rationale": "TP/SL sweep ruled out via Pattern C in S41 (n=39) and confirmed in S129 at larger N (Pattern C). Adjacent axes also closed: sizing (S130 Pattern C), scoring (S131 Outcome B, ATP-vs-IPL timing artifact not TP/SL), sport-scope (S132 Outcome B, N-thin per-sport). S134 cross-AI synthesis named the structural gap: live_momentum lacks a fair-value model, so parameter tuning cannot answer 'is this a good trade?' Substrate work, not TP/SL tuning, is the unblock path. Cohort growth past n=60 does not unlock a new tuning axis.",
+    "trigger_text_snippet": "Re-investigate Session 41 when EITHER post-Apr-23 settled live_momentum cohort >= 60 trades AND/OR SL-axis-flat finding ceases to hold.",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  },
+  "Session_102_L5461": {
+    "resolved_at": "2026-05-17T07:00:00+00:00",
+    "reason": "firing_confirmation_closed",
+    "resolved_by": "S147",
+    "rationale": "L5461 is S102's acknowledgment that S41's trigger fired at n=66 (>=60 threshold). S102 queued the re-investigation as a Session 103+ candidate; the actual re-investigation (S129) returned Pattern C, closing the trigger's prompted axis. L5461 inherits S41 L2381's closure. No remaining action.",
+    "trigger_text_snippet": "S41's watch-list trigger fired (post-Apr-23 live_momentum n=66). Queued as Session 103+ candidate; closed by S129 Pattern C re-run.",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  }
+}
