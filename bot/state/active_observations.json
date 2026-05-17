@@ -982,5 +982,37 @@
         "last_updated": "2026-05-13T00:00:00+00:00"
       }
     ]
+  },
+  {
+    "session": 145,
+    "shipped_at": "2026-05-16T00:00:00+00:00",
+    "description": "KXHIGHAUS B-bucket forecast margin HOLD (Outcome C). Phase 0 showed no FORECAST_NEAR_BUCKET_MARGIN value clears the bar (block >=3 of 4 losses, <=30% wins blocked, net >=+$100); wins cluster precisely at forecast_bucket_distance=3 while the 1 measured loss is at dist=5, so any MARGIN >=3 that catches the loss also blocks the dist=3 wins. Code unchanged.",
+    "observation_window_days": 30,
+    "metrics": [
+      {
+        "name": "post-S145 KXHIGHAUS B-bucket full-cap losses (auto-fire trigger)",
+        "expectation": "0 new KXHIGHAUS-*-B*.5 trades with status='lost', pnl<=-$199, settled_at >= 2026-05-17 and forecast_bucket_distance >= 5. A 5th measured loss at dist>=5 before 2026-06-15 auto-fires earlier re-investigation with regime-detection axis added. Auto-fire also if a B-rung loss fires at forecast_bucket_distance < 3 on any currently-enabled stable family (current 2 degree gate execution defect).",
+        "current_value": "0 new losses (baseline established 2026-05-16; 4 historical losses 5/4, 5/8, 5/9, 5/13 are pre-trigger and not counted)",
+        "last_updated": "2026-05-16T00:00:00+00:00"
+      },
+      {
+        "name": "post-S100 KXHIGHAUS-B cohort growth toward N>=8 measured losses (re-evaluation trigger)",
+        "expectation": "By 2026-06-15, KXHIGHAUS-B cohort with status in {won, lost, exited_early}, family='KXHIGHAUS', rung_kind='B', forecast_bucket_distance not null should reach N>=20 settled (currently N=9). Of those, require N>=8 LOSSES with distance populated before re-attempting the MARGIN sweep. Until both N thresholds clear, the 1 measured loss + 8 wins is the sample S145 used.",
+        "current_value": "N=9 settled (8 won, 1 lost). Loss N=1 (5/13 B90.5, dist=5).",
+        "last_updated": "2026-05-16T00:00:00+00:00"
+      },
+      {
+        "name": "Cross-family Filter F preservation (KXHIGHMIA-B / KXHIGHNY-B / KXHIGHDEN-B 14d settled count)",
+        "expectation": "Post-S145 trailing 14d settled count on KXHIGHMIA-B, KXHIGHNY-B, KXHIGHDEN-B should not drop materially vs the prior 14d window. S145 shipped no code change so this should be invariant \u2014 if it drops, an UNRELATED gate is over-blocking and that's the lead, not S145. Cross-watch only.",
+        "current_value": "post-S100 measured baseline: KXHIGHMIA-B N=1, KXHIGHNY-B N=7, KXHIGHDEN-B N=4 (all wins)",
+        "last_updated": "2026-05-16T00:00:00+00:00"
+      },
+      {
+        "name": "Alternate-axis seed list for future investigation (NOT bound to a session)",
+        "expectation": "If post-S145 data accumulates to support investigating non-margin axes for the KXHIGHAUS B-bucket pattern, three candidates are seeded: (1) regime detection (Austin heat-dome / seasonal-warming forecast-bias signal \u2014 the 5/13 forecast 85 -> actual 90-91 is consistent with NWS underestimating peak temps on hot days), (2) per-rung NO-entry price cap on KXHIGHAUS-B at high buckets (the 5/13 loss entered at $0.70 \u2014 a price ceiling at $0.75 would have admitted but reduced cap risk), (3) ladder-rank-aware sizing (5/13 was selected_rung_rank_desc=2, just below the highest rung). None investigated in S145.",
+        "current_value": "n/a (qualitative seed list; no active measurement)",
+        "last_updated": "2026-05-16T00:00:00+00:00"
+      }
+    ]
   }
 ]

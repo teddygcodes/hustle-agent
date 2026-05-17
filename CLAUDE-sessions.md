@@ -7365,3 +7365,110 @@ Total actual EE **+$461.45** vs held CF **+$213.00**, delta **+$248.45**. This i
 - [bot/state/active_observations.json](bot/state/active_observations.json): added the S136 N>=40 / high-price-bucket watch.
 
 **Tests / restart.** `python3 -m pytest tests/ --tb=no -q` -> **1770 passed in 44.19s**. No production code changed; no restart.
+
+### ☑ Session 145 — KXHIGHAUS B-bucket forecast margin HOLD (2026-05-16, Outcome C — geometry forbids margin-based fix at current N)
+
+**Decision: Outcome C / HOLD.** Investigated widening `FORECAST_NEAR_BUCKET_MARGIN` from 2°F to close the B-bucket side of the stable-family tail-loss pattern (KXHIGHAUS cluster: 4 losses, ~$799 / 14d). Sister investigation to S144 (T-threshold side, KXHIGHMIA cluster, shipped MARGIN=4°F strict). Phase 0 found no MARGIN value clears the spec's bar criteria; the gate geometry of B-rungs structurally forbids a clean margin-based fix at current data shape. **No code change. No restart. No test changes.** Re-evaluation triggers documented for 2026-06-15 + auto-fire conditions.
+
+**The 4 prompting losses.**
+
+| Date settled | Ticker | Bucket | Outcome | Trade entered | S100 fields? |
+|---|---|---|---|---|---|
+| 5/5 | KXHIGHAUS-26MAY04-B82.5 | [82,83]°F | LOST $200.00 (cap) | 2026-05-03 | NO (pre-S100, all nulls) |
+| 5/9 | KXHIGHAUS-26MAY08-B80.5 | [80,81]°F | LOST $199.20 | 2026-05-07 | NO (pre-S100) |
+| 5/10 | KXHIGHAUS-26MAY09-B89.5 | [89,90]°F | LOST $199.87 | 2026-05-08 | NO (pre-S100) |
+| 5/14 | KXHIGHAUS-26MAY13-B90.5 | [90,91]°F | LOST $199.50 | 2026-05-12 | **YES — `forecast_bucket_distance=5.0`, `source_forecast_temp=85.0`, `source_city="Austin"`** |
+
+Per S133 audit, KXHIGHAUS post-Apr-20 was +$484.18 / N=48 — the 4 tail losses consumed 62% of upside ($799 / $1283 gross).
+
+**Phase 0 premises (verified).**
+
+- **Skip code at [bot/strategies/vig_stack_series.py:571-620](bot/strategies/vig_stack_series.py:571) confirmed unchanged from S144.** B-side branch (line 586-588): `margin = FORECAST_NEAR_BUCKET_MARGIN; gate_fires = (lo - margin) <= forecast_temp <= (hi + margin)` (inclusive `<=`). T-side branch (line 577-584): strict less-than `(lo - forecast_temp) < margin`. Both `bot/config.py:486-487` constants unchanged: `FORECAST_NEAR_BUCKET_MARGIN = 2`, `FORECAST_NEAR_THRESHOLD_MARGIN = 4`. No boundary bug on B-side (the 4 losses were missed because forecasts were further than 2°F from nearest edge, not because of a strict-vs-inclusive defect).
+- **No per-family override architecture exists** for forecast margins. The existing `get_vig_stack_floor_for_family` at config.py is for the NO-leg floor (different gate). Outcome B would need a new map + lookup (~3 lines).
+- **No forecast snapshot data exists.** `bot/state/clv.json` stores post-settlement outcomes only; no multi-time forecast snapshots. No `weather_cache/` or similar. Drift check (Phase 0.5) blocked by data gap; documented and skipped per spec's "best-effort" framing.
+- **Baseline pytest skipped (Outcome C — no code change).** Per spec's "Skip Phase 2 and Phase 3" for HOLD path.
+
+**Table A — post-S100 KXHIGHAUS-B settled cohort (N=9, all distance-populated).**
+
+| Ticker | status | pnl | dist | fcst |
+|---|---|---:|---:|---:|
+| KXHIGHAUS-26MAY11-B83.5 | won | +$17.36 | 3 | 80 |
+| KXHIGHAUS-26MAY12-B88.5 | won | +$22.20 | 8 | 80 |
+| KXHIGHAUS-26MAY13-B90.5 | **lost** | **-$199.50** | **5** | **85** |
+| KXHIGHAUS-26MAY13-B88.5 | won | +$56.32 | 3 | 85 |
+| KXHIGHAUS-26MAY13-B92.5 | won | +$53.13 | 7 | 85 |
+| KXHIGHAUS-26MAY14-B93.5 | won | +$35.25 | 3 | 90 |
+| KXHIGHAUS-26MAY14-B95.5 | won | +$10.50 | 5 | 90 |
+| KXHIGHAUS-26MAY15-B92.5 | won | +$19.71 | 3 | 89 |
+| KXHIGHAUS-26MAY15-B94.5 | won | +$10.50 | 3 | 91 |
+
+Wins cluster at `dist=3` (5 of 8). The one loss is at `dist=5`. Cohort total: +$25.47 net (1 loss eats 7 wins).
+
+**Table B — counterfactual MARGIN sweep on the measured cohort.**
+
+| MARGIN | N_blocked | N_blocked_lost | N_blocked_won | net_effect_$ | wins_blocked_% |
+|---:|---:|---:|---:|---:|---:|
+| 2 (current) | 0 | 0 | 0 | $0.00 | 0% |
+| 3 | 5 | 0 | 5 | -$139.14 | 62.5% |
+| 4 | 5 | 0 | 5 | -$139.14 | 62.5% |
+| 5 | 7 | 1 | 6 | +$49.86 | 75% |
+| 6 | 7 | 1 | 6 | +$49.86 | 75% |
+| 7 | 8 | 1 | 7 | -$3.27 | 87.5% |
+
+Bar criteria from spec: (i) block ≥3 of 4 losses, (ii) block ≤30% of wins, (iii) net ≥ +$100, (iv) N_blocked ≥ 3. **No row satisfies all four.** MARGIN=5 satisfies (i) and (iv) only on the measured cohort (1 of 1 measured loss), violates (ii) badly (75% wins blocked), and falls short on (iii) at +$49.86. MARGIN=3-4 doesn't catch the loss at all.
+
+**Table C — cross-family at MARGIN=5°F (Outcome A blast-radius check, post-S100 measured).**
+
+| Family-B | N | wins | losses | distances | wins_blocked at MARGIN=5° |
+|---|---:|---:|---:|---|---|
+| KXHIGHMIA-B | 1 | 1 | 0 | {4} | **100%** (1/1) — only datapoint blocked |
+| KXHIGHNY-B | 7 | 7 | 0 | {6, 4, 4, 3, 5, 5, 14} | **85.7%** (6/7) |
+| KXHIGHDEN-B | 4 | 4 | 0 | {10, 3, 4, 4} | **75%** (3/4) |
+
+Outcome A (global widening) is rejected: would destroy KXHIGHMIA-B (the workhorse +EV bucket signal per concurrent_attack_angles n=14 mean +18.8¢ 71% +CLV), severely cut KXHIGHNY-B and KXHIGHDEN-B win streams. Per spec: "If the chosen MARGIN blocks ≥50% of KXHIGHMIA-B wins → switch to Outcome B."
+
+**Outcome B (per-family map) also rejected on KXHIGHAUS-internal grounds.** Per-family widening keeps KXHIGHMIA/NY/DEN-B at 2°F (preserves their workhorse signals), but the KXHIGHAUS-internal win-blocked% stays at 75% at MARGIN=5°F (violates bar criterion ii). The "preserve working ~80% of the strategy" directive from spec's Operating Posture is violated.
+
+**Pre-S100 data gap (3 of 4 historical losses unmeasured).** The 5/4, 5/8, 5/9 trades all have `forecast_bucket_distance = null`, `source_forecast_temp = null`, `source_city = null` because S100 ladder-context instrumentation shipped 2026-05-11. Per user's pre-flight decision, attempted NWS archive lookup as recovery path; **infeasible** because trade dates 2026-05-03 → 2026-05-08 are forward-dated relative to real wall-clock time (the system context operates in 2026 but external archives don't carry future dates). Spec's fallback ("Use only the 5/13 trade") activated; the 3 pre-S100 losses are qualitative-only evidence ("pattern existed pre-S100") and excluded from the numeric sweep per "Do not invent forecast values."
+
+**Architectural finding — gate geometry forbids margin-based fix.** Post-S100 KXHIGHAUS-B wins cluster precisely at `forecast_bucket_distance=3` (5 of 8 wins, all integer °F per NWS forecast resolution). The 1 measured loss is at `dist=5`. Any MARGIN ≥ 3°F that blocks the dist=5 loss necessarily blocks all dist=3 wins (inclusive boundary semantics, user-preserved per S145 plan). There is no MARGIN value `m` such that `m ≥ 5` and `m < 3` simultaneously. This is a **structural mismatch between the prompting-loss geometry and the working-wins geometry**, not a tuning gap. The right intervention shape would be a second axis (price ceiling, regime detector, per-rung NO cap) that distinguishes dist=5 losing context from dist=3 winning context. None of those are tuned in S145.
+
+**Forecast drift mechanism (qualitative, from 5/13 case only).** Forecast was 85°F when actual Austin TMAX landed in [90,91]°F (the bucket). 5-6°F forecast error to the upside on a hot day. Consistent with "NWS systematically underestimates peak temperature on hot days" — a regime / seasonal-warming pattern, NOT a generic forecast-precision pattern. Cross-family data is consistent: KXHIGHMIA-B win at dist=4 (forecast 92, bucket [87,88]) and KXHIGHNY-B 14°F-distance win (forecast 82, bucket [67,68]) are admit-and-win cases — wide-distance setups can be correct. The pattern that bites is specifically **low forecast + hot-day overshoot**, not "forecast far from bucket."
+
+**Phase 0 results map to outcomes.**
+
+- Outcome A (global widening): **REJECTED** — cross-family devastation at MARGIN=5°F (KXHIGHMIA-B 100% wins blocked, KXHIGHNY-B 85.7%, KXHIGHDEN-B 75%). Smaller MARGIN values don't catch the measured loss.
+- Outcome B (per-family override): **REJECTED** — KXHIGHAUS-internal 75% wins-blocked at MARGIN=5°F violates bar (ii) AND the Operating Posture directive to preserve working ~80% of the strategy.
+- Outcome C (HOLD): **SHIPPED** — documented null, code unchanged, re-evaluation triggers set. Aligns with S130 lesson (don't optimize on contaminated/thin data) and S142 precedent (Outcome C HOLD when sample doesn't support tuning).
+- Outcome D (lean-in): **NOT APPLICABLE** — spec gates this on "ship the immediate margin tweak if it's still clean." It's not clean; all MARGIN candidates violate bar criteria.
+
+**What this session did NOT do.**
+
+- No changes to [bot/config.py](bot/config.py) — `FORECAST_NEAR_BUCKET_MARGIN = 2` preserved, no new `FORECAST_NEAR_BUCKET_MARGIN_BY_FAMILY` map added.
+- No changes to [bot/strategies/vig_stack_series.py](bot/strategies/vig_stack_series.py) — gate logic at line 571-620 byte-identical to S144 post-ship state. Inclusive B-side `<=`, strict T-side `<` both unchanged.
+- No changes to [tests/test_vig_stack_series_strategy.py](tests/test_vig_stack_series_strategy.py) — the 5 planned tests not added (would lock in non-existent code behavior).
+- No bot restart, no Battle Scar #14/#17 path-rooted procedure invoked.
+- No README sync (no behavior change to surface).
+- No `bot/state/active_observations.json` metric-current_value updates required for ship validation (no ship). New dashboard entry added below for the re-evaluation watch only.
+- Did NOT disable KXHIGHAUS or alter Filter F. The family stays in `VIG_STACK_STABLE_FAMILIES` per Operating Posture's "Surgical fix preserves the working ~80% of the strategy" directive (S145's finding strengthens this: any margin fix would HARM the working portion).
+- Did NOT pre-commit a follow-up session. Alternate-axis names ("regime detection," "per-rung NO price cap," "ladder-rank-aware sizing") are seeded in the Open Loops note but not bound to a session number.
+
+**Watch-list / auto-fire triggers (re-evaluation rules).**
+
+- **2026-06-15 (30d)** — re-measure with the post-S100 KXHIGHAUS-B cohort extended. Require N≥8 KXHIGHAUS B-losses with `forecast_bucket_distance` populated to re-attempt the sweep. Until then, the single measured loss at dist=5 is insufficient signal for a clean MARGIN selection.
+- **Auto-fire (sooner re-investigation):** if a 5th KXHIGHAUS B-loss with `forecast_bucket_distance ≥ 5` settles before 2026-06-15, the pattern is worse than current data suggests — re-open with regime-detection axis added.
+- **Auto-fire (regression check):** if any B-rung loss fires on a currently-enabled stable family at `forecast_bucket_distance < 3` (inside the existing 2°F gate's blocked zone), the current MARGIN itself is letting through cases it shouldn't — investigate the gate execution path, not the MARGIN value.
+- **Cross-watch:** S144's 2026-05-30 watch-list (T-side full-cap loss count on stable families) continues to fire independently of S145. If S144's auto-fire trips, escalate jointly (B+T sides both failing means structural issue, not per-axis).
+- **Adjacent watch:** if KXHIGHMIA-B or KXHIGHNY-B settled count drops materially over 14d (would indicate other gate over-blocking), that's unrelated to S145 but the dashboard catches it via the per-family Filter F watch (S133 metric set).
+
+**Cross-references.**
+
+- S144 — sister session. T-rung margin widened from 2°F → 4°F strict. S145 sits on the symmetric B-rung axis with opposite result (HOLD vs ship). The two outcomes share architecture (entry-gate fix, no exit logic change, Battle Scar #9 preserved) and divergent geometry: T-rungs are open-ended threshold contracts where below-threshold-near-margin is uniformly losing; B-rungs are 1°F-bounded buckets where wins genuinely sit at dist=3 just outside the edge.
+- S142 — Pattern 1 demotion threshold raised to N=4 in 14d on the same loss cohort. S142 demotes the heuristic noise; S144 reduces the T-side loss frequency. S145 confirms the B-side loss frequency is currently structural (not tunable on the forecast-margin axis).
+- S133 — KXHIGHAUS post-Apr-20 health audit. The 4 tail losses S145 investigated consumed 62% of the +$1,283 gross. S133's directive "vig_stack is the workhorse and is healthy. Where else should the bot's discovery surface look?" applies here: KXHIGHAUS B-bucket loss frequency is structural cost, not a tunable defect at this axis.
+- S100 — ladder-context instrumentation (`forecast_bucket_distance`, `source_forecast_temp`, etc.). S145 consumed the data shipped by S100; without S100, even the 5/13 case would have been unmeasured.
+- S130 — investigation premise contamination lesson. S145 verified the analysis inputs (decisions.jsonl forecast-temp field, paper_trades.json distance field) match what the analysis is testing.
+- S135 — `live_momentum` kill rule precedent. S145 inherits the "pre-committed kill rules" discipline: HOLD without re-investigation is forbidden indefinite work; re-eval date + auto-fire triggers are required.
+- Battle Scar #9 (vig_stack TP/SL exemption) untouched. Battle Scar #10 ("NO at 90-95¢ risk/reward") addendum from S144 cross-references — S145 confirms the B-side framing of the same scar: NO at high price + forecast-far-from-bucket geometry can lose 100% when the actual outcome lands in-bucket. The bot's $0.70 entry on 5/13 B90.5 lost the full $200 cap (~$199.50 after slippage).
+
+**Tests / restart.** `python3 -m pytest tests/ --tb=no -q` not re-run (Outcome C; no code changed). Last-known baseline post-S144 is 1817 per spec / 1770 per S136 record — the discrepancy is from in-flight branches between S136 and S144 that S145 did not investigate. No restart.
