@@ -2902,3 +2902,58 @@ def test_session_141_kxatpmatch_rejects_via_coarse_fallback(monkeypatch):
         f"path; got {len(sport_disabled_calls)} sport_disabled reject(s)."
     )
     w._auto_bet_momentum.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Session 143 — scan_live_matches must call get_markets via run_in_executor
+# (Battle Scar #13 addendum). Pre-fix, sync get_markets calls inside this
+# async coroutine leaked ~83 CLOSE_WAIT sockets to CloudFront atl58/atl59
+# in a 10h window and wedged _main_loop + _live_scan_loop together.
+# ---------------------------------------------------------------------------
+
+
+def test_scan_live_matches_runs_get_markets_via_executor(monkeypatch):
+    """Session 143: scan_live_matches must dispatch agent.kalshi_client.get_markets
+    through loop.run_in_executor so the synchronous requests call doesn't block
+    the asyncio event loop and doesn't leak CLOSE_WAIT sockets to CloudFront.
+
+    Verified by recording the thread on which get_markets runs. If the fix is
+    in place, get_markets runs on a ThreadPoolExecutor worker (name !=
+    'MainThread'). If the fix regresses to a direct sync call, it runs on the
+    main thread — the pre-Session-143 leak symptom (Battle Scar #13).
+    """
+    import asyncio
+    import threading
+
+    from agent import kalshi_client
+    from bot import live_watcher as lw
+
+    get_markets_threads: list[str] = []
+
+    def fake_get_markets(series_ticker=None, status=None, limit=None):
+        get_markets_threads.append(threading.current_thread().name)
+        return {"markets": []}
+
+    monkeypatch.setattr(kalshi_client, "get_markets", fake_get_markets)
+
+    monkeypatch.setattr(lw, "MATCH_SERIES", {"tennis": "KXATPMATCH"}, raising=False)
+    monkeypatch.setattr(lw, "SPORTS_SERIES", {}, raising=False)
+    monkeypatch.setattr(
+        lw, "SPORT_PROFILES", {"tennis": {"disabled": False}}, raising=False,
+    )
+
+    class _NoopNotifier:
+        async def send_message(self, *_a, **_kw):
+            pass
+
+    asyncio.run(lw.scan_live_matches(_NoopNotifier(), active_watchers={}, balance=0.0))
+
+    assert len(get_markets_threads) >= 1, (
+        "get_markets should be invoked at least once during scan_live_matches"
+    )
+    assert all(t != "MainThread" for t in get_markets_threads), (
+        f"get_markets ran on {get_markets_threads!r} — expected an executor "
+        f"worker thread. The Session 143 run_in_executor wrap may have "
+        f"regressed; this would re-introduce the CloudFront CLOSE_WAIT leak "
+        f"(Battle Scar #13)."
+    )

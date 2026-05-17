@@ -3517,8 +3517,22 @@ async def scan_live_matches(notifier, active_watchers: dict, balance: float = 0.
         if SPORT_PROFILES.get(sport, {}).get("disabled"):
             _telem["disabled_sport"] += 1
             continue
+        # Battle Scar #13 / Session 143: get_markets is synchronous (requests
+        # under the hood, hitting api.elections.kalshi.com → CloudFront
+        # atl58/atl59). Inside this async coroutine, an unwrapped call blocks
+        # the event loop AND leaks CLOSE_WAIT sockets under high call volume
+        # (~3000-4000 calls/10h × ~2-3% leak rate → 83 sockets observed
+        # pre-fix). Wrap on the default executor so each call's socket
+        # lifetime is owned by a worker thread that releases on return.
+        # Mirrors Session 39 pattern at bot/main.py:1291-1298. No outer
+        # asyncio.wait_for: this is a single-page bounded fetch, not a
+        # multi-page cursor walk.
         try:
-            result = get_markets(series_ticker=series, status="open", limit=200)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: get_markets(series_ticker=series, status="open", limit=200),
+            )
         except Exception as e:
             logger.debug("Live scan error for %s: %s", series, e)
             _telem["api_error"] += 1
