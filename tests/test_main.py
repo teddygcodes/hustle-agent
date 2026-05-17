@@ -646,6 +646,64 @@ def test_main_loop_continues_when_check_clv_settlements_raises_in_executor(monke
     )
 
 
+def test_main_loop_runs_recheck_open_edges_via_executor(monkeypatch):
+    """Session 148: _main_loop must dispatch recheck_open_edges through
+    loop.run_in_executor so the synchronous get_market calls inside
+    (position_monitor.py:41,158,233) don't block the event loop — Battle
+    Scar #13."""
+    import threading
+
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    threads_seen: list[str] = []
+
+    def fake_recheck():
+        threads_seen.append(threading.current_thread().name)
+        return []
+
+    monkeypatch.setattr(botmain, "recheck_open_edges", fake_recheck)
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    assert threads_seen, "recheck_open_edges was not called"
+    assert all(t != "MainThread" for t in threads_seen), (
+        f"recheck_open_edges ran on {threads_seen!r} — expected an executor "
+        f"worker thread. The Session 148 run_in_executor wrap may have "
+        f"regressed; this would re-introduce the CLOSE_WAIT leak (Battle "
+        f"Scar #13)."
+    )
+
+
+def test_main_loop_continues_when_recheck_open_edges_raises_in_executor(monkeypatch):
+    """Session 148: if recheck_open_edges raises in the executor, the
+    try/except at bot/main.py:1456 must catch it and let _main_loop continue
+    to scan_related_markets and downstream steps."""
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    def boom_recheck():
+        raise RuntimeError("test stub: recheck_open_edges blows up")
+
+    monkeypatch.setattr(botmain, "recheck_open_edges", boom_recheck)
+
+    raised_exit = False
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        raised_exit = True
+
+    assert raised_exit, (
+        "recheck_open_edges RuntimeError should be caught by the try/except "
+        "at bot/main.py:1456 and _main_loop should continue past it. If "
+        "_S148ExitSignal was NOT raised, the RuntimeError propagated out of "
+        "_main_loop — the try/except or executor wrap may have regressed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------

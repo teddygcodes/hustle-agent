@@ -1410,7 +1410,11 @@ class GlintBot:
             # Step 6b: Position monitor — edge recheck + related markets
             # ----------------------------------------------------------
             try:
-                edge_alerts = recheck_open_edges()
+                # Session 148: wrap the sync get_market loop inside
+                # recheck_open_edges (position_monitor.py:41,158,233) in
+                # run_in_executor (Battle Scar #13). Mirrors the S39 pattern.
+                loop = asyncio.get_event_loop()
+                edge_alerts = await loop.run_in_executor(None, recheck_open_edges)
                 for ea in edge_alerts:
                     alert_type = ea.get("type", "")
                     ticker = ea.get("ticker", "?")
