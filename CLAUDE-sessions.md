@@ -7548,3 +7548,97 @@ Pytest: 1830 → **1831**.
 **Tests / restart.** Pytest 1831 / 0 (1 new test added; 1830 → 1831 baseline). No bot restart (operator-dashboard cosmetic-correctness change only).
 
 **No Battle Scar codified.** Cosmetic correctness on §7; the reversibility-first design at [tools/glint_status.py:819](tools/glint_status.py:819) is preserved and remains the correct default for auto-resolved entries. The `manual_axis_ruled_out` bypass is the explicit operator-opt-in escape.
+
+---
+
+### ☑ Session 148 — Fleet-wide `run_in_executor` audit completes Battle Scar #13 (2026-05-17, Outcome A 5-commit ship)
+
+**Decision: Outcome A.** Phase 0 verified the spec's leaf-wrap premise was structurally inapplicable (all 5 target files have sync `def` leaf containers — `await` can't go inside `def`). Shifted to Shape A: wrap the 4 sync entry points in `async _main_loop` instead. 4 wrap commits + 1 doc-sync commit. pytest 1831 → 1839 (4 primary + 4 companion regression tests).
+
+**The premise correction (Phase 0).** The S148 spec's "Per-file commit template" mirrored S143's leaf wrap (`await loop.run_in_executor(None, lambda: get_markets(...))`), assuming each leaf call sat inside `async def`. Direct file reads showed the opposite:
+
+| File | Containing function (line) | Async? |
+|---|---|---|
+| `bot/scanner_weather.py:116` | `def scan_weather_markets()` ([:105](hustle-agent/bot/scanner_weather.py:105)) | **SYNC** |
+| `bot/kalshi_series.py:288` | `def _fetch_series_markets()` ([:280](hustle-agent/bot/kalshi_series.py:280)) | **SYNC** |
+| `bot/kalshi_series.py:1421-1523` | crypto helpers (`_prefetch_all_crypto_spots`, etc.) | **SYNC** |
+| `bot/position_monitor.py:41,158,233` | `def recheck_open_edges()` ([:204](hustle-agent/bot/position_monitor.py:204)) | **SYNC** |
+| `bot/position_monitor.py:415` | `def scan_related_markets()` ([:369](hustle-agent/bot/position_monitor.py:369)) | **SYNC** |
+| `bot/scanner_sports_arb.py:127,228` | `def scan_game_vig` / `scan_sports_arb` ([:461,581](hustle-agent/bot/scanner_sports_arb.py:461)) | **SYNC** |
+| `bot/clv.py:504` | `def check_clv_settlements()` ([:471](hustle-agent/bot/clv.py:471)) | **SYNC** |
+
+The only viable minimal-change wrap point: the 4 sync entry points in `async def _main_loop`. The alternative (Shape B: refactor ~30+ functions across 6 files to `async def` with `await` propagating upward) was rejected by operator on AskUserQuestion — high regression surface on the +$1,064 vig_stack workhorse path; multi-session refactor, not a single S148 ship.
+
+**The scan_cycle override.** The S148 spec implicitly required wrapping `scan_cycle` (since kalshi_series.py:288 is reachable only via scan_cycle's strategy loop), but CLAUDE.md Open Loops S143 Site 3 explicitly said "defer indefinitely" on scan_cycle wrap. The deferral's unblock condition ("Site 2's targeted fix proves insufficient OR a third unwrapped scanner-side `get_markets` call is added") was satisfied by today's forensics. Plan agent reviewed `bot/scanner.py:scan_cycle` for thread-affinity hazards — none found:
+
+- Zero `threading.local()`, `signal.*`, or `main_thread()` checks in scanner.py + scanner_weather.py + kalshi_series.py + position_monitor.py + scanner_sports_arb.py + clv.py.
+- All state writes go through `bot/state_io.py`'s module-level `threading.Lock` (CLAUDE.md style rule).
+- `bot.universe.on_market_seen` is a buffer write, already serialized via the same module-level lock pattern.
+- The Kalshi client's `_load_config()` cache (Battle Scar #18) is double-checked-locked — executor threads sharing it is the *intended* design.
+
+**vig_stack hot path preserved.** The scan_cycle wrap moves only weather/series/sports-arb HTTP off the event loop. vig_stack inside scan_cycle reads `buffered_universe` (snapshotted at [main.py:1320](hustle-agent/bot/main.py:1320) BEFORE the wrap) and makes no new HTTP. The +$1,064 post-Apr-20 workhorse (Session 133) is structurally insulated from the wrap.
+
+**Commits (least → most blast radius, per Plan agent ordering).**
+
+| # | Site | What | Tests added | pytest |
+|---|---|---|---|---|
+| 1 | [main.py:1451](hustle-agent/bot/main.py:1451) | `scan_related_markets` wrap | primary + companion | 1831 → 1833 |
+| 2 | [main.py:1373](hustle-agent/bot/main.py:1373) | `check_clv_settlements` wrap | primary + companion | 1833 → 1835 |
+| 3 | [main.py:1409](hustle-agent/bot/main.py:1409) | `recheck_open_edges` wrap | primary + companion | 1835 → 1837 |
+| 4 | [main.py:1323](hustle-agent/bot/main.py:1323) | `scan_cycle` wrap + 2 Open Loops closed in [CLAUDE.md](hustle-agent/CLAUDE.md) (S143 Site 2 + Site 3) | primary + companion | 1837 → 1839 |
+| 5 | Doc sync — CLAUDE.md Battle Scar #13 addendum + this session ☑ block + README sync | n/a | n/a | 1839 |
+
+**Test fixture (TDD red → green per commit).** Shared helper `_stub_s148_main_loop_environment` stubs the entire `_main_loop` surface (universe, scanners, position monitor, clv, outcome tracker, bot state, lock, scheduled events, paper balance) plus a fake `asyncio.sleep` that raises `_S148ExitSignal` on first call. Each test replaces ONE target function with either a thread-capturing fake (primary: asserts `threading.current_thread().name != "MainThread"`) or a raising fake (companion: asserts the existing `try/except` catches the executor-propagated exception and the loop continues to the polling sleep exit hook). Pattern mirrors S39's `test_main_loop_runs_snapshot_universe_via_executor`.
+
+Plan agent's gotcha (correct in practice): for sites landing AFTER `scan_cycle` (tests #1-3), `scan_cycle` must SUCCEED minimally (return `{"scan_interval": 1800, "opportunities": []}`) instead of taking the S39-style boom-scan short-circuit. Helper handles this; test-specific overrides only mutate the target function.
+
+**Verification.**
+
+- `python3 -m pytest tests/ -q --tb=line` → **1839 passed** after commit #4. No flakes, no skips. Each commit's primary test red → green confirmed before wrapping.
+- All 4 wrap sites verified via `grep -n "run_in_executor" bot/main.py` — 6 sites total (5 in `_main_loop` + 1 in `_position_check_loop`; the 1 in `_crypto_scan_loop` at line 999 is dead code, CRYPTO disabled).
+- `git log --oneline -5` shows the 4 wrap commits + doc-sync; each commit message names the site + blast radius + test count delta.
+
+**Restart + 24h watch-list.**
+
+Restart via path-rooted launchctl per Battle Scar #14:
+```bash
+WRAPPER=$(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")
+launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot
+```
+
+24h CONFIRM criteria (2026-05-18 target):
+- CLOSE_WAIT count <10 sustained (was 244-peak on 2026-05-17).
+- 0 scan gaps >30 min (was 2× 4h gaps on 2026-05-17).
+- `bot_state.snapshot_outer_timeout_count_24h` stays 0 (S98 outer guard not firing).
+- `last_heartbeat` always <60s stale.
+- EDEADLK count stays 0 (S146 fix continues).
+- 429 count stays low (S146 rate limiter continues).
+
+**Auto-fire triggers (re-investigation rules).**
+
+- **If a scan gap >30 min fires post-ship:** S148 missed a site OR a new unwrapped site exists. Re-Phase-0 the audit. Compare `grep -rn "requests\." bot/` against current async-reachable call graph.
+- **If CLOSE_WAIT climbs >50 in any 1h window post-ship:** FD pressure returning; possibly an executor-side leak (e.g., `response.close()` not called even in executor). Investigate per-call HTTP cleanup, not the wrap.
+- **2026-06-17 (30d) — substrate ceiling check:** if no S148-shape wedge has recurred for 30d, declare Battle Scar #13 audit COMPLETE. Forensics directory housekeeping commit (`bot/state/forensics/2026-05-16-scan-wedge/`, `2026-05-17-edeadlk/`, `2026-05-17-secondary-leak/`) candidate.
+
+**Cross-references.**
+
+- **S39 (Apr 30)** — original `snapshot_universe` wrap; canonical pattern S148 mirrored.
+- **S98 (May 11)** — outer `wait_for` guard on `snapshot_universe`; stays as defense-in-depth atop S148.
+- **S143 (May 16)** — `scan_live_matches.get_markets` wrap; S148 finishes the audit across the remaining 5 files.
+- **S146 (May 17)** — Kalshi `_load_config` EDEADLK fix + rate limiter; addresses the AMPLIFICATION of 429 retry storms. S148 addresses the underlying BLOCKING of sync I/O in async path. Both layers needed.
+- **Battle Scar #13** — the lesson fully audited by S148.
+- **Battle Scar #9** (vig_stack TP/SL exemption) — preserved; the scan_cycle wrap touches no exit-path code.
+- **Battle Scar #14** (path-rooted PID identification) — used in the restart command.
+- **Battle Scar #18** (Kalshi `_load_config` cache) — the executor-thread-sharing pattern S146 relied on is the same pattern S148 expanded; cache reads from N executor threads are the *intended* design.
+- **Open Loops "S143 deferred — Site 2 + Site 3"** — both closed in commit #4 (scan_cycle covers Site 2 as a side effect + fulfills Site 3 directly).
+- **Open Loops "(Resolved by S148, 2026-05-17)"** — new entry added in commit #4.
+
+**Operator decisions locked via AskUserQuestion (plan phase).**
+
+1. Fix shape: **Shape A** — 4 entry-point wraps in main.py. (vs. Shape B refactor or Shape C narrow scope.)
+2. Companion tests: **YES — +4 companion tests** (1839 total vs. 1835 primary-only).
+3. Doc sync: **Same commit** — scan_cycle wrap commit also closes 2 Open Loops entries.
+
+**Tests / restart.** Pytest 1839 / 0 (8 new tests; 1831 → 1839 across 4 wrap commits). Bot restart pending — operator action via launchctl kickstart per Battle Scar #14.
+
+**README sync.** Battle Scar #13 addendum reference appended to README's "Recent Improvements" section in commit #5 (this doc-sync commit).
