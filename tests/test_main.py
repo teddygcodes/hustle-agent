@@ -704,6 +704,76 @@ def test_main_loop_continues_when_recheck_open_edges_raises_in_executor(monkeypa
     )
 
 
+def test_main_loop_runs_scan_cycle_via_executor(monkeypatch):
+    """Session 148: _main_loop must dispatch scan_cycle through
+    loop.run_in_executor so its synchronous sub-scanners (scanner_weather,
+    kalshi_series, scanner_sports_arb — each making get_markets / requests.get
+    calls without their own wraps) don't block the asyncio event loop. This
+    closes the highest-blast-radius wrap site identified by Battle Scar #13;
+    today's 2026-05-17 forensics (CLOSE_WAIT to atl58/atl59) trace back to
+    this entry point.
+
+    vig_stack inside scan_cycle reads `buffered_universe` (already snapshotted
+    in main.py:1320) and makes NO new HTTP calls; wrapping scan_cycle moves
+    weather/kalshi_series/sports_arb HTTP off the event loop without
+    perturbing the vig_stack hot path."""
+    import threading
+
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    threads_seen: list[str] = []
+
+    def fake_scan_cycle(**_kw):
+        threads_seen.append(threading.current_thread().name)
+        return {"scan_interval": 1800, "opportunities": []}
+
+    monkeypatch.setattr(botmain, "scan_cycle", fake_scan_cycle)
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    assert threads_seen, "scan_cycle was not called"
+    assert all(t != "MainThread" for t in threads_seen), (
+        f"scan_cycle ran on {threads_seen!r} — expected an executor worker "
+        f"thread. The Session 148 run_in_executor wrap may have regressed; "
+        f"this would re-introduce the CLOSE_WAIT leak (Battle Scar #13). "
+        f"This is the highest-blast-radius regression in S148 — wraps "
+        f"scanner_weather + kalshi_series + scanner_sports_arb collectively."
+    )
+
+
+def test_main_loop_continues_when_scan_cycle_raises_in_executor(monkeypatch):
+    """Session 148: if scan_cycle raises in the executor, the existing
+    try/except/finally at bot/main.py:1328 must catch it, set scan_failed=True,
+    flush the universe, and trigger the 60s recovery sleep — which then hits
+    fake_sleep and raises _S148ExitSignal. Confirms the wrap doesn't disturb
+    the scan_failed recovery path that S39 + S98 already exercise."""
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    def boom_scan_cycle(**_kw):
+        raise RuntimeError("test stub: scan_cycle blows up")
+
+    monkeypatch.setattr(botmain, "scan_cycle", boom_scan_cycle)
+
+    raised_exit = False
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        raised_exit = True
+
+    assert raised_exit, (
+        "scan_cycle RuntimeError should be caught by the try/except at "
+        "bot/main.py:1328, set scan_failed=True, run flush_universe in the "
+        "finally, then trigger asyncio.sleep(60) which raises "
+        "_S148ExitSignal. If _S148ExitSignal was NOT raised, the wrap or "
+        "the scan_failed recovery path may have regressed."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------

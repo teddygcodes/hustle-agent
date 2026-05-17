@@ -1320,10 +1320,25 @@ class GlintBot:
             buffered_universe = _universe.get_buffered_markets(scan_id)
             scan_failed = False
             try:
-                scan_result = scan_cycle(
-                    scan_id=scan_id,
-                    on_market_seen=_universe.on_market_seen,
-                    universe=buffered_universe,
+                # Session 148: wrap scan_cycle in run_in_executor (Battle
+                # Scar #13). scan_cycle is synchronous and invokes
+                # scanner_weather + kalshi_series + scanner_sports_arb, each
+                # of which makes sync Kalshi HTTP calls. Without this wrap,
+                # those calls block the event loop and starve
+                # _heartbeat_loop / _live_scan_loop / _position_check_loop
+                # — the May 2026 wedge symptom. vig_stack reads
+                # `buffered_universe` (snapshotted above) and makes no new
+                # HTTP, so the wrap moves only weather/series/sports-arb
+                # HTTP off the event loop without perturbing the +$1064
+                # vig_stack hot path. Mirrors the S39 + S98 pattern.
+                loop = asyncio.get_event_loop()
+                scan_result = await loop.run_in_executor(
+                    None,
+                    lambda: scan_cycle(
+                        scan_id=scan_id,
+                        on_market_seen=_universe.on_market_seen,
+                        universe=buffered_universe,
+                    ),
                 )
             except Exception as e:
                 logger.error(f"Scan cycle error: {e}", exc_info=True)
