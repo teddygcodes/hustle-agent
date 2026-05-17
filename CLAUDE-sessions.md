@@ -7642,3 +7642,61 @@ launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot
 **Tests / restart.** Pytest 1839 / 0 (8 new tests; 1831 → 1839 across 4 wrap commits). Bot restart pending — operator action via launchctl kickstart per Battle Scar #14.
 
 **README sync.** Battle Scar #13 addendum reference appended to README's "Recent Improvements" section in commit #5 (this doc-sync commit).
+
+---
+
+### ☑ Session 149 — SIGTERM-wedge Phase 0 / Outcome C HOLD (May 17, 2026)
+
+**Premise (pre-investigation).** Pattern observed across this week's restarts: after `launchctl kickstart -k` sends SIGTERM, the bot logs "Bot stopped" but the Python child does not exit. Lockfile stays held by the orphan; new wrapper's child loops at the lockfile check ("Bot already running") generating launchd-retry noise until SIGKILL frees the lock. Original framing was "evolution of Battle Scar #17 (S58 HTTPXRequest race)" — doc-only addendum proposed to capture the SIGKILL+cwd-verify operational protocol.
+
+**Phase 0 findings.**
+
+- **Wedge count: 4-of-7, not 6-of-7.** Verified across `bot/logs/bot.log` for the 5/16-5/17 window. Restarts and their resolutions:
+
+  | Restart | Resolution |
+  |---|---|
+  | 2026-05-16 20:47:39 | CLEAN |
+  | 2026-05-16 22:03:32 | CLEAN |
+  | 2026-05-17 01:23:29 | WEDGE — orphan PID 70800, ~18 errors over 97s, freed by SIGKILL at 01:25:13 |
+  | 2026-05-17 01:25:13 | WEDGE — orphan PID 73058, ~30 errors over 162s, freed by SIGKILL at 01:58:10 |
+  | 2026-05-17 01:58:10 | WEDGE — orphan PID 7972, ~29 errors over 159s, freed by SIGKILL at 12:40:54 |
+  | 2026-05-17 12:40:54 | WEDGE — orphan PID 40065, ~68 errors over 372s, freed by SIGKILL at 13:45:14 |
+  | 2026-05-17 13:45:14 | CLEAN |
+
+  Premise's 5/14 + 5/15 wedge events presumed in rotated logs; not verified in current `bot.log`. Wedge-error cadence consistent (~10.9-11.1/min) confirms SIGKILL was the universal resolver — error bursts terminate immediately when the next restart's "Stale lock file (PID N not running). Overwriting." line appears.
+
+- **Root cause traces to Battle Scar #18 (S146, today), not to a separate `GlintBot.stop()` cleanup bug.** Every wedged orphan's last log line before SIGTERM was the exact EDEADLK pattern that BS#18 documents: `OSError: [Errno 11] Resource deadlock avoided` from `agent/kalshi_client.py:59` (concurrent `_load_config()` opens on `kalshi.json` under Python 3.14 APFS). The SIGTERM-wedge is the EDEADLK happening inside the shutdown cleanup path — when SIGTERM arrives mid-EDEADLK-storm, the asyncio cleanup chain cannot acquire the deadlocked file descriptor and hangs indefinitely. SIGKILL bypasses the cleanup. **The "evolution of BS#17" framing was incorrect** — BS#17 (S58) is structurally a different bug (HTTPXRequest race when watcher tasks aren't cancelled before notifier teardown, fixed at [bot/main.py:397-435](bot/main.py:397)).
+
+- **Post-S146+S148 restart was clean.** The 5/17 13:45:14 restart was the first restart after both S146 (config cache + rate limiter at `agent/kalshi_client.py` + `agent/kalshi_rate_limiter.py`) and S148 (4 executor-wrap entry points in `_main_loop`) shipped. Zero "Bot already running" errors, zero EDEADLK in the new child's startup log. ONE data point — consistent with "S146 collaterally fixed the wedge class via root cause" but not proof.
+
+- **S98 outer guard confirmed irrelevant to this failure mode.** `snapshot_outer_timeout_count_24h` = 0 across all wedge windows; the 600s `asyncio.wait_for` at [bot/main.py:1290](bot/main.py:1290) bounds in-scan stalls, not shutdown-cleanup stalls.
+
+- **BS#14 cwd-safety held throughout the week.** Every wedge resolution operated on PIDs whose `lsof -p $PID | grep cwd` showed `Desktop/hustle-agent/hustle-agent` — no cross-bot collision (Bob untouched). The launchd-driven new-wrapper retry pattern (rather than operator-issued `pkill -f bot.main`) made cross-bot collision structurally impossible during these restarts.
+
+**Outcome C: HOLD on the doc addendum.** Three reasons:
+
+1. The premise's "evolution of BS#17" framing is wrong — the root cause is BS#18 (already documented).
+2. S146's fix (today) is the suspected upstream cure for the wedge class. If true, a sub-section documenting the wedge protocol is mostly historical.
+3. The one post-S146+S148 restart was clean. Insufficient to declare the wedge class extinct, but sufficient to defer the doc until we have more signal.
+
+**Watch-list (auto-fire triggers).** Operator (or future planner) should evaluate these on the next session.
+
+- **Primary signal: any SIGTERM-wedge in the next 48-72h post-S146+S148 (window: 2026-05-17 13:45 to 2026-05-20 13:45).** If ANY restart in this window requires SIGKILL where SIGTERM should have worked (signature: ≥10 "Bot already running (PID X). Exiting." errors over ≥60s after a `launchctl kickstart -k`), AND the orphan's last log line shows the EDEADLK pattern → S146's fix is incomplete; reopen as a real code investigation, not a doc session. The wedge protocol then ships as part of that session.
+
+- **Secondary signal: any SIGTERM-wedge in the next 48-72h WITHOUT the EDEADLK pattern in the orphan's last log lines** → wedge has a different root cause; the original premise's "GlintBot.stop() asyncio bug" hypothesis becomes the prime suspect. Open a real investigation session.
+
+- **Clean signal: 3+ consecutive clean restarts in the next 48-72h with no SIGKILL needed** → S146 collaterally fixed the wedge class. Ship a 3-4 line operator note appended to BS#18 ([CLAUDE.md:494](CLAUDE.md:494)) noting: "Manifested as shutdown-wedge requiring SIGKILL escalation in 4-of-7 restarts during the 5/16-5/17 EDEADLK storm; S146's `_CONFIG_CACHE` fix at the root cause appears to have eliminated the wedge symptom — verify by `grep -c 'Bot already running' bot/logs/bot.log` in any 7d window stays at 0." No new BS#17 sub-section needed.
+
+- **Insufficient signal: <3 restarts in the next 72h** → extend watch by another 72h. Bot stability is good when restarts are rare.
+
+**Cross-references.**
+
+- BS#14 (cwd-safety) — [CLAUDE.md:421](CLAUDE.md:421) — the operational guardrail that held throughout this week's restarts; no addendum needed.
+- BS#17 (S58 watcher cleanup) — [CLAUDE.md:482](CLAUDE.md:482) — structurally a different failure mode; addendum was wrong placement.
+- BS#18 (S146 EDEADLK + rate limiter) — [CLAUDE.md:494](CLAUDE.md:494) — root cause; receives the conditional 3-4 line operator note on the "clean" branch above.
+- Session 146 (May 17, 2026) — config-cache + rate-limiter fix at `agent/kalshi_client.py` + `agent/kalshi_rate_limiter.py`.
+- Session 148 (May 17, 2026) — 4 executor-wrap entry points in `_main_loop`.
+
+**Verify (live, post-session).** None — no behavior change shipped. Re-evaluate on next session per the watch-list triggers above.
+
+---
