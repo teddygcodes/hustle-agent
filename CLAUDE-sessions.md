@@ -7472,3 +7472,79 @@ Outcome A (global widening) is rejected: would destroy KXHIGHMIA-B (the workhors
 - Battle Scar #9 (vig_stack TP/SL exemption) untouched. Battle Scar #10 ("NO at 90-95¢ risk/reward") addendum from S144 cross-references — S145 confirms the B-side framing of the same scar: NO at high price + forecast-far-from-bucket geometry can lose 100% when the actual outcome lands in-bucket. The bot's $0.70 entry on 5/13 B90.5 lost the full $200 cap (~$199.50 after slippage).
 
 **Tests / restart.** `python3 -m pytest tests/ --tb=no -q` not re-run (Outcome C; no code changed). Last-known baseline post-S144 is 1817 per spec / 1770 per S136 record — the discrepancy is from in-flight branches between S136 and S144 that S145 did not investigate. No restart.
+
+---
+
+### ☑ Session 147 — Self-cleanup of TRIGGERED watch-list entries pointing at closed axes (2026-05-17, Outcome C 2-part — small code unblock + 4 retirements)
+
+**Decision: Outcome C 2-part path.** Tonight's `tools/glint_status.py` §7 showed 4 TRIGGERED watch-list items, all pointing at axes that subsequent sessions had explicitly ruled out. S91's `bot/state/watchlist_resolved.json` mechanism is reversibility-first and forbade retiring TRIGGERED entries on semantic grounds. Two-commit ship: (1) added a `manual_axis_ruled_out: true` bypass to `_apply_watchlist_resolution()`; (2) appended 4 retirement entries with precise per-entry reasons. §7 TRIGGERED count: **4 → 0**. MANUAL_CHECK_REQUIRED count unchanged at 86. Pytest 1830 → 1831. No bot restart. No trading-loop behavior change.
+
+**The 4 entries retired.**
+
+| Source | Cohort / detail | Retirement reason | Closing session(s) |
+|---|---|---|---|
+| Session 38a-2 L2052 | wta CF n=140; classifier collapses to "wta-main re-enable" branch | `axis_ruled_out` | S97 disabled wta in `MOMENTUM_DISABLED_SPORTS` at [bot/config.py:239](bot/config.py:239). Re-enable requires explicit future operator session, not automatic on cohort growth. No re-enable signal in S98–S146. |
+| Session 38a-2 L2067 | `MOMENTUM_LEADER_MIN` for no_leader/wta sub-cohort | `parent_axis_closed` | Distinct lever from L2052 (per-sport leader-min for WTA), but currently moot while parent sport is disabled (same S97 ruling). Classifier at [tools/glint_status.py:1008](tools/glint_status.py:1008) collapses to the wta-main branch because the trigger text references the Apr 30 parent trigger; the underlying lever is still distinct. |
+| Session 41 L2381 | post-Apr-23 settled live_momentum n=72; TP/SL re-investigation trigger | `axis_ruled_out` | S41 + S129 Pattern C on TP/SL (n=39 / N≥69, both flat). Adjacent axes also closed: S130 sizing Pattern C, S131 scoring Outcome B (timing artifact not TP/SL), S132 sport-scope Outcome B (N-thin). S134 cross-AI synthesis named the structural gap: live_momentum lacks a fair-value model. Substrate work, not tuning, is the unblock path. |
+| Session 102 L5461 | Firing confirmation of S41 trigger at n=66 | `firing_confirmation_closed` | Inherits S41 L2381's closure. S102 queued the re-investigation as a Session 103+ candidate; S129 returned Pattern C, closing the trigger's prompted axis. |
+
+**Phase 0 premise verification (plan-mode exploration).**
+
+- All 4 source lines verified in `CLAUDE-sessions.md` at their cited positions (no line drift). L2381+L5461 are not pure duplicates: L2381 is the trigger DEFINITION; L5461 is the FIRING CONFIRMATION when cohort hit 60.
+- All 4 underlying axes confirmed closed: S97 wta disable still in effect (no re-enable in S98–S146); S41/S129 Pattern C still standing; S130/S131/S132 adjacent rulings; S134 substrate-gap synthesis; S141 sport-classifier refinement; S142 vig_stack Pattern 1 threshold; S143 live_watcher sync; S144 vig_stack T-rung; S145 KXHIGHAUS B-bucket HOLD; S146 Kalshi rate-limiter + EDEADLK fix.
+- `bot/state/watchlist_resolved.json` existed (currently `{}`); helper functions at [tools/glint_status.py:776-870](tools/glint_status.py:776) confirmed. Match key derivation: `_resolved_key(t) = f"{trigger.session.replace(' ', '_')}_L{trigger.line}"`.
+
+**The unexpected branch — reversibility-first design forbids manual TRIGGERED retirement.**
+
+Plan-mode pre-verification erred on this point: `_apply_watchlist_resolution()` at [tools/glint_status.py:801-832](tools/glint_status.py:801) DOES filter resolved entries from §7, but the line-819 branch un-resolves any TRIGGERED + resolved combo on every scan (pops the entry, adds `_RECENT` thrash marker, re-surfaces the trigger). S91's `_maybe_auto_resolve()` only fires on `MANUAL_CHECK_REQUIRED` status. The mechanism was designed to defeat exactly this kind of intervention — naive doc-only retirement would have been undone within seconds.
+
+This was Outcome C in the approved plan ("S147 becomes a 2-part: file the §7 TRIGGERED-filter as a tiny code follow-up, then proceed with the retirement append"). Plan-flagged before silently expanding scope.
+
+**Commit 1 — `manual_axis_ruled_out` bypass.**
+
+Single-field exception added to `_apply_watchlist_resolution()` at [tools/glint_status.py:801-832](tools/glint_status.py:801):
+
+```python
+if entry is not None and entry.get("manual_axis_ruled_out") is True:
+    continue  # filtered out — stays resolved (S147 bypass)
+```
+
+Inserted BEFORE the TRIGGERED reversibility check at line 819. Reversibility-first behavior preserved for any entry without the flag (auto-resolved entries never carry it). Docstring extended with the "Manual axis-ruled-out exception (Session 147)" paragraph. Operator-authored manual retirements opt in by setting `manual_axis_ruled_out: true`.
+
+1 new test: `test_apply_watchlist_resolution_manual_axis_ruled_out_bypasses_reversibility` asserts that a TRIGGERED trigger + entry with the flag is filtered out and the entry survives un-popped (no `_RECENT` thrash marker created). Existing `test_apply_watchlist_resolution_unresolves_on_fresh_trigger` continues to pass — proves the no-flag path is unchanged.
+
+Pytest: 1830 → **1831**.
+
+**Commit 2 — 4 retirement entries + CLAUDE.md note.**
+
+[bot/state/watchlist_resolved.json](bot/state/watchlist_resolved.json) populated with 4 entries keyed `Session_38a-2_L2052`, `Session_38a-2_L2067`, `Session_41_L2381`, `Session_102_L5461`. Each carries: `resolved_at` (2026-05-17T07:00:00+00:00), `reason` (precise per-entry: `axis_ruled_out` / `parent_axis_closed` / `firing_confirmation_closed`), `resolved_by: "S147"`, `rationale` (citing closing sessions), `trigger_text_snippet` (informational), `unresolved_count_24h: 0`, `manual_axis_ruled_out: true`. File force-added to git per the [bot/state/active_observations.json](bot/state/active_observations.json) precedent (state/ is gitignored by default but operator-curated state files are tracked).
+
+[CLAUDE.md](CLAUDE.md) "When Tyler Asks 'How is it looking?'" §6 extended with the 5th retirement criterion: *axis explicitly ruled out by subsequent session*. Mirrors S91's 30-day-stale criterion on semantic grounds instead of temporal. Documents the required `manual_axis_ruled_out: true` flag and the precise sub-case reasons.
+
+**Verification (post-ship).**
+
+- `python3 tools/glint_status.py | grep "TRIGGERED:"` → 0 TRIGGERED entries. WARN line "X watch-list triggers are currently triggered" removed entirely.
+- `python3 tools/glint_status.py` MANUAL count: 86, unchanged.
+- `python3 -m pytest -q` → 1831 passed (one transient flake on `test_consolidator_completes_in_under_2s`, a pre-existing wall-clock 2.0s bound on `build_snapshot` that runs at ~2.03s in isolation — load-induced edge flap; deterministic re-runs pass).
+
+**README + CLAUDE.md sync.** README's "Recent Improvements" section appended with a May 17 paragraph documenting the watch-list dashboard-hygiene ship. CLAUDE.md §6 carries the operator-facing protocol. CLAUDE-sessions.md (this entry) is the canonical session log.
+
+**Cross-references.**
+
+- S91 — original `watchlist_resolved.json` mechanism + 30-day-stale criterion. S147 adds the parallel semantic criterion via a single-field bypass that doesn't alter S91's existing behavior.
+- S140 — discovery-heuristic noise cleanup (`disabled_sport_settlement` pre-disable attrition). Same shape as S147, different layer (discovery vs watch-list).
+- S97 — wta disable date (2026-05-11). Underpins the L2052/L2067 retirements. Verified at [bot/config.py:239](bot/config.py:239).
+- S41 / S129 — TP/SL Pattern C rulings. Underpin the L2381/L5461 retirements.
+- S130 / S131 / S132 — adjacent ruled-out axes on the same live_momentum cohort. Confirm the closure is comprehensive, not single-axis.
+- S134 — cross-AI synthesis confirming live_momentum needs a fair-value substrate, not parameter tuning. The closure-of-closures argument.
+- S135 kill rule — independent live_momentum termination criterion firing 2026-06-15. S147 retirement does NOT alter the kill rule; both can fire (kill rule on under-performance; retirement on closed-axis).
+
+**Watch-list re-open conditions (regardless of outcome).**
+
+- **L2052 + L2067:** if a future session re-enables wta (or atp / atp_challenger / nba_game / wta_challenger — all currently in `MOMENTUM_DISABLED_SPORTS`), revisit these retirements. The lever becomes potentially actionable again; either remove the resolved entries from `watchlist_resolved.json` or add new entries with `resolution: "re_opened"`.
+- **L2381 + L5461:** if S134-cited substrate ships (fair-value model for live_momentum, dip classifier extension, or equivalent) AND new evidence on TP/SL emerges (e.g. a non-flat SL axis in a re-run sweep), revisit. The retirement is contingent on the substrate gap being the binding constraint.
+- **General:** if §7 TRIGGERED count rises above 2 in any future dashboard read, run the S147 protocol against each new TRIGGERED entry — verify each is genuinely actionable; retire any pointing at axes closed by subsequent sessions.
+
+**Tests / restart.** Pytest 1831 / 0 (1 new test added; 1830 → 1831 baseline). No bot restart (operator-dashboard cosmetic-correctness change only).
+
+**No Battle Scar codified.** Cosmetic correctness on §7; the reversibility-first design at [tools/glint_status.py:819](tools/glint_status.py:819) is preserved and remains the correct default for auto-resolved entries. The `manual_axis_ruled_out` bypass is the explicit operator-opt-in escape.
