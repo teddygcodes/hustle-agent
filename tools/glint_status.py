@@ -810,12 +810,20 @@ def _apply_watchlist_resolution(
     `unresolved_count_24h` counter on the entry; if that counter exceeds
     THRASH_THRESHOLD_24H, future auto-resolution is suppressed for that key
     so the entry stays operator-visible.
+
+    Manual axis-ruled-out exception (Session 147): if an entry carries
+    ``manual_axis_ruled_out: True``, reversibility is bypassed — the operator
+    has investigated the underlying axis and determined it closed regardless
+    of current fire state, so cohort growth past threshold should not re-open
+    a closed semantic question.
     """
     updated = dict(resolved)
     filtered: list[dict] = []
     for t in triggers:
         key = _resolved_key(t)
         entry = updated.get(key)
+        if entry is not None and entry.get("manual_axis_ruled_out") is True:
+            continue
         if t.get("status") == "TRIGGERED" and entry is not None:
             count = int(entry.get("unresolved_count_24h", 0) or 0) + 1
             updated.pop(key, None)

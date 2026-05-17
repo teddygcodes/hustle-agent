@@ -704,6 +704,31 @@ def test_apply_watchlist_resolution_thrash_protection():
     assert len(filtered) == 1  # keep visible despite resolved entry — thrash protection
 
 
+def test_apply_watchlist_resolution_manual_axis_ruled_out_bypasses_reversibility():
+    """S147: ``manual_axis_ruled_out: True`` keeps the entry resolved even when
+    the trigger is currently firing. Cohort growth past threshold does not
+    re-open a semantic question the operator has already closed."""
+    now = datetime(2026, 5, 17, 12, tzinfo=timezone.utc)
+    triggers = [
+        {"session": "Session 41", "line": 2381, "text": "x", "status": "TRIGGERED"},
+    ]
+    resolved = {
+        "Session_41_L2381": {
+            "resolved_at": (now - timedelta(hours=1)).isoformat(),
+            "reason": "manual_axis_ruled_out",
+            "resolved_by": "S147",
+            "rationale": "TP/SL Pattern C in S41+S129; substrate gap per S134",
+            "trigger_text_snippet": "post-Apr-23 settled live_momentum n>=60",
+            "unresolved_count_24h": 0,
+            "manual_axis_ruled_out": True,
+        }
+    }
+    filtered, updated = glint._apply_watchlist_resolution(triggers, resolved, now)
+    assert filtered == []  # bypassed — trigger does NOT surface
+    assert "Session_41_L2381" in updated  # entry preserved (not popped)
+    assert "Session_41_L2381_RECENT" not in updated  # no thrash marker created
+
+
 def test_maybe_auto_resolve_resolves_old_entries(tmp_path: Path):
     now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
     claude_text = (
