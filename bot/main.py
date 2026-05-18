@@ -90,6 +90,21 @@ _VIG_STACK_SIZING_TYPES = ("vig_stack_no", "vig_stack_series", "vig_stack_future
 # background — acceptable for rare 1-2x/day timeouts.
 _SNAPSHOT_OUTER_TIMEOUT_SEC = 600
 
+# Session 150 (2026-05-17): outer wedge-detection guard for the 4 S148-wrapped
+# functions in _main_loop (scan_cycle, check_clv_settlements,
+# recheck_open_edges, scan_related_markets). S148's run_in_executor wrap
+# moved sync I/O off the event loop but left each await unbounded — a wedged
+# executor thread silently halted loop progress (2026-05-17: scan_cycle hung
+# 5h+ in the WEATHER branch). 900s = one IDLE scan cycle (per SCAN_INTERVAL
+# IDLE post-S109); tight enough to abort within one cycle of the next
+# expected scan, loose enough to clear high-Kalshi-load scans. On timeout:
+# log, increment per-function *_outer_timeout_count_24h counter, fall through
+# to the existing recovery / continue path. Executor threads leak on timeout
+# (Python concurrent.futures can't cancel running threads); acceptable for
+# transient wedges, watch-list auto-fires if a single counter hits >= 3/day
+# sustained.
+_EXECUTOR_OUTER_TIMEOUT_SEC = 900
+
 
 # ---------------------------------------------------------------------------
 # Persistent pending queue helpers
@@ -1331,15 +1346,46 @@ class GlintBot:
                 # HTTP, so the wrap moves only weather/series/sports-arb
                 # HTTP off the event loop without perturbing the +$1064
                 # vig_stack hot path. Mirrors the S39 + S98 pattern.
+                #
+                # Session 150: add outer asyncio.wait_for. S148's wrap left
+                # the await unbounded; the 2026-05-17 wedge ran 5h+ in the
+                # WEATHER branch. 900s outer guard aborts within one IDLE
+                # scan cycle. On TimeoutError: increment counter, set
+                # scan_failed=True, fall through to the existing finally +
+                # 60s recovery path.
                 loop = asyncio.get_event_loop()
-                scan_result = await loop.run_in_executor(
-                    None,
-                    lambda: scan_cycle(
-                        scan_id=scan_id,
-                        on_market_seen=_universe.on_market_seen,
-                        universe=buffered_universe,
+                scan_result = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: scan_cycle(
+                            scan_id=scan_id,
+                            on_market_seen=_universe.on_market_seen,
+                            universe=buffered_universe,
+                        ),
                     ),
+                    timeout=_EXECUTOR_OUTER_TIMEOUT_SEC,
                 )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "scan_cycle wedged > %ds (scan_id=%s) — aborting; will "
+                    "retry next loop iteration. Executor thread leaks (no "
+                    "cancellation); acceptable for transient wedges. If "
+                    "scan_cycle_outer_timeout_count_24h >= 3/day, "
+                    "investigate scan_cycle internals (WEATHER branch most "
+                    "likely per S148 forensics).",
+                    _EXECUTOR_OUTER_TIMEOUT_SEC, scan_id,
+                )
+                try:
+                    state = _load_bot_state()
+                    state["scan_cycle_outer_timeout_count_24h"] = (
+                        state.get("scan_cycle_outer_timeout_count_24h", 0) + 1
+                    )
+                    _save_bot_state(state)
+                except Exception:
+                    logger.exception(
+                        "scan_cycle_outer_timeout counter update failed"
+                    )
+                scan_failed = True
             except Exception as e:
                 logger.error(f"Scan cycle error: {e}", exc_info=True)
                 scan_failed = True
@@ -1388,8 +1434,41 @@ class GlintBot:
                 # Session 148: wrap the sync get_market loop inside
                 # check_clv_settlements (clv.py:504) in run_in_executor
                 # (Battle Scar #13). Mirrors the S39 pattern.
+                #
+                # Session 150: add outer asyncio.wait_for. On TimeoutError,
+                # increment counter and default newly_settled to [] so the
+                # for-loop below iterates safely; the outer try/except still
+                # catches other failures.
                 loop = asyncio.get_event_loop()
-                newly_settled = await loop.run_in_executor(None, check_clv_settlements)
+                try:
+                    newly_settled = await asyncio.wait_for(
+                        loop.run_in_executor(None, check_clv_settlements),
+                        timeout=_EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "check_clv_settlements wedged > %ds — aborting; "
+                        "will retry next loop iteration. If "
+                        "check_clv_settlements_outer_timeout_count_24h >= "
+                        "3/day, investigate CLV settlement query path "
+                        "(likely Kalshi resolution endpoint).",
+                        _EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                    try:
+                        state = _load_bot_state()
+                        state["check_clv_settlements_outer_timeout_count_24h"] = (
+                            state.get(
+                                "check_clv_settlements_outer_timeout_count_24h",
+                                0,
+                            ) + 1
+                        )
+                        _save_bot_state(state)
+                    except Exception:
+                        logger.exception(
+                            "check_clv_settlements_outer_timeout counter "
+                            "update failed"
+                        )
+                    newly_settled = []
                 for clv_entry in newly_settled:
                     clv_cents = clv_entry.get("clv_cents", 0)
                     ticker = clv_entry["ticker"]
@@ -1428,8 +1507,42 @@ class GlintBot:
                 # Session 148: wrap the sync get_market loop inside
                 # recheck_open_edges (position_monitor.py:41,158,233) in
                 # run_in_executor (Battle Scar #13). Mirrors the S39 pattern.
+                #
+                # Session 150: add outer asyncio.wait_for. On TimeoutError,
+                # increment counter and default edge_alerts to [] so the
+                # downstream loop iterates safely; scan_related_markets
+                # below still runs in the same try block.
                 loop = asyncio.get_event_loop()
-                edge_alerts = await loop.run_in_executor(None, recheck_open_edges)
+                try:
+                    edge_alerts = await asyncio.wait_for(
+                        loop.run_in_executor(None, recheck_open_edges),
+                        timeout=_EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "recheck_open_edges wedged > %ds — aborting; will "
+                        "retry next loop iteration. If "
+                        "recheck_open_edges_outer_timeout_count_24h >= "
+                        "3/day, investigate open-edge refetch path "
+                        "(likely Kalshi market endpoint or open-positions "
+                        "DB query).",
+                        _EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                    try:
+                        state = _load_bot_state()
+                        state["recheck_open_edges_outer_timeout_count_24h"] = (
+                            state.get(
+                                "recheck_open_edges_outer_timeout_count_24h",
+                                0,
+                            ) + 1
+                        )
+                        _save_bot_state(state)
+                    except Exception:
+                        logger.exception(
+                            "recheck_open_edges_outer_timeout counter "
+                            "update failed"
+                        )
+                    edge_alerts = []
                 for ea in edge_alerts:
                     alert_type = ea.get("type", "")
                     ticker = ea.get("ticker", "?")
@@ -1473,8 +1586,40 @@ class GlintBot:
                 # Related market scan — find sibling props on same events.
                 # Session 148: wrap the sync get_markets-per-event call in
                 # run_in_executor (Battle Scar #13). Mirrors the S39 pattern.
+                #
+                # Session 150: add outer asyncio.wait_for. On TimeoutError,
+                # increment counter and default related to [] so the
+                # downstream loop iterates safely.
                 loop = asyncio.get_event_loop()
-                related = await loop.run_in_executor(None, scan_related_markets)
+                try:
+                    related = await asyncio.wait_for(
+                        loop.run_in_executor(None, scan_related_markets),
+                        timeout=_EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "scan_related_markets wedged > %ds — aborting; "
+                        "will retry next loop iteration. If "
+                        "scan_related_markets_outer_timeout_count_24h >= "
+                        "3/day, investigate related-market search path "
+                        "(likely Kalshi search endpoint).",
+                        _EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                    try:
+                        state = _load_bot_state()
+                        state["scan_related_markets_outer_timeout_count_24h"] = (
+                            state.get(
+                                "scan_related_markets_outer_timeout_count_24h",
+                                0,
+                            ) + 1
+                        )
+                        _save_bot_state(state)
+                    except Exception:
+                        logger.exception(
+                            "scan_related_markets_outer_timeout counter "
+                            "update failed"
+                        )
+                    related = []
                 for rel in related:
                     _add_to_pending(rel)
                 if related:

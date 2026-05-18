@@ -775,6 +775,162 @@ def test_main_loop_continues_when_scan_cycle_raises_in_executor(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Session 150 — outer wait_for guards at the 4 S148 boundaries
+# ---------------------------------------------------------------------------
+#
+# S148 wrapped scan_cycle / check_clv_settlements / recheck_open_edges /
+# scan_related_markets in `loop.run_in_executor` to move sync I/O off the
+# event loop (Battle Scar #13). That fixed the event-loop-blocking symptom
+# but left each await unbounded — a wedged executor thread silently halted
+# _main_loop progress (2026-05-17 incident: 5h+ scan_cycle wedge in the
+# WEATHER branch). S150 adds the outer asyncio.wait_for guard at all 4
+# boundaries with per-function *_outer_timeout_count_24h counters,
+# mirroring S98's snapshot_universe pattern.
+
+
+def _run_s150_wedge_test(
+    monkeypatch,
+    target_attr: str,
+    counter_key: str,
+    wedge_kwargs: bool = False,
+) -> list[dict]:
+    """Shared S150 harness. Wedges `target_attr` via _time.sleep(0.5), shrinks
+    _EXECUTOR_OUTER_TIMEOUT_SEC to 0.1 (raising=False so the test still loads
+    pre-impl during TDD), runs one _main_loop iteration to _S148ExitSignal,
+    and returns the captured state writes for the caller to assert against.
+
+    `wedge_kwargs=True` is used only for scan_cycle (called as a kwarg-only
+    lambda); the other 3 targets are no-arg callables.
+    """
+    import time as _time
+
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    saved_states: list[dict] = []
+    monkeypatch.setattr(
+        botmain, "_save_bot_state", lambda state: saved_states.append(dict(state))
+    )
+
+    monkeypatch.setattr(
+        botmain, "_EXECUTOR_OUTER_TIMEOUT_SEC", 0.1, raising=False
+    )
+
+    if wedge_kwargs:
+        def slow_target(**_kw):
+            _time.sleep(0.5)
+            return {"scan_interval": 1800, "opportunities": []}
+    else:
+        def slow_target():
+            _time.sleep(0.5)
+            return []
+
+    monkeypatch.setattr(botmain, target_attr, slow_target)
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    return saved_states
+
+
+def test_main_loop_aborts_wedged_scan_cycle_after_outer_timeout(monkeypatch):
+    """Session 150: scan_cycle wedged > _EXECUTOR_OUTER_TIMEOUT_SEC must abort
+    via asyncio.wait_for, increment scan_cycle_outer_timeout_count_24h, set
+    scan_failed=True, run flush_universe in the finally, and trigger the 60s
+    recovery sleep. Without this guard the executor thread can wedge for
+    hours (5h+ observed 2026-05-17 in the WEATHER branch).
+
+    Mirrors test_main_loop_aborts_long_snapshot_after_outer_timeout at the
+    next S148 boundary.
+    """
+    saved_states = _run_s150_wedge_test(
+        monkeypatch,
+        target_attr="scan_cycle",
+        counter_key="scan_cycle_outer_timeout_count_24h",
+        wedge_kwargs=True,
+    )
+    counter_values = [
+        s.get("scan_cycle_outer_timeout_count_24h") for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "scan_cycle_outer_timeout_count_24h was not incremented after the "
+        f"outer asyncio.wait_for fired; saved counter values: {counter_values}"
+    )
+
+
+def test_main_loop_aborts_wedged_check_clv_settlements_after_outer_timeout(monkeypatch):
+    """Session 150: check_clv_settlements wedged > _EXECUTOR_OUTER_TIMEOUT_SEC
+    must abort via asyncio.wait_for and increment
+    check_clv_settlements_outer_timeout_count_24h. The CLV settlement path
+    hits Kalshi's resolution endpoint and can wedge under 429 storm + slow
+    DB writes."""
+    saved_states = _run_s150_wedge_test(
+        monkeypatch,
+        target_attr="check_clv_settlements",
+        counter_key="check_clv_settlements_outer_timeout_count_24h",
+    )
+    counter_values = [
+        s.get("check_clv_settlements_outer_timeout_count_24h")
+        for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "check_clv_settlements_outer_timeout_count_24h was not incremented "
+        f"after the outer asyncio.wait_for fired; saved counter values: "
+        f"{counter_values}"
+    )
+
+
+def test_main_loop_aborts_wedged_recheck_open_edges_after_outer_timeout(monkeypatch):
+    """Session 150: recheck_open_edges wedged > _EXECUTOR_OUTER_TIMEOUT_SEC
+    must abort via asyncio.wait_for and increment
+    recheck_open_edges_outer_timeout_count_24h. recheck_open_edges iterates
+    open positions making per-ticker Kalshi calls (position_monitor.py:41,
+    158, 233) — under Kalshi flake it can stack into a long wedge."""
+    saved_states = _run_s150_wedge_test(
+        monkeypatch,
+        target_attr="recheck_open_edges",
+        counter_key="recheck_open_edges_outer_timeout_count_24h",
+    )
+    counter_values = [
+        s.get("recheck_open_edges_outer_timeout_count_24h")
+        for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "recheck_open_edges_outer_timeout_count_24h was not incremented "
+        f"after the outer asyncio.wait_for fired; saved counter values: "
+        f"{counter_values}"
+    )
+
+
+def test_main_loop_aborts_wedged_scan_related_markets_after_outer_timeout(monkeypatch):
+    """Session 150: scan_related_markets wedged > _EXECUTOR_OUTER_TIMEOUT_SEC
+    must abort via asyncio.wait_for and increment
+    scan_related_markets_outer_timeout_count_24h. scan_related_markets makes
+    per-event get_markets calls and is the highest-fanout of the 4 S148
+    boundaries when events have many siblings."""
+    saved_states = _run_s150_wedge_test(
+        monkeypatch,
+        target_attr="scan_related_markets",
+        counter_key="scan_related_markets_outer_timeout_count_24h",
+    )
+    counter_values = [
+        s.get("scan_related_markets_outer_timeout_count_24h")
+        for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "scan_related_markets_outer_timeout_count_24h was not incremented "
+        f"after the outer asyncio.wait_for fired; saved counter values: "
+        f"{counter_values}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Session 36 — vig_stack auto-exit exemption
 # ---------------------------------------------------------------------------
 
