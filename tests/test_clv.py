@@ -942,3 +942,145 @@ class TestLiveMomentumCounterfactual:
             f"expected 1 row (legacy second-precision blocks new day-precision), "
             f"got {len(rows)}: {rows}"
         )
+
+
+class TestSession151BatchCap:
+    """Session 151 (2026-05-18): check_clv_settlements caps per-call work
+    at _CHECK_CLV_BATCH_SIZE=200 records to bound runtime inside the 900s
+    S150 outer guard. Records past the cap roll over to the next call.
+    Oldest recorded_at processed first — backlog drains FIFO.
+
+    Phase 0 measured 3,528 open CF records in production (2026-05-18) —
+    sequential traversal under the S146 rate limiter (1 call per ~3s)
+    would take ~176 minutes, triggering the 900s guard every iteration
+    and leaking executor threads. The batch cap eliminates that wedge
+    class while preserving full record coverage across iterations.
+    """
+
+    def _make_open_cf(self, idx: int, recorded_at: str, ticker: str | None = None) -> dict:
+        """Build a counterfactual_open record. opp_type kept in active set
+        so clv._load()'s active-strategy filter doesn't drop it."""
+        return {
+            "trade_id": f"CF-S151-{idx:04d}",
+            "ticker": ticker or f"KXFAKE-{idx:04d}",
+            "opp_type": "vig_stack_series",
+            "side": "no",
+            "entry_price_cents": 92,
+            "fair_value_cents": 95.5,
+            "edge_at_trade": 0.08,
+            "contracts": 0,
+            "paper": False,
+            "status": "counterfactual_open",
+            "skipped_by_gate": "edge_below_threshold",
+            "recorded_at": recorded_at,
+            "closing_yes_price": None,
+            "clv_cents": None,
+        }
+
+    def _stamps(self, n: int) -> list[str]:
+        """Generate n strictly-increasing ISO 8601 timestamps."""
+        from datetime import datetime, timezone, timedelta
+        base = datetime(2026, 4, 1, tzinfo=timezone.utc)
+        return [
+            (base + timedelta(minutes=i)).isoformat()
+            for i in range(n)
+        ]
+
+    def test_caps_to_batch_size_when_backlog_exceeds(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        """N=250 open records → exactly 200 queried this call, oldest first."""
+        stamps = self._stamps(250)
+        records = [
+            self._make_open_cf(i, stamps[i])
+            for i in range(250)
+        ]
+        tmp_clv_file.write_text(json.dumps(records))
+
+        queried: list[str] = []
+
+        def mock_get_market(ticker):
+            queried.append(ticker)
+            # Return still-open so records stay open; isolate the cap behavior
+            # from the settlement-write behavior (tested elsewhere).
+            return {"market": {"status": "open", "result": "", "yes_bid": 50, "yes_ask": 55}}
+
+        with patch("agent.kalshi_client.get_market", side_effect=mock_get_market):
+            clv.check_clv_settlements()
+
+        assert len(queried) == clv._CHECK_CLV_BATCH_SIZE, (
+            f"expected exactly {clv._CHECK_CLV_BATCH_SIZE} queries, got {len(queried)}"
+        )
+        # Oldest-first FIFO: the first 200 by recorded_at must have been queried.
+        expected_oldest = [f"KXFAKE-{i:04d}" for i in range(clv._CHECK_CLV_BATCH_SIZE)]
+        assert queried == expected_oldest
+
+    def test_does_not_cap_when_backlog_under_limit(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        """N=50 open records → all 50 queried in one call (no cap fires)."""
+        stamps = self._stamps(50)
+        records = [
+            self._make_open_cf(i, stamps[i])
+            for i in range(50)
+        ]
+        tmp_clv_file.write_text(json.dumps(records))
+
+        queried: list[str] = []
+
+        def mock_get_market(ticker):
+            queried.append(ticker)
+            return {"market": {"status": "open", "result": "", "yes_bid": 50, "yes_ask": 55}}
+
+        with patch("agent.kalshi_client.get_market", side_effect=mock_get_market):
+            clv.check_clv_settlements()
+
+        assert len(queried) == 50
+
+    def test_already_settled_records_excluded_before_cap(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        """100 settled + 250 open → 200 open queried (cap fires on the OPEN
+        subset, not on the total). The filter must run before the slice or
+        a backlog full of settled records would starve the open subset."""
+        stamps = self._stamps(350)
+        records: list[dict] = []
+        # 100 already-settled records (older recorded_at — would sort first if
+        # the filter ran AFTER the sort+slice, starving open records).
+        for i in range(100):
+            r = self._make_open_cf(i, stamps[i], ticker=f"KXMIXS-{i:04d}")
+            r["status"] = "counterfactual_settled"
+            r["closing_yes_price"] = 100.0
+            r["clv_cents"] = 8.0
+            r["clv_relative"] = 0.087
+            r["settled_at"] = stamps[i]
+            r["market_result"] = "yes"
+            records.append(r)
+        # 250 still-open records.
+        for i in range(250):
+            records.append(
+                self._make_open_cf(
+                    100 + i, stamps[100 + i], ticker=f"KXMIXO-{i:04d}"
+                )
+            )
+        tmp_clv_file.write_text(json.dumps(records))
+
+        queried: list[str] = []
+
+        def mock_get_market(ticker):
+            queried.append(ticker)
+            return {"market": {"status": "open", "result": "", "yes_bid": 50, "yes_ask": 55}}
+
+        with patch("agent.kalshi_client.get_market", side_effect=mock_get_market):
+            clv.check_clv_settlements()
+
+        # Exactly 200 open queried — not 200 mixed, not 350 total.
+        assert len(queried) == clv._CHECK_CLV_BATCH_SIZE
+        # Every queried ticker is from the OPEN set (KXMIXO-...), never settled.
+        assert all(t.startswith("KXMIXO-") for t in queried), (
+            f"settled records leaked into batch: "
+            f"{[t for t in queried if not t.startswith('KXMIXO-')][:5]}"
+        )
+        # Specifically the 200 oldest open ones.
+        expected = [f"KXMIXO-{i:04d}" for i in range(clv._CHECK_CLV_BATCH_SIZE)]
+        assert queried == expected

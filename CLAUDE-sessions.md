@@ -7700,3 +7700,67 @@ launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot
 **Verify (live, post-session).** None — no behavior change shipped. Re-evaluate on next session per the watch-list triggers above.
 
 ---
+
+### ☑ Session 151 — check_clv_settlements batch cap (May 18, 2026)
+
+**Premise (pre-investigation).** Post-S150 restart (5/17 21:34 ET) produced only 3-4 SCAN CYCLE log lines in 23h vs the ~92/day expected at IDLE 15-min cadence (97% degraded). `check_clv_settlements_outer_timeout_count_24h = 2` (S150 guard firing as designed); the other 3 S150 counters absent. CLOSE_WAIT climbing to 60 (S148-era leak indicator). S150's error message explicitly named the lead: "investigate CLV settlement query path (likely Kalshi resolution endpoint)." S151 was that investigation.
+
+**Phase 0 findings — Outcome (ε), two causes compound.**
+
+1. **(α — fixable in code) `check_clv_settlements` is structurally unbounded.** [bot/clv.py:471](hustle-agent/bot/clv.py:471) iterates EVERY `open` / `counterfactual_open` record in `clv.json` and calls `get_market(ticker)` sequentially. Today's open backlog measured **3,528 records** (1,870 `open` + 1,658 `counterfactual_open`). Under the S146 Kalshi rate limiter (`KALSHI_MAX_CONCURRENT=2` + 20 tokens / 60s ≈ 1 call per ~3s sustained), sequential traversal worst case = 3,528 × 3s = **10,584s = 176 minutes** — vastly exceeding the 900s S150 guard. Each timeout leaks an executor thread (per S150 docstring; `concurrent.futures` can't cancel running threads); leaked threads continue consuming rate-limit slots, slowing every subsequent Kalshi call. The wedge is structural in the function shape, not in any specific Kalshi endpoint slowness.
+
+2. **(operational, NOT a code bug) macOS laptop sleep dominates effective scan time.** Bot has been continuously alive 23:01:37 (PID 52047, fresh `bot.lock` mtime), but log line density today is heavily clumped: 149 lines in 00:xx ET, then 24 total across 01:xx-09:xx, then 23 total across 10:xx-19:xx, then 130 in 20:xx-23:xx. A 5h 36min gap between log entries (07:13 → 12:49) is impossible if the bot's `_live_scan_loop` (60s tick) is running — that signature plus `httpcore.ReadError` at 01:38:18 and repeated `Connection reset by peer` at 16:41/16:58 matches macOS deep sleep with sporadic DarkWake fragments. The bot's wall-clock wakeup loop at [bot/main.py:1722](hustle-agent/bot/main.py:1722) is correct — it just can't run when the laptop is asleep. **Brief math: 23h / 30min per (α-wedged) iteration ≈ 46 expected iterations under (α) alone, but observed = 3-4.** The missing 42 iterations are accounted for by ~18h of laptop sleep (roughly 75% of 23h). The brief's "97% degraded" framing conflated two distinct losses.
+
+**Decision and ship.** Outcome B per brief — multiple causes; ship smallest impactful fix. Code fix addresses (α); (operational) surfaced to operator as honest-read note (not code work).
+
+**What shipped.**
+
+- [bot/clv.py:30-45](hustle-agent/bot/clv.py:30) — new module-level constant `_CHECK_CLV_BATCH_SIZE = 200`. Rationale captured in the inline comment: at the S146 1-call-per-3s sustained throughput, 200 × ~3s = ~600s, safely inside the 900s S150 guard with margin.
+- [bot/clv.py:481-510](hustle-agent/bot/clv.py:481) — filter candidates (`status in {open, counterfactual_open}`) BEFORE the loop, sort oldest-first by `recorded_at`, slice `[:_CHECK_CLV_BATCH_SIZE]`. Records past the cap roll over to the next call; FIFO drains the backlog naturally. Single `logger.info` emits when the cap fires so operators see backlog size in the log.
+- [tests/test_clv.py::TestSession151BatchCap](tests/test_clv.py) — 3 regression tests: (a) cap fires exactly at 200 when N=250 backlog; (b) no cap when N=50 (under limit); (c) already-settled records excluded BEFORE the cap so they don't starve open ones. pytest 1843 → **1846 pass** (47.10s, no flakes).
+
+**What did NOT change.**
+
+- `_EXECUTOR_OUTER_TIMEOUT_SEC = 900` at [bot/main.py:106](bot/main.py:106) preserved. The brief's example Outcome A ("tighten to 300s") was rejected during Phase 0 — tightening the timeout fires the guard sooner without addressing the structural cause and leaks more executor threads per iteration.
+- The 4 S148-wrap entry points untouched. S150's outer guards untouched.
+- BS#5, #9, #13 untouched. No schema change. Forward-only state compliant (uses existing `recorded_at` ordering).
+
+**Honest-read for operator.**
+
+Even with this ship, scan cadence will remain at 3-4/day as long as the laptop sleeps. The S151 fix bounds per-iteration work; it does NOT keep the laptop awake. Cloud deploy or `caffeinate -dimsu` on AC power is the operational lever to actually hit ~92/day cadence. The brief's auto-fire trigger "if scan cadence drops to 0 SCAN CYCLEs in any 4h window post-fix" needs context: scan cadence is dominated by macOS power state, not by the code fix. The S151 success metric is **`check_clv_settlements_outer_timeout_count_24h ≤ 1/day`**, not raw scan throughput. Decoupling these two metrics is itself part of the honest-read finding.
+
+**New finding filed (Phase 0.4) — 5 additional unwrapped sync I/O sites in `async _main_loop`.** The S148 audit closed 4 wrap points (`scan_cycle`, `check_clv_settlements`, `recheck_open_edges`, `scan_related_markets`) but missed 5 more sync calls in the same coroutine — all BS#13 violations:
+
+- `check_fills()` at [main.py:1488](bot/main.py:1488) → [executor.py:1257](bot/executor.py:1257)
+- `update_positions(called_from="_main_loop")` at [main.py:1498](bot/main.py:1498) → [tracker.py:85](bot/tracker.py:85)
+- `check_trailing_stops()` at [main.py:1634](bot/main.py:1634) → [executor.py:1505](bot/executor.py:1505)
+- `check_mm_fills()` at [main.py:1648](bot/main.py:1648) → [market_maker.py:314](bot/market_maker.py:314)
+- `scan_market_making_opportunities(...)` at [main.py:1672](bot/main.py:1672) → [market_maker.py:66](bot/market_maker.py:66)
+
+None are dominant compared to the check_clv 176-min blow-up, but they're real wraps the S148 audit should have caught. Filed in Open Loops as an S148-followup, NOT shipped in S151 ("1 logical fix per commit" discipline). Per BS#13: "the existing 6 wraps in `bot/main.py` (5 in `_main_loop`, 1 in `_position_check_loop`) plus 1 in `bot/live_watcher.py` are the canonical examples to mirror" — so 5 additional wraps would bring `_main_loop` to 10 total.
+
+**Watch-list (auto-fire triggers).**
+
+- **CONFIRM at 2026-05-19 ~22:00 ET (24h post-ship):** `check_clv_settlements_outer_timeout_count_24h ≤ 1/day` AND any "check_clv_settlements: batch of N (of M open records)" log lines appear (proves the cap activates AND the backlog is draining). If `_outer_timeout_count_24h` stays ≥2 the cap isn't enough; tighten to N=100 or investigate per-call cost.
+- **Auto-fire backlog drain check at 2026-06-01 (14d post-ship):** measure open CF count via the Phase 0 oneliner. Pre-S151 baseline: 3,528. Expected: <500 at full uptime regime, <2,000 at current laptop-sleep regime. If backlog hasn't dropped meaningfully despite zero timeouts, FIFO ordering is preserving structurally-unresolvable records — escalate to close_ts-based filter (deferred Outcome D candidate).
+- **Auto-fire CADENCE check at 2026-05-19 ~22:00 ET:** if `scans_today ≥ 30` on a day the laptop is on AC power and lid open (caffeinate active), the S151 fix took. If `scans_today < 5` regardless of power state, deeper investigation needed — likely one of the 5 newly-found unwrapped sites is the dominant new bottleneck post-S151.
+- **Decoupling note:** if scan cadence stays at 3-4/day but `_outer_timeout_count_24h = 0` AND CLOSE_WAIT drops, the S151 fix took; cadence collapse is laptop-sleep-only. Operator should consider cloud deploy or caffeinate as the operational lever.
+
+**Cross-references.**
+
+- S148 + S150 + S151 — the four-day arc on Battle Scar #13: S148 wrapped, S150 bounded, S151 capped. The wedge class should be fully closed at the code level; remaining risks are operational (macOS sleep) or in the 5 newly-found unwrapped sites.
+- S146 — Kalshi rate limiter. The 1-call-per-3s sustained throughput is the actual physics behind the 176-min worst case. Rate limiter math is fundamental to the S151 batch size choice.
+- BS#13 — Battle Scar entry receives no new addendum in S151. The structural arc (wrap → bound → cap) is the cleanest current shape; further addenda would add noise.
+- Battle Scar #18 (S146 EDEADLK + rate limiter) — sibling lineage; both are about bounding per-Kalshi-call cost.
+- S86 — emission-time CF dedup. The 3,528 open backlog includes pre-S86 second-precision rows; the 2026-06-08 natural-convergence date (S87 watch-list trigger) was unaffected by S151 because we cap WHICH 200 are processed per call, not WHICH records exist.
+
+**Verify (live, post-restart at end of S151).**
+
+1. ✅ pytest 1846 pass (was 1843 baseline) — 3 new regression tests in `TestSession151BatchCap` all pass.
+2. ⏳ Bot restart bundled with this ship. Expected: "check_clv_settlements: batch of 200 (of 3528 open records) — oldest first by recorded_at; backlog of 3328 drains across subsequent calls (S151 cap)." appears in first post-restart `_main_loop` iteration.
+3. ⏳ At 24h: `check_clv_settlements_outer_timeout_count_24h ≤ 1` (was 2 today).
+4. ⏳ At 24h: `scans_today` increased relative to today (depends on power state).
+
+**README sync.** Not required — S151 is an internal performance bound, not a new feature or strategy. README's "Recent Improvements" section does not currently track Battle-Scar-internal arc shipments.
+
+---

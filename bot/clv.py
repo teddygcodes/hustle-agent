@@ -29,6 +29,20 @@ logger = logging.getLogger("glint.clv")
 # Imported at call-site to avoid circular imports
 _CLV_FILE: Optional[Path] = None
 
+# Session 151 (2026-05-18): cap per-call work in check_clv_settlements to
+# bound runtime inside the 900s S150 outer guard. The unbounded sequential
+# iteration over every open CLV record, gated by the S146 Kalshi rate
+# limiter (1 call per ~3s sustained: 20 tokens / 60s, 2 concurrent), takes
+# ~3 * N seconds. With N > 300 the guard fires every iteration and leaks
+# an executor thread (Python concurrent.futures can't cancel running
+# threads); leaked threads continue consuming rate-limit slots and slow
+# every subsequent _main_loop call. 200 keeps the worst-case wall-clock at
+# ~600s, inside the 900s budget with margin. Oldest-recorded-first FIFO
+# drains the backlog naturally — older records are most likely already
+# settled in Kalshi's books and just need a get_market round-trip to
+# confirm. Records past the cap roll over to the next call.
+_CHECK_CLV_BATCH_SIZE = 200
+
 
 def _get_file() -> Path:
     global _CLV_FILE
@@ -493,7 +507,29 @@ def check_clv_settlements() -> list[dict]:
         if isinstance(p, dict) and p.get("order_id")
     }
 
-    for rec in records:
+    # Session 151 (2026-05-18): filter to open candidates first, sort
+    # oldest-first by recorded_at, then cap at _CHECK_CLV_BATCH_SIZE. Bounds
+    # the per-call rate-limited get_market loop inside the 900s S150 outer
+    # guard. Already-settled records iterate cheaply because the filter
+    # excludes them before the sort+slice. Mutations on `rec` propagate
+    # through the shared list (Python passes list elements by reference),
+    # so _save(records) at the end of the function still persists the full
+    # records list with batch updates applied in place.
+    candidates = [
+        rec for rec in records
+        if rec.get("status") in ("open", "counterfactual_open")
+    ]
+    candidates.sort(key=lambda r: r.get("recorded_at") or "")
+    batch = candidates[:_CHECK_CLV_BATCH_SIZE]
+    if len(candidates) > len(batch):
+        logger.info(
+            "check_clv_settlements: batch of %d (of %d open records) — "
+            "oldest first by recorded_at; backlog of %d drains across "
+            "subsequent calls (S151 cap).",
+            len(batch), len(candidates), len(candidates) - len(batch),
+        )
+
+    for rec in batch:
         status = rec.get("status")
         if status not in ("open", "counterfactual_open"):
             continue
