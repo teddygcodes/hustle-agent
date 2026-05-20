@@ -7764,3 +7764,42 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **README sync.** Not required — S151 is an internal performance bound, not a new feature or strategy. README's "Recent Improvements" section does not currently track Battle-Scar-internal arc shipments.
 
 ---
+
+### ☑ Session 152 — duplicate bot runtime contamination cleanup (May 19, 2026)
+
+**Premise.** Post-S151 watch metrics still looked bad: `check_clv_settlements_outer_timeout_count_24h=5`, `snapshot_outer_timeout_count_24h=2`, and `scan_cycle_outer_timeout_count_24h=1`. The brief explicitly warned not to pre-commit a fix shape: first verify macOS sleep, CLV timing, snapshot correlation, endpoint pressure, and the unexpected ~2h restart.
+
+**Phase 0 findings.**
+
+1. **Runtime-hours matter.** `pmset` showed about 20.79h asleep in the last 24h, leaving ~3.21h runtime. The raw 5/day CLV counter is therefore roughly 1.56 per runtime hour.
+2. **CLV file I/O is not the secondary wedge.** `clv.json` measured 7.7MB / 10,373 records / 3,617 open; read+parse+dump-to-string took about 0.05s. The hot path remains per-record `get_market(ticker)` through the S146 limiter.
+3. **The S151 cap fired but still timed out at 900s.** Batch logs at 22:30:25, 23:12:43, and 23:55:25 each hit the outer guard exactly 15 minutes later, proving the call was still active when S150 cut it off.
+4. **Snapshot timeouts pre-dated visible CLV batches.** Snapshot outer guards fired at 2026-05-18 21:51:49 and 22:24:51 ET, so snapshot pressure was not purely downstream of the capped CLV batches.
+5. **Dominant unexpected mechanism: duplicate bot runtime.** Process inspection found launchd's canonical wrapper (`/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent/run_bot.sh`, PID 65565, child 65568) plus an extra `./run_bot.sh` wrapper (PID 76345) and duplicate `python -m bot.main` children (PIDs 43842 and 52047). That contaminates all Kalshi-rate and shared-state observations.
+
+**Decision.** Outcome D / HOLD on code changes. Clean the runtime first, then watch single-bot behavior. Reducing `_CHECK_CLV_BATCH_SIZE`, splitting the Kalshi limiter, or adding CLV instrumentation before removing the duplicate process would risk fixing the wrong layer.
+
+**What changed.**
+
+- Sent SIGTERM only to non-canonical bot processes: duplicate child `43842`, orphan child `52047`, and duplicate wrapper `76345`.
+- Left launchd-owned wrapper `65565` and child `65568` untouched.
+- No production files, tests, guards, caps, or schemas changed.
+
+**Verification.**
+
+- `ps -axo pid,ppid,command | grep -E 'run_bot.sh|python -m bot.main|Python -m bot.main'` now shows exactly:
+  - `65565 1 /bin/bash /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent/run_bot.sh`
+  - `65568 65565 ... Python -m bot.main`
+- `launchctl print gui/$(id -u)/com.hustle-agent.bot` reports launchd state `running`, pid `65565`.
+- `bot/state/bot_state.json`: `running=true`, fresh heartbeat at `2026-05-19T04:43:28Z`.
+- CLOSE_WAIT stayed under the <10 target after cleanup (1 immediately after cleanup; 4 on final check).
+
+**Watch-list.**
+
+- 2026-05-20 ~22:00 ET: evaluate counters by runtime hours, not clock hours.
+- Target under single-bot conditions: `check_clv_settlements_outer_timeout_count_24h <= 1`, `snapshot_outer_timeout_count_24h <= 1`, `scan_cycle_outer_timeout_count_24h <= 1`, CLOSE_WAIT <10.
+- If counters still rise under single-bot conditions, ship instrumentation-only timing inside `check_clv_settlements` before changing cap or rate-limit behavior.
+
+**README sync.** Required: this is a material operating-regime finding, not a feature, but it changes how S151/S152 watch metrics must be interpreted.
+
+---
