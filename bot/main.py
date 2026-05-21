@@ -103,6 +103,55 @@ def _apply_outcome_tracker_state(state: dict, tracker, now) -> dict:
     return state
 
 
+def _attempt_outcome_tracker_recovery(reason: str):
+    """One-shot recovery for a degraded OutcomeTracker (Session 153, Outcome D).
+
+    MUST be called only AFTER _acquire_lock(): clearing the sqlite journal while
+    a duplicate runtime is mid-write would corrupt the DB (Battle Scar #3/#14
+    duplicate-runtime is the exact condition that produced the 2026-05-20 stale
+    journal). _acquire_lock() sys.exit(1)s on a live duplicate, so by the time
+    start() calls this we are the sole instance.
+
+    Backs up outcomes.db first (never destroy without a copy — mirrors the
+    manual recovery), clears stale -journal/-wal/-shm sidecars, and retries init
+    once. Returns a healthy OutcomeTracker on success, else None (stay degraded).
+    Does NOT delete/recreate the main DB — that loses calibration history and
+    stays a manual decision.
+    """
+    import shutil
+    from bot.outcome_tracker import DEFAULT_DB_PATH
+
+    db = Path(DEFAULT_DB_PATH)
+    log = logging.getLogger("glint.main")
+    try:
+        if db.exists():
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_dir = db.parent / "forensics"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(db, backup_dir / f"{db.name}.{ts}.bak")
+        for sidecar in (
+            db.with_name(db.name + "-journal"),
+            db.with_name(db.name + "-wal"),
+            db.with_name(db.name + "-shm"),
+        ):
+            if sidecar.exists():
+                sidecar.unlink()
+        recovered = OutcomeTracker()
+        log.error(
+            "RECOVERED: OutcomeTracker re-initialized after one-shot recovery "
+            "(backed up %s + cleared stale sqlite journal). Prior failure: %s.",
+            db.name, reason,
+        )
+        return recovered
+    except Exception as e:
+        log.error(
+            "OutcomeTracker auto-recovery FAILED (%s: %s) — staying in DEGRADED "
+            "mode. Prior failure: %s. Inspect %s.",
+            type(e).__name__, e, reason, db,
+        )
+        return None
+
+
 _outcome_tracker = _init_outcome_tracker()
 
 logging.basicConfig(
@@ -351,6 +400,7 @@ class GlintBot:
 
     async def start(self):
         """Initialize and start the bot."""
+        global _outcome_tracker
         _acquire_lock()
         logger.info("✨ Glint Trading Bot — Starting...")
 
@@ -404,21 +454,29 @@ class GlintBot:
             except Exception:
                 pass
 
-        # Session 153: surface OutcomeTracker degraded mode now that logging is
-        # fully up. (One-shot auto-recovery wired in a follow-up commit.)
+        # Session 153 (Outcome D): we hold the PID lock now (_acquire_lock
+        # sys.exit(1)s on a live duplicate), so touching outcomes.db sidecars is
+        # race-free. One-shot backup + journal-clear + retry; swap the real
+        # tracker back in on success, else stay degraded (bot trades normally).
         if getattr(_outcome_tracker, "degraded", False):
             _reason = getattr(_outcome_tracker, "degraded_reason", "unknown")
-            logger.error(
-                "DEGRADED: OutcomeTracker init failed — alert calibration "
-                "disabled. Reason: %s. Bot trading normally.", _reason,
-            )
-            try:
-                await self.notifier.send_message(
-                    f"⚠️ Glint DEGRADED: OutcomeTracker init failed ({_reason}). "
-                    f"Alert calibration off; trading normally."
+            _recovered = _attempt_outcome_tracker_recovery(_reason)
+            if _recovered is not None:
+                _outcome_tracker = _recovered
+            else:
+                logger.error(
+                    "DEGRADED: OutcomeTracker init failed and auto-recovery did "
+                    "not succeed — alert calibration disabled. Reason: %s. Bot "
+                    "trading normally.", _reason,
                 )
-            except Exception:
-                pass
+                try:
+                    await self.notifier.send_message(
+                        f"⚠️ Glint DEGRADED: OutcomeTracker init failed "
+                        f"({_reason}); auto-recovery failed. Alert calibration "
+                        f"off; trading normally."
+                    )
+                except Exception:
+                    pass
         _apply_outcome_tracker_state(
             state, _outcome_tracker, datetime.now(timezone.utc)
         )

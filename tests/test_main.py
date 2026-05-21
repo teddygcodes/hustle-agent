@@ -1645,3 +1645,42 @@ def test_apply_outcome_tracker_state_healthy():
     state = botmain._apply_outcome_tracker_state({}, _Healthy(), datetime.now(timezone.utc))
     assert state["outcome_tracker_degraded"] is False
     assert state["outcome_tracker_degraded_since"] is None
+
+
+# ---------------------------------------------------------------------------
+# Session 153: one-shot auto-recovery (Outcome D)
+# ---------------------------------------------------------------------------
+def test_recovery_success_clears_journal_and_returns_tracker(tmp_path, monkeypatch):
+    from bot import main as botmain
+
+    db = tmp_path / "outcomes.db"
+    db.write_text("corrupt")               # exists so the backup path runs
+    journal = tmp_path / "outcomes.db-journal"
+    journal.write_text("stale")            # the stale sidecar recovery must clear
+    monkeypatch.setattr("bot.outcome_tracker.DEFAULT_DB_PATH", str(db))
+
+    class _GoodTracker:
+        degraded = False
+
+    monkeypatch.setattr(botmain, "OutcomeTracker", lambda *a, **k: _GoodTracker())
+    recovered = botmain._attempt_outcome_tracker_recovery("OperationalError: disk I/O error")
+    assert isinstance(recovered, _GoodTracker)
+    assert not journal.exists()                                      # stale journal cleared
+    assert list((tmp_path / "forensics").glob("outcomes.db.*.bak"))  # backed up first
+
+
+def test_recovery_failure_returns_none_after_backup(tmp_path, monkeypatch):
+    import sqlite3
+    from bot import main as botmain
+
+    db = tmp_path / "outcomes.db"
+    db.write_text("corrupt")
+    monkeypatch.setattr("bot.outcome_tracker.DEFAULT_DB_PATH", str(db))
+
+    def _raise(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(botmain, "OutcomeTracker", _raise)  # retry still fails
+    recovered = botmain._attempt_outcome_tracker_recovery("OperationalError: disk I/O error")
+    assert recovered is None
+    assert list((tmp_path / "forensics").glob("outcomes.db.*.bak"))  # backup happened anyway
