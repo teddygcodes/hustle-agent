@@ -778,6 +778,9 @@ If a third instance happens, the next decision could ride on falsified evidence.
   "check_clv_settlements_outer_timeout_count_24h": int,       # reset with scans_today; forward-only since Session 150
   "recheck_open_edges_outer_timeout_count_24h": int,          # reset with scans_today; forward-only since Session 150
   "scan_related_markets_outer_timeout_count_24h": int,        # reset with scans_today; forward-only since Session 150
+
+  "outcome_tracker_degraded": bool,             # forward-only since Session 153; True when module-load OutcomeTracker() init failed AND auto-recovery did not succeed (NullOutcomeTracker active)
+  "outcome_tracker_degraded_since": str | None, # ISO 8601 UTC; forward-only since Session 153; set at the start() that detected degraded mode
 }
 ```
 
@@ -786,6 +789,8 @@ Forward-only rule: older `bot_state.json` files may be missing any `telegram_*` 
 Session 98 forward-only rule: pre-Session-98 `bot_state.json` files may be missing `snapshot_outer_timeout_count_24h`; readers must treat missing as `0`. Counter resets daily alongside `scans_today` at midnight UTC roll. Non-zero values confirm the `_main_loop` outer `asyncio.wait_for` guard at [bot/main.py:1290](hustle-agent/bot/main.py:1290) fired; see Battle Scar #13's Session 98 addendum.
 
 Session 150 forward-only rule: pre-Session-150 `bot_state.json` files may be missing `scan_cycle_outer_timeout_count_24h`, `check_clv_settlements_outer_timeout_count_24h`, `recheck_open_edges_outer_timeout_count_24h`, and `scan_related_markets_outer_timeout_count_24h`; readers must treat missing as `0`. All four counters reset daily alongside `scans_today` at midnight UTC roll. Non-zero values confirm one of the four `_main_loop` outer `asyncio.wait_for` guards (constant `_EXECUTOR_OUTER_TIMEOUT_SEC = 900`) at the S148 boundaries fired; see Battle Scar #13's Session 150 addendum. Per-function counters give forensic attribution — `scan_cycle_*` points at the WEATHER / kalshi_series / sports_arb tree, the other three at their respective scan paths.
+
+Session 153 forward-only rule: pre-Session-153 `bot_state.json` files may be missing `outcome_tracker_degraded` and `outcome_tracker_degraded_since`; readers must treat missing `outcome_tracker_degraded` as `False` and `outcome_tracker_degraded_since` as `None`. These flag a failed module-load `OutcomeTracker()` init where the one-shot auto-recovery in `start()` also failed (NullOutcomeTracker active → alert calibration disabled; bot trades normally). The degradation *reason* is NOT persisted here — it's in `bot.log` (the DEGRADED ERROR line) and surfaced as a glint_status §7 WARN. `outcomes.db` is calibration-only; cross-ref Battle Scar #3/#14 (duplicate-runtime is the upstream cause of the stale-journal failure this resilience layer absorbs). Recovery runs only after `_acquire_lock()` so the journal-clear cannot race a live duplicate.
 
 ### `bot/state/clv.json` records
 

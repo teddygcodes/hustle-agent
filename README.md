@@ -696,7 +696,7 @@ hustle-agent/
 │   ├── injuries.py          # Injury report integration
 │   ├── market_maker.py      # Passive limit-order market-making
 │   ├── price_monitor.py     # Line movement detection (5pp threshold)
-│   ├── outcome_tracker.py   # Trade outcome logging for calibration
+│   ├── outcome_tracker.py   # Trade outcome logging for calibration (S153: NullOutcomeTracker degraded-mode fallback — init failure never crashes the bot)
 │   ├── notifier.py          # Telegram formatting and HTTP sender
 │   ├── patterns.py          # Historical win rate per strategy type (dynamic confidence)
 │   ├── scheduler.py         # Cron events (morning briefing, nightly summary, balance reconcile, live_ticks/decisions/predictions/universe/order_microstructure/tracker_cadence rotation)
@@ -798,7 +798,7 @@ hustle-agent/
 │   │   ├── order_microstructure-YYYY-MM-DD.jsonl.gz # (Apr 25 Session 15)
 │   │   └── tracker_cadence-YYYY-MM-DD.jsonl.gz      # (Apr 26 Session 17)
 │   ├── patterns.json        # Historical win rate per strategy type (dynamic confidence)
-│   ├── outcomes.db          # SQLite: alert → outcome log for calibration
+│   ├── outcomes.db          # SQLite: alert → outcome log for calibration (calibration-only; S153 graceful-degrade + one-shot auto-recovery on init failure)
 │   ├── elo_ratings.json     # Sport ELO ratings
 │   ├── daily_log.json       # Rolling daily performance snapshot
 │   └── mm_positions.json    # Market-making pair tracker

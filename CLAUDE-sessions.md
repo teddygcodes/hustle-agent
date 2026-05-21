@@ -7803,3 +7803,42 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **README sync.** Required: this is a material operating-regime finding, not a feature, but it changes how S151/S152 watch metrics must be interpreted.
 
 ---
+
+### ☑ Session 153 — Resilient OutcomeTracker init: graceful-degrade + auto-recovery (May 20, 2026)
+
+**Premise.** The 2026-05-20 ~10h outage. `bot/main.py:60` instantiates `OutcomeTracker()` at **module load**; `__init__ → _init_db() → CREATE TABLE` via `sqlite3.connect` raised `OperationalError: disk I/O error` (stale journal + lock contention from a duplicate runtime). No try/except in the chain → the process crashed at import → every launchd respawn re-imported and died identically, silently (only `launchd-stderr.log` caught the traceback). `outcomes.db` is calibration-only — a non-critical subsystem took the whole bot down.
+
+**Phase 0 corrections to the brief (verified against source).**
+1. Module-load SPOF confirmed at `bot/main.py:60`; chain `__init__`→`_init_db`→`sqlite3.connect` has no try/except.
+2. **Stub method names in the brief were wrong.** Real call sites (only 3, all in main.py): `store_alert(opp)` (`:921`), `check_and_resolve` (`:1705`), `log_calibration_summary` (`:1708`) — not the brief's guessed `record_alert/record_outcome/get_calibration`. A guessed-name stub would have `AttributeError`-crashed the degraded path. `NullOutcomeTracker` no-ops **all 7** public methods.
+3. **"Logging uninitialized at module load" was wrong.** `setup_file_logging()` at `:28` attaches the root file handler *before* line 60, so the degraded handler logs ERROR straight to `bot.log`; the stderr `print` is the fallback for when logging setup itself failed.
+4. outcomes.db NOT trading-critical (trading-critical grep empty; runtime calls at `:1703-1710` already try/except-wrapped) → Outcome C/HOLD ruled out.
+5. No same-class sibling SPOF (the only other module-load resource-opens are `setup_file_logging()` + the `bot.config` import — logging/config infra, not calibration-only) → Outcome B not applicable.
+6. `_acquire_lock()` (`:223`) `sys.exit(1)`s on a live duplicate → after `start()` passes it we're sole-instance → the auto-recovery journal-clear is race-free.
+
+**Decision.** Outcome D (operator-selected): graceful-degrade **plus** one-shot auto-recovery. Split-phase to respect lock ordering — module load degrades only (no DB file ops, runs *before* the lock); `start()` (post-lock) does backup + journal-clear + retry.
+
+**What shipped.**
+- `bot/outcome_tracker.py` — `OutcomeTracker.degraded = False`; new `NullOutcomeTracker` (`degraded = True`, `degraded_reason`, no-ops all 7 public methods with safe returns: `store_alert/check_and_resolve → 0`, `get_pending_resolution → []`, `get_stats/get_calibration_report → {}`, `record_resolution/log_calibration_summary → None`).
+- `bot/main.py` — `_init_outcome_tracker()` wraps the module-load init (on failure: ERROR to bot.log + stderr `[S153]` + `NullOutcomeTracker`); `_attempt_outcome_tracker_recovery(reason)` (backup `outcomes.db` → `state/forensics/outcomes.db.<ts>.bak`, clear stale `-journal/-wal/-shm`, retry init once, return real tracker or None — does NOT delete/recreate the main DB); `_apply_outcome_tracker_state()` (pure flag setter). `start()` (after `_acquire_lock()`): on degraded, attempt recovery → swap the real tracker back in on success, else log ERROR + best-effort Telegram; always set the two forward-only `bot_state` flags.
+- `tools/glint_status.py` — §7 `outcome_tracker_degraded` WARN `Flag` when the flag is set.
+- Schema (CLAUDE.md): `bot_state.json` gains `outcome_tracker_degraded` (bool) + `outcome_tracker_degraded_since` (str|None), forward-only since S153 (missing → False/None). The degradation *reason* is NOT persisted in state — it lives in `bot.log` (the DEGRADED ERROR line).
+
+**Tests.** +11 (1846 → 1857), all pass, no skips/xfails. 3 in `test_bot_tracker.py` (degraded attr + stub no-ops), 6 in `test_main.py` (init degrade/healthy, apply-state degrade/healthy, recovery success/failure), 2 in `test_glint_status.py` (WARN present when degraded, absent when healthy).
+
+**Commits.** 3 (1 logical fix each): (1) graceful-degrade, (2) auto-recovery, (3) docs sync.
+
+**Verification.**
+- Full suite **1857 passed**.
+- Live deploy (restart on healthy DB): `running=True, outcome_tracker_degraded=False, since=None`, no §7 WARN — happy path writes the flags correctly.
+- **Live acceptance test (degraded round-trip).** `chmod 000` is NOT a valid break on this macOS (it landed as `0400`, and `CREATE TABLE IF NOT EXISTS` is a no-op when the table exists, so init succeeded — and a read-only DB would have failed the bot's `store_alert` writes, so it was restored immediately). The reliable break is replacing the path with a **directory** (`sqlite3.connect` then `execute` → `OperationalError: unable to open database file`). With the real DB backed up and the path a directory, the watchdog-respawned child logged exactly three S153 ERRORs in `bot.log`: (1) `DEGRADED: OutcomeTracker init failed (OperationalError: unable to open database file)`, (2) `OutcomeTracker auto-recovery FAILED (IsADirectoryError ...) — staying in DEGRADED mode`, (3) `DEGRADED: ... auto-recovery did not succeed ... Bot trading normally`. `bot_state` showed `running=True, outcome_tracker_degraded=True, outcome_tracker_degraded_since=<iso>` with a fresh heartbeat (alive + trading); glint_status §7 rendered the WARN. Restoring the real DB + respawn returned the bot to `degraded=False`, WARN cleared, single runtime. The recovery-**success** swap is proven by the deterministic `test_recovery_success_clears_journal_and_returns_tracker` unit test (a recoverable hot-journal is too flaky to reproduce live).
+
+**Operational note (restart mechanics).** `launchctl kickstart -k com.hustle-agent.bot` kills the launchd **wrapper** (`run_bot.sh`) but the **python child** survived and reparented to PID 1 — a transient duplicate runtime (BS#3/#14). Plain SIGTERM to a Glint child wedges it mid-graceful-shutdown (consistent with gotcha #3); `kill -9` is required, after which the `run_bot.sh` watchdog loop respawns a fresh child with no orphan. Verified single runtime after each transition via path-rooted checks; Bob (`~/Desktop/bob/`) was confirmed-untouched throughout (cwd-checked per BS#14 before every kill).
+
+**Watch-list.** If `outcome_tracker_degraded` ever flips True in production, the operator gets the glint_status §7 WARN — investigate `outcomes.db`, but the bot keeps trading (the whole point). The one-shot auto-recovery (backup + journal-clear + retry, post-lock) would have *fully* auto-healed the 2026-05-20 stale-journal outage; when it can't, the degraded flag + WARN make the otherwise-silent degradation visible.
+
+**Cross-refs.** Battle Scar #3/#14 (duplicate-runtime → stale journal is the upstream cause; single-writer/WAL enforcement remains a separate prevention session). BS#13/S98/S150 bound *runtime* wedges; S153 bounds a *startup* failure — same "a subsystem must not kill the whole bot" principle. The 10:36 ET SIGTERM that originally stopped the bot is a separate, still-open investigation (S153 makes the restart resilient, not the initial stop).
+
+**README sync.** Done — directory-map entries for `outcome_tracker.py` + `outcomes.db` note graceful-degrade + auto-recovery.
+
+---
