@@ -53,11 +53,57 @@ from bot.tracker import (
 )
 from bot.notifier import TelegramNotifier, format_opportunity, format_detail
 from bot.scheduler import check_scheduled_events
-from bot.outcome_tracker import OutcomeTracker
+from bot.outcome_tracker import OutcomeTracker, NullOutcomeTracker
 from bot.position_monitor import recheck_open_edges, scan_related_markets
 from bot import odds_scraper
 
-_outcome_tracker = OutcomeTracker()
+def _init_outcome_tracker():
+    """Instantiate OutcomeTracker at module load. A failure here (corrupt
+    outcomes.db / stale sqlite journal) must NOT crash the bot — outcomes.db is
+    calibration-only, never trading state (CLAUDE.md State Files). On failure,
+    fall back to NullOutcomeTracker so the bot trades normally with calibration
+    disabled. Session 153 (prevents the 2026-05-20 module-load-crash -> silent
+    launchd respawn-loop outage).
+
+    Runs at import, BEFORE _acquire_lock() — so it does NOT touch DB files (no
+    backup/journal-clear); that race-prone recovery is deferred to start(),
+    which runs after the PID lock guarantees sole instance. File logging is
+    already attached (setup_file_logging() above) so the ERROR lands in
+    bot.log; the stderr print is the fallback for when logging setup itself
+    failed (only launchd-stderr.log sees it). The module-level `logger` is not
+    defined until below, so use getLogger here.
+    """
+    try:
+        return OutcomeTracker()
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        logging.getLogger("glint.main").error(
+            "DEGRADED: OutcomeTracker init failed (%s) — alert calibration "
+            "disabled, trading paths unaffected. Inspect bot/state/outcomes.db.",
+            reason,
+        )
+        print(
+            f"[S153] OutcomeTracker init FAILED ({reason}) — running in DEGRADED "
+            f"mode (alert calibration disabled). Trading paths unaffected. "
+            f"Inspect bot/state/outcomes.db.",
+            file=sys.stderr, flush=True,
+        )
+        return NullOutcomeTracker(reason=reason)
+
+
+def _apply_outcome_tracker_state(state: dict, tracker, now) -> dict:
+    """Set the forward-only operator-facing bot_state flags from the tracker's
+    degraded status. Pure (no I/O) so it's trivially testable. Session 153."""
+    if getattr(tracker, "degraded", False):
+        state["outcome_tracker_degraded"] = True
+        state["outcome_tracker_degraded_since"] = now.isoformat()
+    else:
+        state["outcome_tracker_degraded"] = False
+        state["outcome_tracker_degraded_since"] = None
+    return state
+
+
+_outcome_tracker = _init_outcome_tracker()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -357,6 +403,25 @@ class GlintBot:
                     )
             except Exception:
                 pass
+
+        # Session 153: surface OutcomeTracker degraded mode now that logging is
+        # fully up. (One-shot auto-recovery wired in a follow-up commit.)
+        if getattr(_outcome_tracker, "degraded", False):
+            _reason = getattr(_outcome_tracker, "degraded_reason", "unknown")
+            logger.error(
+                "DEGRADED: OutcomeTracker init failed — alert calibration "
+                "disabled. Reason: %s. Bot trading normally.", _reason,
+            )
+            try:
+                await self.notifier.send_message(
+                    f"⚠️ Glint DEGRADED: OutcomeTracker init failed ({_reason}). "
+                    f"Alert calibration off; trading normally."
+                )
+            except Exception:
+                pass
+        _apply_outcome_tracker_state(
+            state, _outcome_tracker, datetime.now(timezone.utc)
+        )
 
         state["running"] = True
         state["started_at"] = datetime.now(timezone.utc).isoformat()

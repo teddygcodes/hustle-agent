@@ -348,3 +348,31 @@ class TestLogSettlement:
         for t in trades:
             log_settlement(t)
         assert check_settlement_invariant() is True
+
+
+# ---------------------------------------------------------------------------
+# Session 153: graceful-degrade — NullOutcomeTracker + degraded attribute
+# ---------------------------------------------------------------------------
+def test_outcome_tracker_degraded_false(tmp_path):
+    from bot.outcome_tracker import OutcomeTracker
+    t = OutcomeTracker(db_path=str(tmp_path / "ok.db"))
+    assert t.degraded is False
+
+
+def test_null_outcome_tracker_degraded_true():
+    from bot.outcome_tracker import NullOutcomeTracker
+    stub = NullOutcomeTracker(reason="OperationalError: disk I/O error")
+    assert stub.degraded is True
+    assert "disk I/O error" in stub.degraded_reason
+
+
+def test_null_outcome_tracker_noops_full_interface():
+    from bot.outcome_tracker import NullOutcomeTracker
+    stub = NullOutcomeTracker()
+    assert stub.store_alert({"ticker": "X", "type": "vig_stack_series"}) == 0
+    assert stub.check_and_resolve() == 0
+    assert stub.get_pending_resolution() == []
+    assert stub.get_stats("vig_stack") == {}
+    assert stub.get_calibration_report() == {}
+    assert stub.record_resolution(1, "yes") is None
+    assert stub.log_calibration_summary() is None

@@ -1593,3 +1593,55 @@ def test_stop_bounded_by_5s_timeout_when_task_doesnt_unwind(tmp_path, monkeypatc
             pass
 
     asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# Session 153: graceful-degrade wrap + degraded bot_state flags
+# ---------------------------------------------------------------------------
+def test_init_outcome_tracker_degrades_on_failure(monkeypatch):
+    import sqlite3
+    from bot import main as botmain
+    from bot.outcome_tracker import NullOutcomeTracker
+
+    def _raise(*a, **k):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(botmain, "OutcomeTracker", _raise)
+    t = botmain._init_outcome_tracker()
+    assert isinstance(t, NullOutcomeTracker)
+    assert t.degraded is True
+    assert "OperationalError" in t.degraded_reason
+
+
+def test_init_outcome_tracker_healthy_returns_real(monkeypatch):
+    from bot import main as botmain
+
+    class _Fake:
+        degraded = False
+
+    monkeypatch.setattr(botmain, "OutcomeTracker", lambda *a, **k: _Fake())
+    t = botmain._init_outcome_tracker()
+    assert getattr(t, "degraded", None) is False
+
+
+def test_apply_outcome_tracker_state_degraded():
+    from datetime import datetime, timezone
+    from bot import main as botmain
+    from bot.outcome_tracker import NullOutcomeTracker
+
+    now = datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc)
+    state = botmain._apply_outcome_tracker_state({}, NullOutcomeTracker("X"), now)
+    assert state["outcome_tracker_degraded"] is True
+    assert state["outcome_tracker_degraded_since"] == now.isoformat()
+
+
+def test_apply_outcome_tracker_state_healthy():
+    from datetime import datetime, timezone
+    from bot import main as botmain
+
+    class _Healthy:
+        degraded = False
+
+    state = botmain._apply_outcome_tracker_state({}, _Healthy(), datetime.now(timezone.utc))
+    assert state["outcome_tracker_degraded"] is False
+    assert state["outcome_tracker_degraded_since"] is None

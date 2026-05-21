@@ -20,6 +20,8 @@ _MIN_SAMPLES_FOR_CALIBRATION = 50
 
 
 class OutcomeTracker:
+    degraded = False  # Session 153: real tracker is healthy; NullOutcomeTracker sets True.
+
     def __init__(self, db_path: str = DEFAULT_DB_PATH):
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -222,3 +224,41 @@ class OutcomeTracker:
                 "  %s: %s/%s (%s actual vs %s expected)%s",
                 strategy, stats["wins"], stats["total"], wr, exp, flag,
             )
+
+
+class NullOutcomeTracker:
+    """Degraded-mode stand-in when OutcomeTracker can't initialize (corrupt
+    outcomes.db / stale sqlite journal). No-ops the full public interface so
+    the bot's call sites need zero changes — the bot trades normally; only
+    alert calibration is disabled. Session 153.
+
+    Safe returns mirror the real interface: store_alert/check_and_resolve -> 0,
+    get_pending_resolution -> [], get_stats/get_calibration_report -> {},
+    record_resolution/log_calibration_summary -> None.
+    """
+
+    degraded = True
+
+    def __init__(self, reason: str = "unknown"):
+        self.degraded_reason = reason
+
+    def store_alert(self, opp: dict) -> int:
+        return 0
+
+    def record_resolution(self, alert_id: int, result: str) -> None:
+        return None
+
+    def get_stats(self, strategy: str) -> dict:
+        return {}
+
+    def get_pending_resolution(self) -> list:
+        return []
+
+    def get_calibration_report(self) -> dict:
+        return {}
+
+    def check_and_resolve(self) -> int:
+        return 0
+
+    def log_calibration_summary(self) -> None:
+        return None

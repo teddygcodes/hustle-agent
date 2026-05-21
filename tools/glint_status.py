@@ -716,6 +716,17 @@ def detect_anomalies(paths: Paths, metrics: dict, now_utc: datetime) -> list[Fla
             "Battle Scar #15",
         ))
 
+    if bot_state.get("outcome_tracker_degraded"):
+        _since = bot_state.get("outcome_tracker_degraded_since")
+        flags.append(Flag(
+            "outcome_tracker_degraded",
+            "WARN",
+            f"OutcomeTracker DEGRADED since {_since} — alert calibration "
+            f"disabled (S153 graceful-degrade active; bot trading normally). "
+            f"Inspect bot/state/outcomes.db.",
+            "Session 153",
+        ))
+
     httpx_errors = sum(1 for line in since_restart if "HTTPXRequest is not initialized" in line)
     if httpx_errors > 5:
         flags.append(Flag(

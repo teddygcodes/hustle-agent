@@ -122,6 +122,34 @@ def test_anomaly_detector_no_false_positive_on_normal_state(tmp_path: Path):
     assert [f for f in flags if f.severity in {"WARN", "CRITICAL"}] == []
 
 
+def test_anomaly_detector_outcome_tracker_degraded(tmp_path: Path):
+    """Session 153: a degraded OutcomeTracker surfaces a §7 WARN."""
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    paths = glint.paths_for(tmp_path)
+    paths.decisions_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.decisions_file.write_text("")
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.log_file.write_text("")
+    metrics = _minimal_metrics(now)
+    metrics["bot_state"]["outcome_tracker_degraded"] = True
+    metrics["bot_state"]["outcome_tracker_degraded_since"] = now.isoformat()
+    flags = glint.detect_anomalies(paths, metrics, now)
+    assert any(f.id == "outcome_tracker_degraded" and f.severity == "WARN" for f in flags)
+
+
+def test_anomaly_detector_no_outcome_tracker_warn_when_healthy(tmp_path: Path):
+    """Session 153 forward-only: missing/false degraded flag => no WARN."""
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    paths = glint.paths_for(tmp_path)
+    paths.decisions_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.decisions_file.write_text("")
+    paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.log_file.write_text("")
+    metrics = _minimal_metrics(now)  # no degraded key -> treated as healthy
+    flags = glint.detect_anomalies(paths, metrics, now)
+    assert not any(f.id == "outcome_tracker_degraded" for f in flags)
+
+
 def test_watchlist_parser_extracts_triggers_from_claude_md():
     triggers = glint.extract_watchlist_triggers((REPO_ROOT / "CLAUDE-sessions.md").read_text())
     assert len(triggers) >= 10
