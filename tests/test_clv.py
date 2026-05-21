@@ -1424,3 +1424,203 @@ class TestSession155DrainPersistence:
         # Groups 2-4 never settled — still open, drain next cycle.
         assert by_id["CF-EV-02"]["status"] == "counterfactual_open"
         assert by_id["CF-EV-04"]["status"] == "counterfactual_open"
+
+
+class TestSession157GroupPathMarking:
+    """S157: drain the OPEN clog without touching the 1,125 legit-open futures.
+
+    Two terminal-mark routes, both reusing _mark_unsettleable:
+      (1) static synthetic-shape dead-mark in the zero-API pre-pass (paper-only;
+          debug token TEST/ALPHA/IDL in the event-date segment), and
+      (2) group-path heuristic marks (scalar / settled-without-us / stale dead-dated
+          event) gated by _is_protected_open + a recorded_at grace window.
+    The legit-open season futures (paper=False, vig_stack_futures, KX*-NN-TEAM)
+    must survive every route untouched.
+    """
+
+    _OLD = "2020-01-01T00:00:00+00:00"   # always past the 7d grace
+
+    def _rec(self, ticker, tid, *, paper, opp_type="vig_stack_series",
+             status="counterfactual_open", stamp=None):
+        return {"ticker": ticker, "opp_type": opp_type, "side": "no",
+                "entry_price_cents": 50, "contracts": 0, "trade_id": tid,
+                "paper": paper, "status": status, "recorded_at": stamp or self._OLD,
+                "closing_yes_price": None, "clv_cents": None,
+                "clv_relative": None, "settled_at": None}
+
+    # ---- (1) static synthetic dead-marking (zero API) --------------------
+
+    def test_synthetic_marked_in_deadmark_pass_without_api(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        recs = [
+            self._rec("KXHIGHNY-26MAY082210TEST-YES", "CF-T", paper=True),
+            self._rec("KXNBAGAME-26APR27ALPHA-A", "CF-A", paper=True),
+            self._rec("KXNBAGAME-26APR27IDL-IDL", "CF-I", paper=True),
+        ]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets") as gm, \
+             patch("agent.kalshi_client.get_market") as g1:
+            clv.check_clv_settlements()
+        gm.assert_not_called(); g1.assert_not_called()   # zero API for synthetic shapes
+        rows = _read(tmp_clv_file)
+        assert all(r["status"] == "settlement_failed" for r in rows)
+        assert all(r["settlement_note"] == "synthetic_test_ticker" for r in rows)
+
+    def test_synthetic_token_on_paper_false_record_not_marked(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # paper=False guards against ever touching a real market that happens to
+        # carry the letters — routes to the group path, stays open.
+        rec = self._rec("KXHIGHNY-26MAY082210TEST-YES", "CF-RF", paper=False)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value={"markets": [], "cursor": None}):
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    # ---- (2) the legit-open futures must survive -------------------------
+
+    def test_real_future_not_marked_even_with_empty_map(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # KXMLB-26-SEA: paper=False, vig_stack_futures, future-shape. Empty settled
+        # map (no team eliminated yet) — must stay open, settles when SEA resolves.
+        rec = self._rec("KXMLB-26-SEA", "CF-FUT", paper=False,
+                        opp_type="vig_stack_futures")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value={"markets": [], "cursor": None}):
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    def test_paper_true_future_shape_not_marked(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # Defensive: a paper=True future-shaped CF is still protected by the shape +
+        # opp_type gates — a non-empty settled map without our ticker would otherwise
+        # trip settled-without-us.
+        rec = self._rec("KXNHL-26-COL", "CF-FUT2", paper=True,
+                        opp_type="vig_stack_futures")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXNHL-26-CAR", "NO")):  # sibling settled
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    # ---- grace protects recently-recorded settleable --------------------
+
+    def test_recent_paper_record_not_marked(self, tmp_clv_file, tmp_positions_file):
+        from datetime import datetime, timezone, timedelta
+        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        rec = self._rec("KXATPMATCH-20MAY04PIRROC-PIR", "CF-RECENT",
+                        paper=True, stamp=recent)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value={"markets": [], "cursor": None}):  # empty map
+            clv.check_clv_settlements()
+        # within grace → never heuristically marked even with an empty settled map
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    # ---- (2) scalar result ----------------------------------------------
+
+    def test_scalar_result_marked(self, tmp_clv_file, tmp_positions_file):
+        rec = self._rec("KXATPMATCH-20MAY04PIRROC-PIR", "CF-SCALAR", paper=True)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXATPMATCH-20MAY04PIRROC-PIR", "scalar")):
+            clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "settlement_failed"
+        assert r["settlement_note"] == "settlement_skipped_scalar"
+
+    # ---- (2) settled-without-us -----------------------------------------
+
+    def test_settled_without_market_marked(self, tmp_clv_file, tmp_positions_file):
+        # event has settled markets (opponent) but ours is absent → voided/dead.
+        rec = self._rec("KXUFCFIGHT-20MAY16MOKMOR-MOK", "CF-SWU", paper=True)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXUFCFIGHT-20MAY16MOKMOR-MOR", "YES")):
+            clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "settlement_failed"
+        assert r["settlement_note"] == "settled_without_market"
+
+    def test_settled_without_market_paper_false_not_marked(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        rec = self._rec("KXUFCFIGHT-20MAY16MOKMOR-MOK", "CF-SWU-RF", paper=False)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXUFCFIGHT-20MAY16MOKMOR-MOR", "YES")):
+            clv.check_clv_settlements()
+        # real money (paper=False) is never heuristically marked
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    # ---- (3) empty-map stale dated event --------------------------------
+
+    def test_empty_map_stale_dated_event_marked(self, tmp_clv_file, tmp_positions_file):
+        rec = self._rec("KXUFCFIGHT-20MAY16MOKMOR-MOK", "CF-EMPTY", paper=True)
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value={"markets": [], "cursor": None}):  # zero settled markets
+            clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "settlement_failed"
+        assert r["settlement_note"] == "event_no_markets_stale"
+
+    def test_empty_map_future_yyonly_not_marked(self, tmp_clv_file, tmp_positions_file):
+        # YY-only segment has no MONDD → _event_date_past_grace False (also protected
+        # by shape/opp_type). Stays open.
+        rec = self._rec("KXMLB-26-SEA", "CF-FUT-EMPTY", paper=True,
+                        opp_type="vig_stack_futures")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value={"markets": [], "cursor": None}):
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"
+
+    # ---- (8) reporting exclusion -----------------------------------------
+
+    def test_get_clv_report_excludes_synthetic_settlement_failed(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        recs = [
+            # genuinely-settled real trade → status "settled", counts in the report
+            self._rec("KXHIGHMIA-20APR24-T80", "ORD-WIN", paper=True, status="open"),
+            # synthetic junk → dead-marked settlement_failed, must NOT count
+            self._rec("KXHIGHNY-26MAY082210TEST-YES", "CF-SYN", paper=True),
+        ]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXHIGHMIA-20APR24-T80", "NO")):
+            clv.check_clv_settlements()
+        by_id = {r["trade_id"]: r for r in _read(tmp_clv_file)}
+        assert by_id["CF-SYN"]["status"] == "settlement_failed"
+        assert by_id["ORD-WIN"]["status"] == "settled"
+        report = clv.get_clv_report()
+        assert report["overall"]["count"] == 1   # only the real settled trade
+        assert "KXHIGHNY-26MAY082210TEST-YES" not in [r["ticker"] for r in report["recent"]]
+
+    # ---- (9) persistence through a mid-cycle abort -----------------------
+
+    def test_new_synthetic_marks_persist_through_mid_cycle_abort(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        # Synthetic dead-marks run in the zero-API pre-pass and persist BEFORE the
+        # slow fetch (like S155 malformed-shape), so a fetch that raises (proxy for
+        # the 900s abort) cannot discard them.
+        recs = [
+            self._rec("KXHIGHNY-26MAY082210TEST-YES", "CF-SYN1", paper=True),
+            self._rec("KXHIGHMIA-26APR24-T80", "CF-LIVE", paper=True),  # groupable, real
+        ]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        with patch.object(clv, "_fetch_settled_markets",
+                          side_effect=RuntimeError("simulated abort before final persist")):
+            with pytest.raises(RuntimeError):
+                clv.check_clv_settlements()
+        by_id = {r["trade_id"]: r for r in _read(tmp_clv_file)}
+        assert by_id["CF-SYN1"]["status"] == "settlement_failed"
+        assert by_id["CF-SYN1"]["settlement_note"] == "synthetic_test_ticker"
+        assert by_id["CF-LIVE"]["status"] == "counterfactual_open"  # fetch raised pre-settle

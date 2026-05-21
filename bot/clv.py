@@ -76,6 +76,17 @@ _CHECK_CLV_TIME_BUDGET_SEC = 600
 # negligible overhead, bounded worst-case loss.
 _CHECK_CLV_PERSIST_EVERY = 25
 
+# Session 157 (2026-05-21): grace window before the group path will heuristically
+# terminal-mark a record as dead (scalar / settled-without-us / stale dead-dated
+# event). Records have NO close_ts field (Phase 0), so age is from recorded_at.
+# Phase 0 age distribution of the OPEN cohort: genuinely-settleable recent records
+# median 0.8d; the dead paper tail 3-23d; the legit-open futures 15-27d. Grace does
+# NOT protect the futures (they are the OLDEST records) — they are excluded by
+# paper/opp_type/shape in _is_protected_open. Grace's only job is to never dead-mark
+# a freshly-recorded record before the settler reaches it; 7d clears the 0.8d
+# settleable median with wide margin.
+_CLV_SETTLEMENT_GRACE_DAYS = 7
+
 
 def _event_ticker(ticker: str) -> Optional[str]:
     """Derive the Kalshi event_ticker from a market ticker
@@ -134,6 +145,103 @@ def _is_dead_ticker(ticker: str) -> bool:
         return False
     parts = ticker.split("-")
     return len(parts) >= 3 and bool(_DEAD_EVENT_DATE.match(parts[1]))
+
+
+# Session 157 (2026-05-21): a test-harness emission (~2026-05-08) wrote 934
+# synthetic CF rows into the open set — KXHIGHNY-26MAY082210TEST-YES,
+# KXNBAGAME-26APR27ALPHA-A, *-26APR27IDL-IDL — whose event-date segment carries a
+# literal debug token. _is_dead_ticker MISSES them: their date segment HAS a day
+# (26MAY08...) so the no-day regex above doesn't match, so they route to the group
+# path which never terminal-marks them — they clog the oldest-first queue head and
+# starve settleable groups past the 600s budget. Phase 0 confirmed all 934 are
+# paper=True, 0 ever settled (counterfactual_settled / settled), and 0 overlap with
+# the 1,125 legit-open KX*-NN-TEAM season futures. We match the debug token in the
+# event-date segment; the caller additionally gates on paper is True so a real
+# market that happened to carry these letters can never be touched.
+_SYNTHETIC_TOKENS = ("TEST", "ALPHA", "IDL")
+
+
+def _is_synthetic_ticker(ticker: str) -> bool:
+    """True for a 3+-segment ticker whose event-date segment (parts[1]) contains a
+    synthetic test-harness debug token. Pair with a paper-only gate at the call site
+    — this is shape evidence, not a strategy classifier."""
+    parts = (ticker or "").split("-")
+    return len(parts) >= 3 and any(t in parts[1] for t in _SYNTHETIC_TOKENS)
+
+
+# Session 157: season-future shape KX{SERIES}-{YY}-{TEAM} (KXMLB-26-SEA,
+# KXNBA-26-OKC, KXNHL-26-COL). The 1,125 legit-open futures match this; they settle
+# Jun/Oct and must never be heuristically dead-marked.
+_FUTURES_SHAPE = re.compile(r"^KX[A-Z]+-\d{2}-[A-Z0-9]{2,6}$")
+
+
+def _is_futures_shape(ticker: str) -> bool:
+    return bool(_FUTURES_SHAPE.match(ticker or ""))
+
+
+def _is_protected_open(rec: dict) -> bool:
+    """True => NEVER heuristically terminal-mark this record in the group path.
+    Protects (1) real-money records (paper is not True), (2) season-future positions
+    (opp_type vig_stack_futures), and (3) future-shaped tickers (KX*-NN-TEAM) — the
+    1,125 must-survive legit-open futures are excluded three independent ways. The
+    per-record fallback's confirmed single-market 404-mark (clv.py ~830) is a
+    different, definitive path and is intentionally NOT gated by this."""
+    if rec.get("paper") is not True:
+        return True
+    if rec.get("opp_type") == "vig_stack_futures":
+        return True
+    return _is_futures_shape(rec.get("ticker") or "")
+
+
+def _clv_record_age_days(rec: dict) -> float:
+    """Age in days from recorded_at to now. Missing/unparseable -> 0.0 so the record
+    reads as fresh and is never past grace (fail-safe: never dead-mark on a bad
+    timestamp). Records carry no close_ts (Phase 0), so recorded_at is the only clock."""
+    ts = rec.get("recorded_at")
+    if not ts:
+        return 0.0
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0
+
+
+# Session 157: parse the leading YYMONDD calendar date from a ticker's event-date
+# segment (parts[1], e.g. "26MAY16" in KXUFCFIGHT-26MAY16MOKMOR-MOK). Season futures
+# carry a YY-only segment ("26" in KXMLB-26-SEA) with no MONDD, so they never parse
+# and are never marked by the empty-settled-map branch below.
+_EVENT_DATE = re.compile(r"^(\d{2})([A-Z]{3})(\d{2})")
+_MONTH_ABBR = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _event_date_past_grace(ticker: str) -> bool:
+    """True only if the ticker's event-date segment starts with a parseable YYMONDD
+    date more than _CLV_SETTLEMENT_GRACE_DAYS in the past. Used for the empty-
+    settled-map case: a dated event long gone with zero settled markets is dead.
+    Returns False for any ticker without a parseable MONDD (e.g. season futures), so
+    they are never marked by this branch."""
+    parts = (ticker or "").split("-")
+    if len(parts) < 2:
+        return False
+    m = _EVENT_DATE.match(parts[1])
+    if not m:
+        return False
+    month = _MONTH_ABBR.get(m.group(2))
+    if not month:
+        return False
+    try:
+        event_dt = datetime(2000 + int(m.group(1)), month, int(m.group(3)),
+                            tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    age_days = (datetime.now(timezone.utc) - event_dt).total_seconds() / 86400.0
+    return age_days > _CLV_SETTLEMENT_GRACE_DAYS
 
 
 def _mark_unsettleable(rec: dict, note: str) -> None:
@@ -739,6 +847,13 @@ def check_clv_settlements() -> list[dict]:
             _mark_unsettleable(rec, "malformed_ticker")
             mutated_ids.add(rec.get("trade_id"))
             continue
+        if rec.get("paper") is True and _is_synthetic_ticker(tk):
+            # Session 157: synthetic test-harness pollution (debug token in the
+            # event-date segment, paper-only). Zero-API terminal-mark like the
+            # malformed-shape case above so it stops starving settleable groups.
+            _mark_unsettleable(rec, "synthetic_test_ticker")
+            mutated_ids.add(rec.get("trade_id"))
+            continue
         key = (_event_ticker(tk) if _CLV_BATCH_GROUP_BY == "event"
                else (tk.split("-")[0] or None))
         (groups[key] if key else fallback).append(rec)
@@ -781,6 +896,22 @@ def check_clv_settlements() -> list[dict]:
         for rec in recs:
             m = settled_map.get(rec["ticker"])
             if not m:
+                # Session 157: our ticker is not among the event's settled markets.
+                # Heuristically terminal-mark only paper/CF, non-futures, past-grace
+                # records — never the legit-open futures (protected three ways).
+                if (not _is_protected_open(rec)
+                        and _clv_record_age_days(rec) > _CLV_SETTLEMENT_GRACE_DAYS):
+                    if settled_map:
+                        # Event settled (has settled markets) but our market is
+                        # absent — voided/removed; never produces a binary CLV.
+                        _mark_unsettleable(rec, "settled_without_market")
+                        mutated_ids.add(rec.get("trade_id"))
+                    elif _event_date_past_grace(rec["ticker"]):
+                        # Session 157: event returned ZERO settled markets and its
+                        # dated event is long past — dead/nonexistent. Futures'
+                        # YY-only segment never parses, so they never reach here.
+                        _mark_unsettleable(rec, "event_no_markets_stale")
+                        mutated_ids.add(rec.get("trade_id"))
                 continue
             mstatus = m.get("status", "")
             result = m.get("result", "")
@@ -791,6 +922,13 @@ def check_clv_settlements() -> list[dict]:
             elif result.upper() == "NO":
                 closing_yes = 0
             else:
+                # Session 157: non-binary settled result (scalar) — our market
+                # settled but can't produce a binary CLV. Terminal-mark paper/CF,
+                # non-futures, past-grace records so they stop re-polling.
+                if (not _is_protected_open(rec)
+                        and _clv_record_age_days(rec) > _CLV_SETTLEMENT_GRACE_DAYS):
+                    _mark_unsettleable(rec, "settlement_skipped_scalar")
+                    mutated_ids.add(rec.get("trade_id"))
                 continue  # non-binary result (e.g. scalar) — can't compute CLV
             _apply_clv_settlement(
                 rec, result, closing_yes,
