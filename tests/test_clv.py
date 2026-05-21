@@ -1353,3 +1353,37 @@ class TestSession155DrainPersistence:
         assert by_id["SEED-1"]["status"] == "counterfactual_settled"   # our settle landed
         assert "CONCURRENT-1" in by_id                                  # append survived
         assert by_id["CONCURRENT-1"]["status"] == "counterfactual_open"
+
+    def test_soft_time_budget_stops_group_loop_early(
+        self, tmp_clv_file, tmp_positions_file, monkeypatch
+    ):
+        """Once the wall-clock budget is spent, no new event-fetch is started —
+        so the cycle finishes under the 900s guard and remaining groups defer to
+        the next cycle. With budget=10s and each group 'costing' 4s, the 4th
+        budget check (elapsed 12s) breaks → exactly 3 groups fetched."""
+        recs = [
+            self._rec(f"KXEV{i:02d}-26APR24-T80", f"CF-EV-{i:02d}",
+                      stamp=f"2026-04-20T00:{i:02d}:00+00:00")
+            for i in range(10)
+        ]
+        tmp_clv_file.write_text(json.dumps(recs))
+        tmp_positions_file.write_text("[]")
+
+        monkeypatch.setattr(clv, "_CHECK_CLV_TIME_BUDGET_SEC", 10.0)
+        fake_now = [0.0]
+        monkeypatch.setattr(clv.time, "monotonic", lambda: fake_now[0])
+
+        fetched = []
+
+        def fetch(key):
+            fetched.append(key)
+            fake_now[0] += 4.0   # each group costs 4s; 0,4,8 under 10 → 3 fetched
+            return {}
+
+        monkeypatch.setattr(clv, "_fetch_settled_markets", fetch)
+
+        clv.check_clv_settlements()
+
+        assert len(fetched) == 3, (
+            f"expected 3 groups before the 10s budget cut, got {len(fetched)}"
+        )

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -52,6 +53,19 @@ _CHECK_CLV_BATCH_SIZE = 200
 # series (KXATPMATCH spans 74 events). Also breaks the S151 oldest-first FIFO
 # starvation where ~1,200 long-dated season futures clogged the queue head.
 _CLV_BATCH_GROUP_BY = "event"
+
+# Session 155 (2026-05-21): soft wall-clock budget. The count cap above was NOT
+# enough — 200 event-groups × ≥1 @with_rate_limit get_markets each, through the
+# GLOBAL S146 limiter (20 tokens / 60s, shared with scan_cycle / live_watcher /
+# snapshot_universe / position_monitor), is ≥600s uncontended and >900s under
+# contention, so the S150 900s outer guard ([bot/main.py:1618]) fired on S155's
+# first live cycle and aborted before persisting. This budget stops STARTING new
+# fetches once elapsed exceeds it, so the cycle finishes WELL under 900s and
+# reaches the final persist; the remaining groups drain on subsequent cycles.
+# 600s leaves ≥300s margin for an in-flight fetch (≤30s S101 cap) + the persist.
+# Time (not count) is the robust bound because Kalshi latency + token contention
+# vary; _CHECK_CLV_BATCH_SIZE stays as a backstop.
+_CHECK_CLV_TIME_BUDGET_SEC = 600
 
 
 def _event_ticker(ticker: str) -> Optional[str]:
@@ -672,6 +686,13 @@ def check_clv_settlements() -> list[dict]:
     # a single end-of-cycle _save, so progress survives a 900s abort. Replaces
     # the old `changed` flag.
     mutated_ids: set = set()
+    # Session 155: wall-clock instrumentation. _t0 anchors the per-phase elapsed
+    # logged at cycle end so the ship gate can confirm each cycle finishes < 900s
+    # and see where the time goes (the timing the S152 brief asked for but never
+    # got). The soft budget below uses the same _t0.
+    _t0 = time.monotonic()
+    _groups_fetched = _settled_count = _fallback_checked = 0
+    _budget_hit = False
 
     # Session 9: build order_id -> position lookup so we can propagate
     # mfe/mae/ticks onto each clv record at settlement time. Counterfactuals
@@ -721,6 +742,8 @@ def check_clv_settlements() -> list[dict]:
     # away on every abort.
     if mutated_ids:
         _persist_progress(records, mutated_ids)
+    _dead_marked = len(mutated_ids)
+    _t_deadmark = time.monotonic()
 
     # Oldest-first by each group's oldest record (preserves the S151 FIFO intent).
     ordered = sorted(
@@ -738,8 +761,14 @@ def check_clv_settlements() -> list[dict]:
     for key, recs in ordered:
         if budget <= 0:
             break
+        # Session 155: stop starting new fetches once the wall-clock budget is
+        # spent, so the cycle finishes under the 900s guard and reaches persist.
+        if time.monotonic() - _t0 > _CHECK_CLV_TIME_BUDGET_SEC:
+            _budget_hit = True
+            break
         settled_map = _fetch_settled_markets(key)
         budget -= 1
+        _groups_fetched += 1
         for rec in recs:
             m = settled_map.get(rec["ticker"])
             if not m:
@@ -760,6 +789,9 @@ def check_clv_settlements() -> list[dict]:
                 _positions_by_order, settled_now,
             )
             mutated_ids.add(rec.get("trade_id"))
+            _settled_count += 1
+
+    _t_groups = time.monotonic()
 
     # Per-record fallback for un-groupable tickers (Outcome B hybrid), bounded by
     # the remaining shared budget. Byte-identical to the legacy detection,
@@ -767,8 +799,12 @@ def check_clv_settlements() -> list[dict]:
     # the top of this function.
     fallback.sort(key=lambda r: r.get("recorded_at") or "")
     for rec in fallback[:max(0, budget)]:
+        if time.monotonic() - _t0 > _CHECK_CLV_TIME_BUDGET_SEC:
+            _budget_hit = True
+            break
         is_cf = rec.get("status") == "counterfactual_open"
         ticker = rec["ticker"]
+        _fallback_checked += 1
         try:
             market_resp = get_market(ticker)
         except Exception as e:
@@ -804,9 +840,22 @@ def check_clv_settlements() -> list[dict]:
             rec, result, closing_yes, is_cf, _positions_by_order, settled_now,
         )
         mutated_ids.add(rec.get("trade_id"))
+        _settled_count += 1
 
+    _t_fallback = time.monotonic()
     if mutated_ids:
         _persist_progress(records, mutated_ids)
+
+    _t_end = time.monotonic()
+    logger.info(
+        "check_clv_settlements: dead_marked=%d groups_fetched=%d settled=%d "
+        "fallback_checked=%d budget_hit=%s | elapsed deadmark=%.1fs groups=%.1fs "
+        "fallback=%.1fs persist=%.1fs total=%.1fs (budget=%ds, guard=900s)",
+        _dead_marked, _groups_fetched, _settled_count, _fallback_checked,
+        _budget_hit, _t_deadmark - _t0, _t_groups - _t_deadmark,
+        _t_fallback - _t_groups, _t_end - _t_fallback, _t_end - _t0,
+        _CHECK_CLV_TIME_BUDGET_SEC,
+    )
 
     return settled_now
 
