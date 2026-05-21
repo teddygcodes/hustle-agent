@@ -95,6 +95,71 @@ def compute_clv_cents(
     return round(clv_cents, 2), round(clv_relative, 4)
 
 
+def _apply_clv_settlement(rec, result, closing_yes, is_cf, positions_by_order, settled_now):
+    """Write all settlement-time fields onto a settled record.
+
+    Session 152: single source of truth for the settlement write so the batch
+    path and the per-record fallback in check_clv_settlements stay byte-identical
+    (same discipline as compute_clv_cents). Preserves S13b CLV math, S11
+    prediction-close propagation, S9 mfe/mae/ticks, and the S16 mfe extension.
+    Caller sets `changed = True` after this returns.
+    """
+    # Session 13b: single source of truth — back-tester calls the same fn.
+    clv_cents_rounded, clv_relative_rounded = compute_clv_cents(
+        rec["side"], rec["entry_price_cents"], closing_yes,
+    )
+
+    rec["status"] = "counterfactual_settled" if is_cf else "settled"
+    rec["closing_yes_price"] = closing_yes
+    rec["market_result"] = result
+    rec["clv_cents"] = clv_cents_rounded
+    rec["clv_relative"] = clv_relative_rounded
+    rec["settled_at"] = datetime.now(timezone.utc).isoformat()
+
+    # Session 11: propagate closing price to predictions.jsonl rows that
+    # match this clv record by ticker + recorded_at ±60s. Fires for both
+    # real trades and counterfactuals (both sides emit predictions).
+    try:
+        from bot.calibration import update_prediction_close
+        update_prediction_close(
+            ticker=rec["ticker"],
+            recorded_at=rec.get("recorded_at", ""),
+            closing_yes_price=closing_yes,
+        )
+    except Exception:
+        logger.exception("calibration update_prediction_close failed (non-fatal)")
+
+    if not is_cf:
+        pos = positions_by_order.get(rec.get("trade_id"))
+        if pos is not None:
+            for key in ("mfe_cents", "mae_cents", "mfe_at", "mae_at", "ticks_observed"):
+                if pos.get(key) is not None:
+                    rec[key] = pos[key]
+        # Session 16: extend mfe_cents to include the settlement event so
+        # gap = mfe_cents - clv_cents is ≥ 0 in the excursion report.
+        # mfe_cents from positions caps at the highest *observed bid*
+        # during open life (yes_bid ≤ 99 for winning YES, no_bid ≤ 99 for
+        # winning NO). clv_cents at settlement uses the payout value
+        # (100/0). Without this max, every winning held-to-settlement
+        # position has a structural -1¢ gap that obscures the "exit
+        # logic" signal. After this max, gap > 0 truly means "MFE during
+        # open life exceeded the eventual exit-favorable" — i.e. the bot
+        # peaked and gave it back. The clamp to ≥ 0 preserves the MFE
+        # convention (non-negative magnitude); for losers clv_cents is
+        # negative and the ratchet is a no-op.
+        mfe_with_settlement = max(0, int(round(clv_cents_rounded)))
+        existing_mfe = rec.get("mfe_cents")
+        if existing_mfe is None or mfe_with_settlement > existing_mfe:
+            rec["mfe_cents"] = mfe_with_settlement
+            rec["mfe_at"] = rec.get("settled_at") or datetime.now(timezone.utc).isoformat()
+        settled_now.append(rec.copy())
+        logger.info(
+            f"CLV settled: {rec['ticker']} | {rec['side'].upper()} entry={rec['entry_price_cents']}¢ "
+            f"close={closing_yes}¢ | CLV={clv_cents_rounded:+.1f}¢ ({clv_relative_rounded:+.1%}) | "
+            f"result={result}"
+        )
+
+
 def _load() -> list[dict]:
     f = _get_file()
     if not f.exists():
@@ -572,61 +637,13 @@ def check_clv_settlements() -> list[dict]:
         else:
             continue
 
-        # Session 13b: single source of truth — back-tester calls the same fn.
-        clv_cents_rounded, clv_relative_rounded = compute_clv_cents(
-            rec["side"], rec["entry_price_cents"], closing_yes,
+        # Session 152: shared settlement write (batch path + per-record fallback
+        # both call this) — see _apply_clv_settlement for the full S13b/S11/S9/S16
+        # rationale that used to live inline here.
+        _apply_clv_settlement(
+            rec, result, closing_yes, is_cf, _positions_by_order, settled_now,
         )
-
-        rec["status"] = "counterfactual_settled" if is_cf else "settled"
-        rec["closing_yes_price"] = closing_yes
-        rec["market_result"] = result
-        rec["clv_cents"] = clv_cents_rounded
-        rec["clv_relative"] = clv_relative_rounded
-        rec["settled_at"] = datetime.now(timezone.utc).isoformat()
         changed = True
-
-        # Session 11: propagate closing price to predictions.jsonl rows that
-        # match this clv record by ticker + recorded_at ±60s. Fires for both
-        # real trades and counterfactuals (both sides emit predictions).
-        try:
-            from bot.calibration import update_prediction_close
-            update_prediction_close(
-                ticker=ticker,
-                recorded_at=rec.get("recorded_at", ""),
-                closing_yes_price=closing_yes,
-            )
-        except Exception:
-            logger.exception("calibration update_prediction_close failed (non-fatal)")
-
-        if not is_cf:
-            pos = _positions_by_order.get(rec.get("trade_id"))
-            if pos is not None:
-                for key in ("mfe_cents", "mae_cents", "mfe_at", "mae_at", "ticks_observed"):
-                    if pos.get(key) is not None:
-                        rec[key] = pos[key]
-            # Session 16: extend mfe_cents to include the settlement event so
-            # gap = mfe_cents - clv_cents is ≥ 0 in the excursion report.
-            # mfe_cents from positions caps at the highest *observed bid*
-            # during open life (yes_bid ≤ 99 for winning YES, no_bid ≤ 99 for
-            # winning NO). clv_cents at settlement uses the payout value
-            # (100/0). Without this max, every winning held-to-settlement
-            # position has a structural -1¢ gap that obscures the "exit
-            # logic" signal. After this max, gap > 0 truly means "MFE during
-            # open life exceeded the eventual exit-favorable" — i.e. the bot
-            # peaked and gave it back. The clamp to ≥ 0 preserves the MFE
-            # convention (non-negative magnitude); for losers clv_cents is
-            # negative and the ratchet is a no-op.
-            mfe_with_settlement = max(0, int(round(clv_cents_rounded)))
-            existing_mfe = rec.get("mfe_cents")
-            if existing_mfe is None or mfe_with_settlement > existing_mfe:
-                rec["mfe_cents"] = mfe_with_settlement
-                rec["mfe_at"] = rec.get("settled_at") or datetime.now(timezone.utc).isoformat()
-            settled_now.append(rec.copy())
-            logger.info(
-                f"CLV settled: {ticker} | {rec['side'].upper()} entry={rec['entry_price_cents']}¢ "
-                f"close={closing_yes}¢ | CLV={clv_cents_rounded:+.1f}¢ ({clv_relative_rounded:+.1%}) | "
-                f"result={result}"
-            )
 
     if changed:
         _save(records)

@@ -1084,3 +1084,29 @@ class TestSession151BatchCap:
         # Specifically the 200 oldest open ones.
         expected = [f"KXMIXO-{i:04d}" for i in range(clv._CHECK_CLV_BATCH_SIZE)]
         assert queried == expected
+
+
+class TestSession152SettlementHelper:
+    """S152: pin the full settlement-write behavior before extracting it into
+    _apply_clv_settlement (must stay byte-identical for batch + fallback paths)."""
+
+    def test_real_trade_settlement_writes_all_fields(self, tmp_clv_file, tmp_positions_file):
+        rec = {"ticker": "KXHIGHMIA-26APR24-T80", "opp_type": "vig_stack_series",
+               "side": "no", "entry_price_cents": 92, "contracts": 1,
+               "trade_id": "PAPER-1", "paper": True, "status": "open",
+               "recorded_at": "2026-04-24T12:00:00+00:00", "closing_yes_price": None,
+               "clv_cents": None, "clv_relative": None, "settled_at": None}
+        tmp_clv_file.write_text(json.dumps([rec]))
+        tmp_positions_file.write_text(json.dumps(
+            [{"order_id": "PAPER-1", "mfe_cents": 5, "mae_cents": -3, "ticks_observed": 12}]))
+        fake = {"market": {"status": "settled", "result": "NO", "yes_bid": 0, "yes_ask": 0}}
+        with patch("agent.kalshi_client.get_market", return_value=fake):
+            settled = clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "settled"
+        assert r["closing_yes_price"] == 0
+        assert r["market_result"] == "NO"
+        assert r["clv_cents"] == 8.0          # NO: (100-92) - 0 = 8
+        assert r["mae_cents"] == -3 and r["ticks_observed"] == 12
+        assert r["mfe_cents"] == 8            # S16: max(existing 5, settlement 8)
+        assert len(settled) == 1
