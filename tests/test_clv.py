@@ -1223,3 +1223,55 @@ class TestSession152BatchSettlement:
         with patch("agent.kalshi_client.get_markets", side_effect=fake):
             clv.check_clv_settlements()
         assert len(fetched) == clv._CHECK_CLV_BATCH_SIZE   # capped
+
+
+class TestSession152Prune:
+    """S152: terminal-mark records whose market will never produce a binary CLV
+    (malformed shape with no API call; confirmed 404 in the per-record path)."""
+
+    def _rec(self, ticker, tid, status="counterfactual_open", stamp="2026-04-20T00:00:00+00:00"):
+        return {"ticker": ticker, "opp_type": "vig_stack_series", "side": "no",
+                "entry_price_cents": 50, "contracts": 0, "trade_id": tid, "paper": False,
+                "status": status, "recorded_at": stamp, "closing_yes_price": None,
+                "clv_cents": None, "clv_relative": None, "settled_at": None}
+
+    def test_dead_event_shape_terminalized_without_api(self, tmp_clv_file, tmp_positions_file):
+        recs = [self._rec("KXHIGHNY-26APR-70", "CF-1-KXHIGHNY-26APR-70"),
+                self._rec("KXTEST-26APR-1", "CF-1-KXTEST-26APR-1")]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets") as gm, \
+             patch("agent.kalshi_client.get_market") as g1:
+            clv.check_clv_settlements()
+        gm.assert_not_called(); g1.assert_not_called()        # no API for dead shapes
+        rows = _read(tmp_clv_file)
+        assert all(r["status"] == "settlement_failed" for r in rows)
+        assert all(r["settlement_note"] == "malformed_ticker" for r in rows)
+
+    def test_confirmed_404_terminalized(self, tmp_clv_file, tmp_positions_file):
+        rec = self._rec("KXHIGHDEN-A", "CF-1-KXHIGHDEN-A")     # 2-seg -> fallback
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_market",
+                   return_value={"error": "Kalshi API error: HTTP Error 404: Not Found"}):
+            clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "settlement_failed"
+        assert r["settlement_note"] == "market_not_found"
+
+    def test_active_market_not_terminalized(self, tmp_clv_file, tmp_positions_file):
+        # un-groupable ticker, get_market says active -> LEFT open (terminal-mark
+        # is 404-only; never terminalizes a live/slow market).
+        rec = self._rec("KXFOO-BAR", "CF-1-x")     # 2-seg -> per-record fallback
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_market",
+                   return_value={"status": "active", "result": "", "yes_bid": 40, "yes_ask": 45}):
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"   # untouched
+
+    def test_futures_not_dead_marked(self, tmp_clv_file, tmp_positions_file):
+        # season futures (SERIES-YY-TEAM) are valid open markets -> grouped and
+        # batch-checked, never terminal-marked by the malformed-shape fast-path.
+        rec = self._rec("KXNBA-26-OKC", "CF-1-y")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets", return_value={"markets": [], "cursor": None}):
+            clv.check_clv_settlements()
+        assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"   # not dead-marked

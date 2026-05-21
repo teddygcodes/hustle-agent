@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -88,6 +89,38 @@ def _fetch_settled_markets(group_value: str) -> dict:
         if not cursor or not batch:
             break
     return out
+
+
+# Session 152: prune records whose market will never produce a binary CLV so the
+# settler stops re-polling them every cycle. Two routes — provable-by-shape (no
+# API call) and confirmed-404 (per-record fallback). Phase 0 (2026-05-21) found
+# ~1,070 such records inflating the open set: KXHIGHNY-26APR* (995, partial date,
+# no day) + KXTEST* (69) + a handful of 2-segment one-offs (KXHIGHDEN-A).
+_DEAD_EVENT_DATE = re.compile(r"^\d{2}[A-Z]{3}$")   # YYMON with no day -> not a real event
+
+
+def _is_dead_ticker(ticker: str) -> bool:
+    """True for tickers that provably can't be a real Kalshi market: a 3+-segment
+    ticker whose event date segment lacks a day (KXHIGHNY-26APR-70 -> event
+    KXHIGHNY-26APR; Phase 0 confirmed 0 settled + 404). This also catches the
+    KXTEST-26APR* pollution. Excludes season futures (SERIES-YY) and dated markets
+    (SERIES-YYMONDD-...); 2-segment one-offs (KXHIGHDEN-A, KXTEST-A) fall through
+    to the per-record fallback where a confirmed 404 terminal-marks them. We match
+    on shape, not a "KXTEST" prefix, so benign KXTEST-* fixtures still settle."""
+    if not ticker:
+        return False
+    parts = ticker.split("-")
+    return len(parts) >= 3 and bool(_DEAD_EVENT_DATE.match(parts[1]))
+
+
+def _mark_unsettleable(rec: dict, note: str) -> None:
+    """Terminal status for a record that will never produce a binary CLV (confirmed
+    404 / malformed ticker). Forward-only status, excluded from the open-candidate
+    filter and from get_clv_report (which filters settled / counterfactual_settled),
+    so the record stops being polled every cycle."""
+    rec["status"] = "settlement_failed"
+    rec["settlement_note"] = note
+    rec["settled_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _get_file() -> Path:
@@ -637,8 +670,15 @@ def check_clv_settlements() -> list[dict]:
     groups: dict = defaultdict(list)
     fallback: list = []
     for rec in candidates:
-        key = (_event_ticker(rec["ticker"]) if _CLV_BATCH_GROUP_BY == "event"
-               else (rec["ticker"].split("-")[0] or None))
+        tk = rec["ticker"]
+        if _is_dead_ticker(tk):
+            # Provably-nonexistent shape (malformed/test): terminal-mark with no
+            # API call so it stops clogging the open set every cycle.
+            _mark_unsettleable(rec, "malformed_ticker")
+            changed = True
+            continue
+        key = (_event_ticker(tk) if _CLV_BATCH_GROUP_BY == "event"
+               else (tk.split("-")[0] or None))
         (groups[key] if key else fallback).append(rec)
 
     # Oldest-first by each group's oldest record (preserves the S151 FIFO intent).
@@ -694,6 +734,12 @@ def check_clv_settlements() -> list[dict]:
             logger.warning(f"CLV settlement check failed for {ticker}: {e}")
             continue
         market = market_resp if isinstance(market_resp, dict) else {}
+        err = market.get("error")
+        if err and ("404" in err or "not found" in err.lower()):
+            # Confirmed-nonexistent market — terminal-mark, stop re-polling.
+            _mark_unsettleable(rec, "market_not_found")
+            changed = True
+            continue
         if "market" in market:
             market = market["market"]
         mstatus = market.get("status", "")
