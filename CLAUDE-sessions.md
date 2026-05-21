@@ -7842,3 +7842,37 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **README sync.** Done — directory-map entries for `outcome_tracker.py` + `outcomes.db` note graceful-degrade + auto-recovery.
 
 ---
+
+### ☑ Session 154 — BS#17 root-cause fix: bounded shutdown + force-exit watchdog (May 20, 2026, Outcome A)
+
+**Premise (operator-confirmed + source-confirmed).** Every restart 5/14→5/20 needed `kill -9`: a plain SIGTERM leaves the old child alive. This is the FIRST link in the week's cascade (wedge → orphan survives a missed kill-9 → duplicate runtime [BS#3] → concurrent sqlite writes → outcomes.db corruption → 5/20 outage). S58 fixed BS#17's watcher-cleanup *ordering*; this is a DISTINCT, second hang.
+
+**Phase 0 (gating live experiment; operator chose "confirm before any os._exit code").**
+- **Mechanism, source-confirmed (Python 3.14.3):** `asyncio.run()`→`Runner.close()` (asyncio/runners.py:74) calls `loop.shutdown_default_executor(THREAD_JOIN_TIMEOUT)` with `THREAD_JOIN_TIMEOUT=300` — a **bounded 300s** wait; on expiry it warns and abandons. Then interpreter exit fires `concurrent.futures._python_exit` (thread.py:23-37, registered via `threading._register_atexit`) which `t.join()`s every ThreadPoolExecutor worker with **NO timeout**. The S39→S150 BS#13 wraps use `run_in_executor(None, ...)` (the default executor, 10 sites); its workers are non-daemon and uncancellable. If a worker is mid sync-call at SIGTERM, the join blocks forever. S150's `wait_for(900s)` bounds the coroutine, not the thread.
+- **Rules out the brief's other outcomes:** C (`shutdown_default_executor(timeout)`) only shortens the 300s stage — the unbounded `_python_exit` join still hangs; D (daemonize) is ineffective (3.14 workers are non-daemon and `_python_exit` joins via `_threads_queues` regardless) AND unsafe (would abort the 6 WRITE-class executor calls mid-write). Only `os._exit()` bypasses both stages → Outcome A.
+- **Clean-room repro (zero live risk):** a ThreadPoolExecutor worker in `time.sleep(1e9)`; `faulthandler` dumped the main thread parked in `_shutdown`→`_python_exit` (thread.py:31)→`join` with the worker stuck — the exact predicted frame.
+- **Live confirmation:** plain SIGTERM to the running child → it survived >12s; `bot.log` showed the FULL graceful sequence ("Stopping 4 active watcher(s)" → "Application.stop() complete" → "Bot stopped") THEN the process hung. "Bot stopped" logged + survives = the hang is AFTER `stop()` returns (interpreter-exit join) → **Outcome A**, not a hung await in `stop()` (Outcome B). py-spy needs root on macOS; behavioral + log discrimination + the clean-room frame proof were conclusive.
+
+**What shipped (`bot/main.py`, 1 logical fix).**
+- Imports: `threading`, `time`.
+- Near `_release_lock`: `_SHUTDOWN_DEADLINE_SEC = 10.0`; `_shutdown_watchdog_cancel` / `_shutdown_watchdog_armed` Events; `_force_exit(code=0)` (wraps `os._exit`, indirected for tests); `_arm_shutdown_watchdog(deadline_sec)` (idempotent; daemon thread waits on the cancel Event with `timeout=deadline`, else logs the `S154: graceful shutdown exceeded` ERROR and `_force_exit(0)`).
+- Signal handler (`async_main`): replaced the bare `lambda: create_task(bot.stop())` with `_on_shutdown_signal` that arms the watchdog BEFORE scheduling `stop()`, for both SIGINT and SIGTERM.
+- **Preserved:** S58 watcher-cancel ordering, `_release_lock()` position (early in `stop()`, before the unbounded `notifier.stop()`), the S150 `wait_for(900s)` wraps, BS#9/#5.
+
+**Tests.** +3 (1857 → 1860), all pass, no skips/xfails: `test_shutdown_watchdog_force_exits_when_deadline_exceeded`, `test_shutdown_watchdog_stands_down_when_cancelled`, `test_arm_shutdown_watchdog_is_idempotent` (in `tests/test_main.py`, patching `_force_exit`).
+
+**Verification (live, 2026-05-20).**
+- Full suite **1860 passed**.
+- Deploy: `kill -9` the old-code child + clear pycache → `run_bot.sh` respawned the watchdog-equipped child (signalled the **python child** directly, never the wrapper — `kickstart -k` orphans the child per the S153 note).
+- **3 consecutive fully-started restarts**, each plain SIGTERM: self-terminated in ~10-11s with "Bot stopped" logged AND the `S154: graceful shutdown exceeded 10s` ERROR (watchdog fired), **zero kill -9**; single Glint runtime + correct lockfile after each (Bob at `~/Desktop/bob/` cwd-checked untouched throughout).
+- (Two rushed restarts on <1s-old newborns exited cleanly via default SIGTERM before the handler registered — not watchdog tests, but confirm no regression on early-startup SIGTERM.)
+
+**Operating note.** The watchdog fires on **essentially every restart** — EXPECTED, not "cleanup too slow": a running bot almost always has an uncancellable rate-limited Kalshi/NWS executor call in-flight at SIGTERM, so the join genuinely can't complete. 10s bounded beats an infinite hang. `stop()` itself completes in ~1s; the remaining ~9s is the watchdog window (kept generous so in-flight WRITE executor calls can finish before force-exit).
+
+**Commits.** 2 (1 logical fix each): (1) watchdog fix (`bot/main.py` + `tests/test_main.py`), (2) docs sync (CLAUDE.md BS#17 addendum, this block, README).
+
+**Cross-refs.** S58 (BS#17 ordering — preserved). BS#13/S39/S98/S143/S148/S150 (the `run_in_executor` wraps that fixed runtime wedges and created this shutdown wedge — the missing companion lesson: a fix that moves work to a thread pool must also bound that pool at shutdown). S153 (made the cascade's last link survivable; S154 severs the first). BS#3/#14 (the duplicate-runtime cascade this prevents). **Resolves the S149 SIGTERM-wedge Outcome-C HOLD.**
+
+**Watch-list.** Next week: with clean shutdown, the duplicate-runtime + outcomes.db-corruption classes should not recur (watch). If a duplicate runtime appears AFTER a SIGTERM restart, investigate whether `_release_lock()` ran before force-exit (it should — it's early in `stop()`).
+
+---
