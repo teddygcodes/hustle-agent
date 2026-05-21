@@ -7920,3 +7920,23 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Cross-refs.** Battle Scar #9/#10 (untouched). S64/S67 (the override surface to reuse). S86 (CF dedup — the ~4.7× deflation driver). S93 (KXHIGHCHI disable — confirmed). S100 (ladder-context fields for the real-P&L corroboration). S47 (cross-cohort discipline). S145 (sister weather-floor HOLD). Echoes the S130 contamination lesson — the lead numbers were raw-N inflated.
 
 ---
+
+### ☑ Session 157 — CLV group-path terminal-marking: drain the stale-junk clog without killing legit-open futures (May 21, 2026, Outcome A)
+
+**Premise.** S155 stopped check_clv from wedging (bounded 600s, dead-mark-first, incremental persist) but the backlog kept GROWING — the group settlement path couldn't terminal-mark records it fetched-but-couldn't-settle, so ~930 synthetic test rows + dead-event 404s + scalar-result markets clogged the oldest-first queue head and starved the ~1–8 settleable groups per cycle past the 600s budget. S157 extends terminal-marking into the group path.
+
+**Phase 0 (bucket the OPEN cohort + the safety distinction).** OPEN split into: (a) ~930 synthetic test-harness rows (debug tokens TEST/ALPHA/IDL in the event-date segment — `KXHIGHNY-26MAY08…TEST`, `KXNBAGAME-26APR27ALPHA-A`/`IDL-IDL`; all paper=True, 0 ever settled, leak dated ~2026-05-08); (b) dead/404 dated events + scalar-result markets; (c) **the 1,125 legit-open season futures (`KX{SERIES}-NN-TEAM`, settle Jun/Oct) that MUST survive** — they are also groupable-and-unsettled, so a naive "no settled market → mark dead" rule would have destroyed them. The session hinges on distinguishing (a)/(b) from (c).
+
+**What shipped (`bot/clv.py`, +138 lines, commit `38c4edd`).** Group-path terminal-marks for the three dead cases — `settled_without_market` (event settled, our market absent → voided), `event_no_markets_stale` (event 404/empty AND its dated segment >grace old), `settlement_skipped_scalar` (non-binary result) — each gated on `(not _is_protected_open(rec)) AND age > _CLV_SETTLEMENT_GRACE_DAYS (7d)`. Plus a paper-only `_is_synthetic_ticker` sweep (zero-API) for the (a) leak. **Futures protected four independent ways:** `_is_protected_open` (real-money OR `vig_stack_futures` opp_type OR `KX*-NN-TEAM` shape) + `_event_date_past_grace` returns False for the futures' YY-only segment (never parses MONDD) + fail-safe `_clv_record_age_days` (bad/missing timestamp → 0.0 → reads fresh → never marked) + the 7d grace.
+
+**Tests.** `tests/test_clv.py` **78 passed** (incl. S157 regressions: dead/scalar marked, futures NOT marked, persist survives mid-cycle abort); full suite **1889** per coder.
+
+**Verification (live, 2026-05-21, planner-verified independently).** Stale junk cleared (the 18:27 cycle fired `dead_marked=928`); **0 futures-shaped records in `settlement_failed`, all 1,125 preserved**; cycles fast post-clear (groups 100→45, total 607s→**240s**, budget no longer binding); outer-timeout counter frozen 32 (no wedge). **Reframe of the ship-gate "drain to floor":** OPEN sits at ~1,452 = 1,125 futures + ~327 recent CFs, and **0 of the non-futures are stale (>7d)** — median age 0d, max 6d. So "OPEN flat ~1,450" is the healthy STEADY STATE (futures + a rolling day of recent CFs awaiting natural settlement), NOT a drain failure; the true floor is ~1,125 + a day's inflow. Success metric is "0 stale >7d," which holds.
+
+**Honest notes.** (1) **Deploy timeline:** cycles 13:43–18:06 logged `dead_marked=0` (an earlier iteration that didn't clear the junk); the effective dead-marking landed at the ~18:27 redeploy. The committed code (`38c4edd`) is the working-tree final version (`test_clv.py` 78 green on it). (2) **The coder's "cycle 1 ✅ 939 synthetic" framing undersold it** — the 939 were pre-existing production pollution from a test-isolation leak, not a clean win; surfaced + documented here.
+
+**Open follow-up (the root cause).** S157 cleans the *symptom* (marks the ~930 synthetic rows + adds a paper-only defensive sweep), but a **test-isolation leak** wrote those synthetic CFs into the REAL `bot/state/clv.json` (~2026-05-08). The leaking test must be found and isolated to a tmp/fixture (same class as the `worktree tools/ symlink` memory). Until then `_is_synthetic_ticker` is a crutch, not a safety net. Filed in Open Loops; leak-hunt in progress.
+
+**Cross-refs.** S151 (200/call FIFO cap — the band-aid this finally drains past). S155 (bounded-cycle drain fix this builds on — extend, not replace). S86 (CF dedup). Battle Scar #3/#14 + the worktree-symlink-gotcha memory (test-isolation class). The +$931 vig_stack workhorse untouched — check_clv is CLV/calibration settlement only.
+
+---
