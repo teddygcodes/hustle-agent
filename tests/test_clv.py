@@ -162,9 +162,8 @@ class TestSettlementHandling:
     def test_cf_settles_to_counterfactual_settled_status(self, tmp_clv_file):
         clv.record_counterfactual_skip(SAMPLE_OPP, "edge_below_threshold", "SCAN1")
 
-        fake_market = {"market": {"status": "settled", "result": "YES",
-                                  "yes_bid": 0, "yes_ask": 0}}
-        with patch("agent.kalshi_client.get_market", return_value=fake_market):
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXHIGHMIA-26APR24-T80", "YES")):
             settled_now = clv.check_clv_settlements()
 
         # CF settlements are NOT in the return list (paper-only notification)
@@ -186,9 +185,8 @@ class TestSettlementHandling:
             entry_price_cents=92, fair_value_cents=95.5, edge_at_trade=0.08,
             contracts=2, trade_id="PAPER-X1", paper=True,
         )
-        fake_market = {"market": {"status": "settled", "result": "NO",
-                                  "yes_bid": 0, "yes_ask": 0}}
-        with patch("agent.kalshi_client.get_market", return_value=fake_market):
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXHIGHMIA-26APR24-T80", "NO")):
             settled_now = clv.check_clv_settlements()
 
         # Real trade settlement returns to caller
@@ -436,7 +434,7 @@ def tmp_positions_file(tmp_path, monkeypatch):
 
 
 def _settled_market(result: str = "YES") -> dict:
-    """Mock get_market response for a settled market."""
+    """Mock get_market response for a settled market (per-record fallback path)."""
     return {
         "market": {
             "status": "settled",
@@ -445,6 +443,15 @@ def _settled_market(result: str = "YES") -> dict:
             "yes_ask": 0,
         }
     }
+
+
+def _settled_batch(ticker: str, result: str = "YES", **extra) -> dict:
+    """Mock get_markets response for the S152 batch path: one settled market
+    keyed by `ticker` (the batch matches records by exact ticker)."""
+    m = {"ticker": ticker, "status": "settled", "result": result,
+         "yes_bid": 0, "yes_ask": 0}
+    m.update(extra)
+    return {"markets": [m], "cursor": None}
 
 
 class TestSettlementMfeExtension:
@@ -588,7 +595,8 @@ class TestSettlementMfeExtension:
             contracts=1, trade_id="ORD-NOPOS-LOSE", paper=True,
         )
         tmp_positions_file.write_text(json.dumps([]))
-        with patch("agent.kalshi_client.get_market", return_value=_settled_market("NO")):
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXLM-NOPOS-LOSE", "NO")):
             clv.check_clv_settlements()
         rec = _read(tmp_clv_file)[0]
         assert rec["clv_cents"] == -78.0
@@ -819,7 +827,8 @@ class TestLiveMomentumCounterfactual:
         # (opp_type-agnostic poller). YES @60, settles YES (closing=100 → clv=40).
         clv.record_live_momentum_counterfactual_skip(**_lm_kwargs())
         tmp_positions_file.write_text(json.dumps([]))
-        with patch("agent.kalshi_client.get_market", return_value=_settled_market("YES")):
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXATPMATCH-26APR27ALCSIN-ALC", "YES")):
             settled_now = clv.check_clv_settlements()
         # CF settlements are NOT in the return list (Telegram noise filter).
         assert settled_now == []
@@ -1099,8 +1108,8 @@ class TestSession152SettlementHelper:
         tmp_clv_file.write_text(json.dumps([rec]))
         tmp_positions_file.write_text(json.dumps(
             [{"order_id": "PAPER-1", "mfe_cents": 5, "mae_cents": -3, "ticks_observed": 12}]))
-        fake = {"market": {"status": "settled", "result": "NO", "yes_bid": 0, "yes_ask": 0}}
-        with patch("agent.kalshi_client.get_market", return_value=fake):
+        with patch("agent.kalshi_client.get_markets",
+                   return_value=_settled_batch("KXHIGHMIA-26APR24-T80", "NO")):
             settled = clv.check_clv_settlements()
         r = _read(tmp_clv_file)[0]
         assert r["status"] == "settled"
@@ -1137,3 +1146,80 @@ class TestSession152Grouping:
     def test_fetch_settled_handles_error(self):
         with patch("agent.kalshi_client.get_markets", return_value={"error": "boom"}):
             assert clv._fetch_settled_markets("KXX-26") == {}
+
+
+class TestSession152BatchSettlement:
+    """S152: event-batch settle path + per-record fallback for un-groupable tickers."""
+
+    def _open(self, ticker, side="no", price=92, stamp="2026-04-24T12:00:00+00:00",
+              tid="PAPER-X", status="open"):
+        return {"ticker": ticker, "opp_type": "vig_stack_series", "side": side,
+                "entry_price_cents": price, "contracts": 1, "trade_id": tid,
+                "paper": True, "status": status, "recorded_at": stamp,
+                "closing_yes_price": None, "clv_cents": None, "clv_relative": None,
+                "settled_at": None}
+
+    def test_one_fetch_settles_all_rungs_in_event(self, tmp_clv_file, tmp_positions_file):
+        # 3 open rungs, same event -> ONE get_markets call settles all 3.
+        recs = [self._open(f"KXHIGHNY-26MAY20-T{t}", tid=f"PAPER-{t}") for t in (70, 72, 74)]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        calls = {"n": 0}
+
+        def fake_markets(**kw):
+            calls["n"] += 1
+            return {"markets": [{"ticker": f"KXHIGHNY-26MAY20-T{t}", "status": "settled",
+                                 "result": "yes"} for t in (70, 72, 74)], "cursor": None}
+
+        with patch("agent.kalshi_client.get_markets", side_effect=fake_markets):
+            settled = clv.check_clv_settlements()
+        assert calls["n"] == 1                       # ONE call, not 3
+        rows = _read(tmp_clv_file)
+        assert all(r["status"] == "settled" for r in rows)
+        assert all(r["closing_yes_price"] == 100 for r in rows)
+        assert len(settled) == 3
+
+    def test_cf_settles_via_batch_to_counterfactual_settled(self, tmp_clv_file, tmp_positions_file):
+        rec = self._open("KXHIGHNY-26MAY20-T70", tid="CF-S1-KXHIGHNY-26MAY20-T70",
+                         status="counterfactual_open")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets", return_value={"markets":
+                [{"ticker": "KXHIGHNY-26MAY20-T70", "status": "settled", "result": "no"}],
+                "cursor": None}):
+            settled = clv.check_clv_settlements()
+        r = _read(tmp_clv_file)[0]
+        assert r["status"] == "counterfactual_settled"
+        assert settled == []                          # CFs excluded from notify list
+
+    def test_open_market_in_event_leaves_record_open(self, tmp_clv_file, tmp_positions_file):
+        rec = self._open("KXHIGHNY-26MAY20-T70")
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets", return_value={"markets": [], "cursor": None}):
+            clv.check_clv_settlements()                # status="settled" returns nothing
+        assert _read(tmp_clv_file)[0]["status"] == "open"
+
+    def test_ungroupable_ticker_uses_per_record_fallback(self, tmp_clv_file, tmp_positions_file):
+        rec = self._open("KXHIGHDEN-A")               # 2-seg -> _event_ticker None
+        tmp_clv_file.write_text(json.dumps([rec])); tmp_positions_file.write_text("[]")
+        with patch("agent.kalshi_client.get_markets") as gm, \
+             patch("agent.kalshi_client.get_market", return_value={"market":
+                {"status": "settled", "result": "no", "yes_bid": 0, "yes_ask": 0}}) as g1:
+            clv.check_clv_settlements()
+        gm.assert_not_called()                         # not batchable
+        g1.assert_called_once()                        # fell back to per-record
+        assert _read(tmp_clv_file)[0]["status"] == "settled"
+
+    def test_event_budget_cap(self, tmp_clv_file, tmp_positions_file):
+        # >cap distinct events; only the oldest _CHECK_CLV_BATCH_SIZE are fetched.
+        n = clv._CHECK_CLV_BATCH_SIZE + 5
+        recs = [self._open(f"KXHIGHNY-26MAY{d:03d}-T70", tid=f"P{d}",
+                           stamp=f"2026-05-{(d % 28) + 1:02d}T00:00:00+00:00") for d in range(n)]
+        tmp_clv_file.write_text(json.dumps(recs)); tmp_positions_file.write_text("[]")
+        fetched = []
+
+        def fake(**kw):
+            fetched.append(kw.get("event_ticker") or kw.get("series_ticker"))
+            return {"markets": [], "cursor": None}
+
+        with patch("agent.kalshi_client.get_markets", side_effect=fake):
+            clv.check_clv_settlements()
+        assert len(fetched) == clv._CHECK_CLV_BATCH_SIZE   # capped

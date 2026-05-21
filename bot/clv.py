@@ -618,74 +618,101 @@ def check_clv_settlements() -> list[dict]:
         if isinstance(p, dict) and p.get("order_id")
     }
 
-    # Session 151 (2026-05-18): filter to open candidates first, sort
-    # oldest-first by recorded_at, then cap at _CHECK_CLV_BATCH_SIZE. Bounds
-    # the per-call rate-limited get_market loop inside the 900s S150 outer
-    # guard. Already-settled records iterate cheaply because the filter
-    # excludes them before the sort+slice. Mutations on `rec` propagate
-    # through the shared list (Python passes list elements by reference),
-    # so _save(records) at the end of the function still persists the full
-    # records list with batch updates applied in place.
+    # Session 152 (2026-05-21): batch settlement. Group open candidates by
+    # event_ticker and fetch each event's settled markets in ONE get_markets
+    # call (vs one get_market per record); records whose ticker can't be grouped
+    # (<3 segments) use the per-record fallback. A shared per-cycle call budget
+    # (= _CHECK_CLV_BATCH_SIZE) keeps wall-clock inside the 900s S150 guard — the
+    # same envelope as the S151 cap — while settling far more records per call,
+    # and event grouping breaks the S151 oldest-first FIFO starvation where
+    # long-dated season futures clogged the queue head. Mutations on `rec`
+    # propagate through `records` (list elements by reference), so _save(records)
+    # persists in-place updates.
+    from collections import defaultdict
+
     candidates = [
         rec for rec in records
         if rec.get("status") in ("open", "counterfactual_open")
     ]
-    candidates.sort(key=lambda r: r.get("recorded_at") or "")
-    batch = candidates[:_CHECK_CLV_BATCH_SIZE]
-    if len(candidates) > len(batch):
+    groups: dict = defaultdict(list)
+    fallback: list = []
+    for rec in candidates:
+        key = (_event_ticker(rec["ticker"]) if _CLV_BATCH_GROUP_BY == "event"
+               else (rec["ticker"].split("-")[0] or None))
+        (groups[key] if key else fallback).append(rec)
+
+    # Oldest-first by each group's oldest record (preserves the S151 FIFO intent).
+    ordered = sorted(
+        groups.items(),
+        key=lambda kv: min((r.get("recorded_at") or "") for r in kv[1]),
+    )
+    budget = _CHECK_CLV_BATCH_SIZE
+    if len(ordered) > budget:
         logger.info(
-            "check_clv_settlements: batch of %d (of %d open records) — "
-            "oldest first by recorded_at; backlog of %d drains across "
-            "subsequent calls (S151 cap).",
-            len(batch), len(candidates), len(candidates) - len(batch),
+            "check_clv_settlements: %d event-groups (of %d open records); "
+            "draining oldest %d this cycle (S152 batch).",
+            len(ordered), len(candidates), budget,
         )
 
-    for rec in batch:
-        status = rec.get("status")
-        if status not in ("open", "counterfactual_open"):
-            continue
-        is_cf = status == "counterfactual_open"
+    for key, recs in ordered:
+        if budget <= 0:
+            break
+        settled_map = _fetch_settled_markets(key)
+        budget -= 1
+        for rec in recs:
+            m = settled_map.get(rec["ticker"])
+            if not m:
+                continue
+            mstatus = m.get("status", "")
+            result = m.get("result", "")
+            if mstatus not in ("settled", "finalized", "closed") or not result:
+                continue
+            if result.upper() == "YES":
+                closing_yes = 100
+            elif result.upper() == "NO":
+                closing_yes = 0
+            else:
+                continue  # non-binary result (e.g. scalar) — can't compute CLV
+            _apply_clv_settlement(
+                rec, result, closing_yes,
+                rec.get("status") == "counterfactual_open",
+                _positions_by_order, settled_now,
+            )
+            changed = True
 
+    # Per-record fallback for un-groupable tickers (Outcome B hybrid), bounded by
+    # the remaining shared budget. Byte-identical to the legacy detection,
+    # including current_yes_mid for still-open markets. get_market is imported at
+    # the top of this function.
+    fallback.sort(key=lambda r: r.get("recorded_at") or "")
+    for rec in fallback[:max(0, budget)]:
+        is_cf = rec.get("status") == "counterfactual_open"
         ticker = rec["ticker"]
         try:
             market_resp = get_market(ticker)
         except Exception as e:
             logger.warning(f"CLV settlement check failed for {ticker}: {e}")
             continue
-
         market = market_resp if isinstance(market_resp, dict) else {}
         if "market" in market:
             market = market["market"]
-
-        status = market.get("status", "")
+        mstatus = market.get("status", "")
         result = market.get("result", "")
-
-        # Try to get closing price from last trade or yes_bid/yes_ask at close
         yes_bid = market.get("yes_bid") or 0
         yes_ask = market.get("yes_ask") or 0
-
-        if status in ("settled", "finalized", "closed") and result:
-            # Market resolved — closing price is the settlement value
-            # YES resolves to 100¢ if YES won, 0¢ if NO won
+        if mstatus in ("settled", "finalized", "closed") and result:
             if result.upper() == "YES":
                 closing_yes = 100
             elif result.upper() == "NO":
                 closing_yes = 0
             else:
-                continue  # Unknown result, skip
+                continue
         elif yes_bid > 0 and yes_ask > 0:
-            # Market still open — use mid price as current line for partial CLV
-            closing_yes = (yes_bid + yes_ask) / 2.0
-            # Don't mark as settled yet — just update with current line
-            rec["current_yes_mid"] = round(closing_yes, 1)
+            rec["current_yes_mid"] = round((yes_bid + yes_ask) / 2.0, 1)
             changed = True
             continue
         else:
             continue
-
-        # Session 152: shared settlement write (batch path + per-record fallback
-        # both call this) — see _apply_clv_settlement for the full S13b/S11/S9/S16
-        # rationale that used to live inline here.
         _apply_clv_settlement(
             rec, result, closing_yes, is_cf, _positions_by_order, settled_now,
         )
