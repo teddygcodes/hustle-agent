@@ -16,6 +16,8 @@ import logging
 import os
 import signal
 import sys
+import threading
+import time
 import uuid
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
@@ -348,6 +350,55 @@ def _release_lock() -> None:
         return
     if held_by == os.getpid():
         LOCK_FILE.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Shutdown watchdog — Battle Scar #17 root-cause bound (Session 154)
+# ---------------------------------------------------------------------------
+# A plain SIGTERM landing while a run_in_executor(None, ...) worker is wedged in
+# a never-returning sync call hangs the process forever at interpreter exit:
+# asyncio.run() bounds the executor join at THREAD_JOIN_TIMEOUT=300s, but the
+# concurrent.futures _python_exit atexit handler then t.join()s every worker with
+# NO timeout (run_in_executor futures can't be cancelled once running, so S150's
+# wait_for bounds the coroutine, not the thread). stop() completes and logs
+# "Bot stopped", THEN the process wedges — clean logs, old PID needs kill -9.
+# Confirmed S154 (clean-room repro + live SIGTERM). Fix: arm a daemon timer on
+# SIGTERM; os._exit() past the deadline bypasses both the 300s wait and the
+# unbounded join. _release_lock() runs early in stop() (before the unbounded
+# notifier.stop()), so the lockfile is clean before force-exit. S58 graceful
+# ordering preserved — this BOUNDS the sequence, it does not replace it.
+_SHUTDOWN_DEADLINE_SEC = 10.0
+_shutdown_watchdog_cancel = threading.Event()  # set only to stand the timer down
+_shutdown_watchdog_armed = threading.Event()   # arm-once guard (SIGINT + SIGTERM)
+
+
+def _force_exit(code: int = 0) -> None:
+    """Last-resort termination that bypasses the unbounded concurrent.futures
+    atexit join (Python 3.14 _python_exit). Wedged run_in_executor workers can't
+    be cancelled; the OS reclaims them on exit. Indirected so tests can patch."""
+    os._exit(code)
+
+
+def _arm_shutdown_watchdog(deadline_sec: float = _SHUTDOWN_DEADLINE_SEC) -> None:
+    """Start a daemon timer that force-exits if graceful shutdown wedges past
+    deadline_sec (BS#17, S154). Idempotent so SIGINT+SIGTERM don't double-arm.
+    On a clean shutdown the process exits before the deadline and the daemon
+    thread dies with it."""
+    if _shutdown_watchdog_armed.is_set():
+        return
+    _shutdown_watchdog_armed.set()
+
+    def _watch() -> None:
+        if _shutdown_watchdog_cancel.wait(timeout=deadline_sec):
+            return  # shutdown explicitly stood the watchdog down
+        logger.error(
+            "S154: graceful shutdown exceeded %.0fs (executor thread wedged) — "
+            "force-exiting via os._exit(0)",
+            deadline_sec,
+        )
+        _force_exit(0)
+
+    threading.Thread(target=_watch, daemon=True, name="shutdown-watchdog").start()
 
 
 def _load_bot_state() -> dict:
@@ -1857,10 +1908,18 @@ class GlintBot:
 async def async_main():
     bot = GlintBot()
 
-    # Handle SIGINT/SIGTERM for graceful shutdown
+    # Handle SIGINT/SIGTERM for graceful shutdown. Arm the S154 shutdown watchdog
+    # BEFORE scheduling stop() so the entire shutdown — graceful cleanup,
+    # asyncio.run() teardown, and the unbounded _python_exit executor join — is
+    # bounded (Battle Scar #17).
     loop = asyncio.get_running_loop()
+
+    def _on_shutdown_signal():
+        _arm_shutdown_watchdog()
+        asyncio.create_task(bot.stop())
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.stop()))
+        loop.add_signal_handler(sig, _on_shutdown_signal)
 
     await bot.start()
 

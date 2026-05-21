@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1593,6 +1594,67 @@ def test_stop_bounded_by_5s_timeout_when_task_doesnt_unwind(tmp_path, monkeypatc
             pass
 
     asyncio.run(_drive())
+
+
+# ---------------------------------------------------------------------------
+# Session 154: shutdown watchdog (Battle Scar #17 root-cause bound)
+# ---------------------------------------------------------------------------
+def _reset_shutdown_watchdog(botmain):
+    """Clear the module-level arm-once / cancel Events between tests."""
+    botmain._shutdown_watchdog_armed.clear()
+    botmain._shutdown_watchdog_cancel.clear()
+
+
+def test_shutdown_watchdog_force_exits_when_deadline_exceeded(monkeypatch):
+    """S154: a graceful shutdown that wedges past the deadline (e.g. a stuck
+    run_in_executor worker blocking the _python_exit join) must force-exit.
+    Models 'stop() completed but a worker thread is still wedged'."""
+    from bot import main as botmain
+    _reset_shutdown_watchdog(botmain)
+
+    calls = []
+    monkeypatch.setattr(botmain, "_force_exit", lambda code=0: calls.append(code))
+
+    botmain._arm_shutdown_watchdog(deadline_sec=0.05)
+    time.sleep(0.3)  # comfortably past the 0.05s deadline
+
+    assert calls == [0], "watchdog must force-exit(0) exactly once past the deadline"
+    _reset_shutdown_watchdog(botmain)
+
+
+def test_shutdown_watchdog_stands_down_when_cancelled(monkeypatch):
+    """S154: if shutdown is explicitly stood down before the deadline, the
+    watchdog must NOT force-exit. The cancel Event also keeps the timer from
+    leaking a real os._exit into the test session after monkeypatch unwinds."""
+    from bot import main as botmain
+    _reset_shutdown_watchdog(botmain)
+
+    calls = []
+    monkeypatch.setattr(botmain, "_force_exit", lambda code=0: calls.append(code))
+
+    botmain._arm_shutdown_watchdog(deadline_sec=5.0)
+    botmain._shutdown_watchdog_cancel.set()  # stand the timer down immediately
+    time.sleep(0.1)
+
+    assert calls == [], "watchdog must not force-exit when stood down before deadline"
+    _reset_shutdown_watchdog(botmain)
+
+
+def test_arm_shutdown_watchdog_is_idempotent(monkeypatch):
+    """S154: SIGINT + SIGTERM both call _arm_shutdown_watchdog; arming twice
+    must start only one watchdog (exactly one force-exit)."""
+    from bot import main as botmain
+    _reset_shutdown_watchdog(botmain)
+
+    calls = []
+    monkeypatch.setattr(botmain, "_force_exit", lambda code=0: calls.append(code))
+
+    botmain._arm_shutdown_watchdog(deadline_sec=0.05)
+    botmain._arm_shutdown_watchdog(deadline_sec=0.05)  # second arm is a no-op
+    time.sleep(0.3)
+
+    assert calls == [0], "double-arm must produce exactly one force-exit"
+    _reset_shutdown_watchdog(botmain)
 
 
 # ---------------------------------------------------------------------------
