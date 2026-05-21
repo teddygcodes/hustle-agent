@@ -1275,3 +1275,81 @@ class TestSession152Prune:
         with patch("agent.kalshi_client.get_markets", return_value={"markets": [], "cursor": None}):
             clv.check_clv_settlements()
         assert _read(tmp_clv_file)[0]["status"] == "counterfactual_open"   # not dead-marked
+
+
+class TestSession155DrainPersistence:
+    """S155: check_clv_settlements must DRAIN, not discard, on a 900s abort.
+
+    The S152 batch shipped but its first live cycle (2026-05-21) persisted
+    NOTHING — the only _save was at cycle-end, so the S150 900s outer guard
+    aborted the await and threw away every in-memory settlement AND the cheap
+    zero-API dead-marks. These pin the persistence fixes:
+      (1) dead-marks persist BEFORE the slow fetch (independent of it),
+      (2) _persist_progress re-load-merge preserves concurrent CF appends.
+    """
+
+    def _rec(self, ticker, tid, status="counterfactual_open",
+             stamp="2026-04-20T00:00:00+00:00", opp_type="vig_stack_series"):
+        return {"ticker": ticker, "opp_type": opp_type, "side": "no",
+                "entry_price_cents": 92, "contracts": 0, "trade_id": tid,
+                "paper": False, "status": status, "recorded_at": stamp,
+                "closing_yes_price": None, "clv_cents": None,
+                "clv_relative": None, "settled_at": None}
+
+    def test_dead_marks_persist_before_fetch_even_if_fetch_raises(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        """Dead-marks are persisted up-front, so a fetch that never reaches the
+        final persist (proxy for the 900s abort: _fetch_settled_markets raises)
+        cannot discard them. The groupable record stays open."""
+        recs = [
+            self._rec("KXHIGHNY-26APR-70", "CF-DEAD-1"),       # dead shape (no day)
+            self._rec("KXHIGHNY-26APR-71", "CF-DEAD-2"),       # dead shape (no day)
+            self._rec("KXHIGHMIA-26APR24-T80", "CF-LIVE-1"),   # groupable, real event
+        ]
+        tmp_clv_file.write_text(json.dumps(recs))
+        tmp_positions_file.write_text("[]")
+
+        def boom(_key):
+            raise RuntimeError("simulated wedge / abort before final persist")
+
+        with patch.object(clv, "_fetch_settled_markets", side_effect=boom):
+            with pytest.raises(RuntimeError):
+                clv.check_clv_settlements()
+
+        by_id = {r["trade_id"]: r for r in _read(tmp_clv_file)}
+        assert by_id["CF-DEAD-1"]["status"] == "settlement_failed"
+        assert by_id["CF-DEAD-2"]["status"] == "settlement_failed"
+        assert by_id["CF-DEAD-1"]["settlement_note"] == "malformed_ticker"
+        # Groupable record never settled (fetch raised) — still open.
+        assert by_id["CF-LIVE-1"]["status"] == "counterfactual_open"
+
+    def test_persist_progress_preserves_concurrent_cf_append(
+        self, tmp_clv_file, tmp_positions_file
+    ):
+        """live_watcher appends a CF mid-cycle (clv has no shared write lock).
+        _persist_progress re-loads fresh and replaces only our mutated trade_ids,
+        so the concurrent append is NOT clobbered by the settlement write."""
+        seed = self._rec("KXHIGHMIA-26APR24-T80", "SEED-1")
+        tmp_clv_file.write_text(json.dumps([seed]))
+        tmp_positions_file.write_text("[]")
+
+        concurrent_cf = self._rec(
+            "KXHIGHAUS-26APR25-B80", "CONCURRENT-1", opp_type="live_momentum",
+        )
+
+        def append_then_settle(**kwargs):
+            # Concurrent live_watcher append landing between cycle-start _load
+            # and the final _persist_progress.
+            rows = _read(tmp_clv_file)
+            rows.append(concurrent_cf)
+            tmp_clv_file.write_text(json.dumps(rows))
+            return _settled_batch("KXHIGHMIA-26APR24-T80", "NO")
+
+        with patch("agent.kalshi_client.get_markets", side_effect=append_then_settle):
+            clv.check_clv_settlements()
+
+        by_id = {r["trade_id"]: r for r in _read(tmp_clv_file)}
+        assert by_id["SEED-1"]["status"] == "counterfactual_settled"   # our settle landed
+        assert "CONCURRENT-1" in by_id                                  # append survived
+        assert by_id["CONCURRENT-1"]["status"] == "counterfactual_open"

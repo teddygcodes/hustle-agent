@@ -181,7 +181,7 @@ def _apply_clv_settlement(rec, result, closing_yes, is_cf, positions_by_order, s
     path and the per-record fallback in check_clv_settlements stay byte-identical
     (same discipline as compute_clv_cents). Preserves S13b CLV math, S11
     prediction-close propagation, S9 mfe/mae/ticks, and the S16 mfe extension.
-    Caller sets `changed = True` after this returns.
+    Caller adds rec's trade_id to `mutated_ids` after this returns (S155).
     """
     # Session 13b: single source of truth — back-tester calls the same fn.
     clv_cents_rounded, clv_relative_rounded = compute_clv_cents(
@@ -259,6 +259,34 @@ def _save(records: list[dict]):
     tmp = f.with_suffix(".tmp")
     tmp.write_text(json.dumps(records, indent=2, default=str))
     tmp.rename(f)
+
+
+def _persist_progress(records: list[dict], mutated_ids: set) -> None:
+    """Session 155: re-load clv.json fresh and re-apply our mutated records
+    (matched by trade_id), then atomic-save. Used for the dead-mark-first
+    persist, incremental persist, and final persist in check_clv_settlements
+    so a mid-cycle abort by the S150 900s outer guard never discards drained
+    progress (the S155 drain-failure root cause: the old single end-of-cycle
+    _save was thrown away on every 900s abort).
+
+    Re-load-merge — NOT a plain _save(records) — because clv.json is written
+    WITHOUT state_io's shared lock (clv._save is a bespoke tmp+rename) and
+    live_watcher.record_live_momentum_counterfactual_skip appends concurrently.
+    Every clv.json writer is append-only or mutates distinct records, so
+    replacing only our mutated trade_ids onto a fresh read preserves those
+    concurrent appends. The residual sub-second load→save race is pre-existing
+    (the old end-of-cycle _save had the same window) and low-severity (the only
+    concurrent writer is a rare, daily-capped CF append; tmp+rename rules out
+    torn writes)."""
+    if not mutated_ids:
+        return
+    mine = {
+        r.get("trade_id"): r
+        for r in records
+        if r.get("trade_id") in mutated_ids
+    }
+    fresh = _load()
+    _save([mine.get(r.get("trade_id"), r) for r in fresh])
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +667,11 @@ def check_clv_settlements() -> list[dict]:
 
     records = _load()
     settled_now = []
-    changed = False
+    # Session 155: trade_ids of every record we mutate this cycle (dead-marks +
+    # settlements + current_yes_mid updates). Drives _persist_progress instead of
+    # a single end-of-cycle _save, so progress survives a 900s abort. Replaces
+    # the old `changed` flag.
+    mutated_ids: set = set()
 
     # Session 9: build order_id -> position lookup so we can propagate
     # mfe/mae/ticks onto each clv record at settlement time. Counterfactuals
@@ -675,11 +707,20 @@ def check_clv_settlements() -> list[dict]:
             # Provably-nonexistent shape (malformed/test): terminal-mark with no
             # API call so it stops clogging the open set every cycle.
             _mark_unsettleable(rec, "malformed_ticker")
-            changed = True
+            mutated_ids.add(rec.get("trade_id"))
             continue
         key = (_event_ticker(tk) if _CLV_BATCH_GROUP_BY == "event"
                else (tk.split("-")[0] or None))
         (groups[key] if key else fallback).append(rec)
+
+    # Session 155: persist the zero-API dead-marks NOW, before the slow
+    # rate-limited fetch loop. The S150 900s guard can abort the fetch
+    # mid-cycle; persisting first guarantees the ~1,097 malformed records
+    # (~27% of OPEN, Phase 0 2026-05-21) clear every cycle regardless of how
+    # far the fetch gets. This is the cheap win the old persist-at-end threw
+    # away on every abort.
+    if mutated_ids:
+        _persist_progress(records, mutated_ids)
 
     # Oldest-first by each group's oldest record (preserves the S151 FIFO intent).
     ordered = sorted(
@@ -718,7 +759,7 @@ def check_clv_settlements() -> list[dict]:
                 rec.get("status") == "counterfactual_open",
                 _positions_by_order, settled_now,
             )
-            changed = True
+            mutated_ids.add(rec.get("trade_id"))
 
     # Per-record fallback for un-groupable tickers (Outcome B hybrid), bounded by
     # the remaining shared budget. Byte-identical to the legacy detection,
@@ -738,7 +779,7 @@ def check_clv_settlements() -> list[dict]:
         if err and ("404" in err or "not found" in err.lower()):
             # Confirmed-nonexistent market — terminal-mark, stop re-polling.
             _mark_unsettleable(rec, "market_not_found")
-            changed = True
+            mutated_ids.add(rec.get("trade_id"))
             continue
         if "market" in market:
             market = market["market"]
@@ -755,17 +796,17 @@ def check_clv_settlements() -> list[dict]:
                 continue
         elif yes_bid > 0 and yes_ask > 0:
             rec["current_yes_mid"] = round((yes_bid + yes_ask) / 2.0, 1)
-            changed = True
+            mutated_ids.add(rec.get("trade_id"))
             continue
         else:
             continue
         _apply_clv_settlement(
             rec, result, closing_yes, is_cf, _positions_by_order, settled_now,
         )
-        changed = True
+        mutated_ids.add(rec.get("trade_id"))
 
-    if changed:
-        _save(records)
+    if mutated_ids:
+        _persist_progress(records, mutated_ids)
 
     return settled_now
 
