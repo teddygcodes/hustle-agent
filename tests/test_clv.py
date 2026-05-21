@@ -1387,3 +1387,40 @@ class TestSession155DrainPersistence:
         assert len(fetched) == 3, (
             f"expected 3 groups before the 10s budget cut, got {len(fetched)}"
         )
+
+    def test_incremental_persist_survives_hard_mid_fetch_abort(
+        self, tmp_clv_file, tmp_positions_file, monkeypatch
+    ):
+        """A hard abort mid-fetch (proxy for a single fetch hanging into the
+        900s guard) must NOT discard already-drained groups. With persist-every
+        =2, groups 0+1 are persisted before group 2 raises."""
+        recs = [
+            self._rec(f"KXEV{i:02d}-26APR24-T80", f"CF-EV-{i:02d}",
+                      stamp=f"2026-04-20T00:{i:02d}:00+00:00")
+            for i in range(5)
+        ]
+        tmp_clv_file.write_text(json.dumps(recs))
+        tmp_positions_file.write_text("[]")
+
+        monkeypatch.setattr(clv, "_CHECK_CLV_PERSIST_EVERY", 2)
+
+        def fetch(key):
+            fetch.calls += 1
+            if fetch.calls == 3:
+                raise RuntimeError("abort after the first persist boundary")
+            ticker = f"{key}-T80"   # event key + rung -> the record's ticker
+            return {ticker: {"status": "settled", "result": "NO", "ticker": ticker}}
+        fetch.calls = 0
+
+        monkeypatch.setattr(clv, "_fetch_settled_markets", fetch)
+
+        with pytest.raises(RuntimeError):
+            clv.check_clv_settlements()
+
+        by_id = {r["trade_id"]: r for r in _read(tmp_clv_file)}
+        # Groups 0+1 persisted at the every-2 boundary before group 2 raised.
+        assert by_id["CF-EV-00"]["status"] == "counterfactual_settled"
+        assert by_id["CF-EV-01"]["status"] == "counterfactual_settled"
+        # Groups 2-4 never settled — still open, drain next cycle.
+        assert by_id["CF-EV-02"]["status"] == "counterfactual_open"
+        assert by_id["CF-EV-04"]["status"] == "counterfactual_open"

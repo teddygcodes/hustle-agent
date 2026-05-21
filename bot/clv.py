@@ -67,6 +67,15 @@ _CLV_BATCH_GROUP_BY = "event"
 # vary; _CHECK_CLV_BATCH_SIZE stays as a backstop.
 _CHECK_CLV_TIME_BUDGET_SEC = 600
 
+# Session 155: persist drained progress every N event-groups inside the fetch
+# loop, so a HARD abort (a single fetch hanging past the 600s soft budget into
+# the 900s guard, or any uncaught fetch error) never discards a whole cycle's
+# settlements. Settlements are idempotent — a settled record leaves the
+# candidate set next cycle — so re-fetching the last <N groups after an abort is
+# harmless. 25 ≈ a persist every ~75s of group fetching (re-load+save ~100ms),
+# negligible overhead, bounded worst-case loss.
+_CHECK_CLV_PERSIST_EVERY = 25
+
 
 def _event_ticker(ticker: str) -> Optional[str]:
     """Derive the Kalshi event_ticker from a market ticker
@@ -790,6 +799,9 @@ def check_clv_settlements() -> list[dict]:
             )
             mutated_ids.add(rec.get("trade_id"))
             _settled_count += 1
+        # Session 155: incremental persist so a hard abort keeps drained progress.
+        if _groups_fetched % _CHECK_CLV_PERSIST_EVERY == 0 and mutated_ids:
+            _persist_progress(records, mutated_ids)
 
     _t_groups = time.monotonic()
 
@@ -805,6 +817,9 @@ def check_clv_settlements() -> list[dict]:
         is_cf = rec.get("status") == "counterfactual_open"
         ticker = rec["ticker"]
         _fallback_checked += 1
+        # Session 155: incremental persist (uniform across the loop's branches).
+        if _fallback_checked % _CHECK_CLV_PERSIST_EVERY == 0 and mutated_ids:
+            _persist_progress(records, mutated_ids)
         try:
             market_resp = get_market(ticker)
         except Exception as e:
