@@ -43,6 +43,52 @@ _CLV_FILE: Optional[Path] = None
 # confirm. Records past the cap roll over to the next call.
 _CHECK_CLV_BATCH_SIZE = 200
 
+# Session 152 (2026-05-21): batch settlement groups open records by event_ticker
+# and fetches each event's settled markets in one get_markets call (vs one
+# get_market per record). Phase 0.4 chose "event": a full drain is 274 event
+# calls (~1 page each) vs ~4,000 per-record calls, and event grouping bounds
+# pagination — series grouping risked deep historical settled sets on sports
+# series (KXATPMATCH spans 74 events). Also breaks the S151 oldest-first FIFO
+# starvation where ~1,200 long-dated season futures clogged the queue head.
+_CLV_BATCH_GROUP_BY = "event"
+
+
+def _event_ticker(ticker: str) -> Optional[str]:
+    """Derive the Kalshi event_ticker from a market ticker
+    (KXHIGHMIA-26APR24-T80 -> KXHIGHMIA-26APR24). Returns None for tickers with
+    fewer than 3 segments (one-offs / malformed like KXHIGHDEN-A) so the caller
+    routes them to the per-record fallback."""
+    if not ticker or ticker.count("-") < 2:
+        return None
+    return ticker.rsplit("-", 1)[0]
+
+
+def _fetch_settled_markets(group_value: str) -> dict:
+    """Return {ticker: market} for every settled market in the group, paginated
+    defensively (events are ~1 page). Mirrors the get_markets cursor walk in
+    bot/kalshi_series._fetch_series_markets and bot/position_monitor.py:415."""
+    from agent.kalshi_client import get_markets
+    out: dict = {}
+    cursor = None
+    param = "event_ticker" if _CLV_BATCH_GROUP_BY == "event" else "series_ticker"
+    while True:
+        kwargs = {param: group_value, "status": "settled", "limit": 100}
+        if cursor:
+            kwargs["cursor"] = cursor
+        resp = get_markets(**kwargs)
+        if not isinstance(resp, dict) or "error" in resp:
+            err = resp.get("error") if isinstance(resp, dict) else resp
+            logger.warning("CLV batch fetch failed for %s: %s", group_value, err)
+            break
+        batch = resp.get("markets", [])
+        for m in batch:
+            if m.get("ticker"):
+                out[m["ticker"]] = m
+        cursor = resp.get("cursor")
+        if not cursor or not batch:
+            break
+    return out
+
 
 def _get_file() -> Path:
     global _CLV_FILE

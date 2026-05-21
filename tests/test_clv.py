@@ -1110,3 +1110,30 @@ class TestSession152SettlementHelper:
         assert r["mae_cents"] == -3 and r["ticks_observed"] == 12
         assert r["mfe_cents"] == 8            # S16: max(existing 5, settlement 8)
         assert len(settled) == 1
+
+
+class TestSession152Grouping:
+    """S152: group derivation + batched settled-market fetch."""
+
+    def test_event_ticker_derivation(self):
+        assert clv._event_ticker("KXHIGHMIA-26APR24-T80") == "KXHIGHMIA-26APR24"
+        assert clv._event_ticker("KXNBA-26-OKC") == "KXNBA-26"
+        assert clv._event_ticker("KXATPMATCH-26MAY21ABCDEF-A") == "KXATPMATCH-26MAY21ABCDEF"
+        assert clv._event_ticker("KXHIGHDEN-A") is None      # 2-seg -> fallback
+        assert clv._event_ticker("") is None
+
+    def test_fetch_settled_paginates_and_maps_by_ticker(self):
+        pages = [
+            {"markets": [{"ticker": "KXHIGHNY-26MAY20-T70", "status": "settled", "result": "yes"}],
+             "cursor": "c2"},
+            {"markets": [{"ticker": "KXHIGHNY-26MAY20-T72", "status": "settled", "result": "no"}],
+             "cursor": None},
+        ]
+        with patch("agent.kalshi_client.get_markets", side_effect=pages):
+            m = clv._fetch_settled_markets("KXHIGHNY-26MAY20")
+        assert set(m) == {"KXHIGHNY-26MAY20-T70", "KXHIGHNY-26MAY20-T72"}
+        assert m["KXHIGHNY-26MAY20-T70"]["result"] == "yes"
+
+    def test_fetch_settled_handles_error(self):
+        with patch("agent.kalshi_client.get_markets", return_value={"error": "boom"}):
+            assert clv._fetch_settled_markets("KXX-26") == {}
