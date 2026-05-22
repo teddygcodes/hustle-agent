@@ -8004,3 +8004,30 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Cross-refs.** S159 (per-game ruled out — same spread-artifact lesson). KXINX (the working partition benchmark). S127 (named the commodity ladders). offline-sim-settlement-gap memory. Operating Posture: prospecting → rigorous rule-out is the search narrowing, not failing.
 
 ---
+
+### ☑ Session 161 — shadow-settlement resolver (validates the disabled-family/sport blocks) + observability hygiene (May 22, 2026, Outcome A)
+
+**Context.** Codex review (2026-05-22) + planner-confirmed: `shadow_trades.jsonl` (S95, 514 rows) recorded blocked opportunities (family_disabled_reject / sport_disabled / reentry_blocked) but NO resolver ever settled them — every row `status:"open"`, `would_pnl:null`, oldest from 2026-05-11 (markets long closed). The disabled-family/sport validation loop (S93/S97) was dead: we couldn't answer "were the blocks right?" S160 separately identified a working shadow-settlement loop as the substrate any genuinely-new strategy needs to validate — the two findings converge.
+
+**Phase 0 gate — PASS, zero-API (smarter than the brief assumed).** The bot already records a CLV counterfactual for every blocked opp, and `check_clv_settlements` already settles those into `clv.json` (7,094 `counterfactual_settled` rows). The settled result was on disk — the shadow ledger just never read it back. Primary path = a **zero-API local join** against clv.json, sidestepping the S159/S160 settlement-data wall entirely. **Critical detail:** read clv.json RAW, not via `clv._load()` (which filters out the disabled-sport rows we need).
+
+**Backfill — 508/514 settled.** 319 zero-API local join + 110 piggyback event-fetch + 79 bounded probe + 1 dead-marked + 5 left open (in-progress matches, correctly not false-dead-marked).
+
+**The payoff — "were the blocks right?" (`bot/state/reports/shadow_settlement_2026-05-22.md`). The dedup IS the verdict.**
+- **family_disabled_reject (S93: KXINX, KXHIGHCHI) — blocks DATA-CONFIRMED.** Raw looks +EV (KXINX +$771.97 / KXHIGHCHI +$208.20) but collapses to slightly negative deduped (**−$2.91 / −$9.54**): high WR (83%/94%) + negative P&L = the NO-at-90¢ asymmetry (Battle Scar #10; same collapse mechanism as S156). KXINX/KXHIGHCHI stay disabled. ✓
+- **sport_disabled (S97: atp/atp_challenger/wta/wta_challenger/nba) — NOT a re-enable signal (do NOT act).** The report mechanically flags them "re-enable candidate" on 78-85% deduped WR — but that is **direction WR** (did the leader win the *match*), orthogonal to live_momentum's edge axis. live_momentum's leak is **magnitude** (S40: W:L=0.261), and these rows are direction-only (`would_pnl:null` — no size at block time), so there is ZERO EV evidence. Contradicted by the real data that drove S97's disable (atp 40.9% TRADE WR / −$45.60). Evidence only; no re-enable. live_momentum is on its kill clock (2026-06-15) regardless.
+- **reentry_blocked (S90):** N-thin (≤2 deduped); blocks confirmed.
+
+**Bonus fixes (bundled hygiene).** (1) **Resolves the S155 counter-reset follow-up** — the 4 S150 `*_outer_timeout_count_24h` counters now reset on the day-roll (they were cumulative; `check_clv...=32` is pre-fix carryover and zeroes at the next midnight roll, NOT new wedges). (2) **glint_status §8** derives next-fire from the Cadence column (recurring routines were silently skipped on the `(after first fire)` placeholder). (3) Both stale ship-pointers (CLAUDE.md:570 "106", CLAUDE-sessions.md:7 "105") de-staled to non-numeric "see latest ☑" so they can't drift again.
+
+**Tests.** Full suite **1934 passed** (+32, no skips/regressions).
+
+**Verification.** Coder's literal proofs: backfill integrity gate (no shadow id lost, only allowed fields changed, untouched rows byte-identical); `clv.json` untouched by the resolver (byte-identical on a controlled pass; the backfill-window sha change attributed to the live bot's concurrent write via trade_id triage — the strict-verification-proof discipline); runtime hook fired live 10:04:32 post-restart, `shadow_settlement_outer_timeout_count_24h=0`. **Planner:** confirmed the report verdict + the dedup collapse; post-restart `bot_state` healthy (running, heartbeat fresh, current_date rolled, outcome_tracker not degraded). **BS#3 single-runtime lsof-cwd check DEFERRED** — a classifier/Bash outage blocked it; coder confirmed single runtime + S154 watchdog fired clean; planner to re-verify when Bash is available.
+
+**Commits.** 5 (S161-prefixed): resolver core, report generator, runtime hook + counter-reset, §8 calendar fix, docs.
+
+**Resolves** Codex's shadow-settlement gap + the S155 counter-reset follow-up. **Out-of-scope find (spun off as a task):** `live_watcher` "Journal write error" spam (~27% of recent log volume) — empty `live_journal.json` + `_journal_append`'s `json.load` not handling the empty-file case; likely also why live_momentum's journal/context is thin (the gap Codex flagged).
+
+**Cross-refs.** S95 (the shadow ledger this finally settles). S93/S97 (blocks now validated/contextualized). S155/S157 (the check_clv infra piggybacked + the counter-reset follow-up resolved). S156 (the dedup-collapse pattern, repeated). S40 (live_momentum's magnitude leak — why direction-WR is a non-signal). S160 (this builds the shadow-settlement substrate new-strategy validation needs). The strict-verification-proof memory.
+
+---
