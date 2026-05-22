@@ -290,6 +290,26 @@ def _isolate_predictions_log(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Auto-isolate the CLV record book. Session 158 (May 21): live_watcher's
+# record_live_momentum_counterfactual_skip (and the other clv.py CF recorders)
+# write through clv._CLV_FILE, lazily cached from bot.config.CLV_FILE in
+# _get_file() (bot/clv.py:257). test_live_watcher.py's *_records_skip_reason
+# tests drive the watcher skip path -> _record_lm_cf -> the REAL
+# bot/state/clv.json, leaking ~930 synthetic CF rows per suite run (S157).
+# decisions.jsonl + predictions.jsonl are isolated above; clv.json was not.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_clv_log(tmp_path_factory, monkeypatch):
+    try:
+        from bot import clv as _clv
+    except Exception:
+        return
+    sandbox = tmp_path_factory.mktemp("clv_isolation") / "clv.json"
+    monkeypatch.setattr(_clv, "_CLV_FILE", sandbox)
+
+
+# ---------------------------------------------------------------------------
 # Auto-isolate logger output. Session 15.5 (Apr 25): bot/main.py imports
 # call bot/logger.py:setup_file_logging() at module load, which attaches a
 # RotatingFileHandler pointing at bot/logs/bot.log. Without this fixture,

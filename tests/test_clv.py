@@ -1624,3 +1624,55 @@ class TestSession157GroupPathMarking:
         assert by_id["CF-SYN1"]["status"] == "settlement_failed"
         assert by_id["CF-SYN1"]["settlement_note"] == "synthetic_test_ticker"
         assert by_id["CF-LIVE"]["status"] == "counterfactual_open"  # fetch raised pre-settle
+
+
+class TestSession158ClvAutoIsolation:
+    """S158: the autouse ``_isolate_clv_log`` fixture (tests/conftest.py) must
+    redirect ``clv._CLV_FILE`` to a tmp sandbox so the CF recorders never touch
+    the real ``bot/state/clv.json``. Regression for the ~930-row synthetic-CF
+    leak (S157), whose source was test_live_watcher.py's skip-reason tests
+    reaching ``record_live_momentum_counterfactual_skip`` through the watcher
+    without any isolation. These tests deliberately do NOT use ``tmp_clv_file``
+    so they observe the global autouse fixture itself.
+    """
+
+    def test_autouse_fixture_redirects_clv_file_away_from_prod(self):
+        import bot.config as config
+
+        sandbox = clv._CLV_FILE
+        assert sandbox is not None, "_isolate_clv_log did not set clv._CLV_FILE"
+        assert sandbox != config.CLV_FILE
+        # Sandbox lives under pytest's tmp tree, never under the repo bot/state.
+        assert "clv_isolation" in str(sandbox)
+        assert "bot/state" not in str(sandbox).replace("\\", "/")
+
+    def test_recorder_writes_to_sandbox_not_prod(self):
+        import uuid
+        import bot.config as config
+
+        sandbox = clv._CLV_FILE
+        # A UUID-unique ticker => a trade_id the live bot can never emit, so the
+        # "prod untouched" check below is deterministic and cannot race the
+        # concurrently-running live writer.
+        ticker = f"KXNBAGAME-26MAY21NBA{uuid.uuid4().hex[:8].upper()}-ALPHA-A"
+        skip_reason = next(iter(clv.LIVE_MOMENTUM_TUNABLE_SKIP_REASONS))
+
+        clv.record_live_momentum_counterfactual_skip(
+            ticker=ticker,
+            sport="nba_game",
+            skip_reason=skip_reason,
+            side="yes",
+            entry_price_cents=50,
+        )
+
+        rows = _read(sandbox)
+        matching = [r for r in rows if r.get("ticker") == ticker]
+        assert len(matching) == 1, "recorder did not write the row to the sandbox"
+        assert matching[0]["trade_id"].startswith("CF-LM-")
+        assert ticker in matching[0]["trade_id"]
+
+        # The real production file must never have received our synthetic row.
+        prod = config.CLV_FILE
+        assert prod != sandbox
+        if prod.exists():
+            assert ticker not in prod.read_text()
