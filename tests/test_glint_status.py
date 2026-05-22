@@ -848,6 +848,66 @@ def test_maybe_auto_resolve_clean_stale_entry_still_resolves_s162_auto():
     assert updated["Session_1_L2"]["resolved_by"] == "S162-auto"
 
 
+def test_classify_noise_flags_provable_non_triggers():
+    assert glint._classify_noise("**Watch-list trigger.** None registered. Outcome C closes the loop.")
+    assert glint._classify_noise("**Outcome A (re-scoped, Layer 1 only).** User-confirmed.")
+    assert glint._classify_noise("**Operating Posture observation.** Phase 0 caught it again.")
+    assert glint._classify_noise("### ☑ Session 85 — cycle-delay unblock: Outcome C HOLD with watch-list trigger")
+    assert glint._classify_noise("**Out of scope.** live_momentum kill decision (separate session).")
+    assert glint._classify_noise("- `bot/state/active_observations.json` — Session 101 entry with 4 metrics")
+    assert glint._classify_noise("- Dashboard update: only the S102 metric changed.")
+
+
+def test_classify_noise_ignores_genuine_triggers():
+    # Real pending-trigger shapes must NOT be classified as noise.
+    assert glint._classify_noise("**Watch-list trigger — re-investigate when ALL of:** cohort grows") is None
+    assert glint._classify_noise("**Watch-list trigger.** Re-open cross-platform matching only if a labeled corpus appears") is None
+    assert glint._classify_noise("**Trigger to open:** explicit user decision after retuning analysis") is None
+
+
+def test_maybe_auto_resolve_noise_retires_recent_ship_summary():
+    """A provable non-trigger is retired even when its session is recent (not 30d
+    old) — reversibly, without manual_axis_ruled_out."""
+    now = datetime(2026, 5, 22, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 120 — x (2026-05-20)\n**Decision: Outcome C — ship docs only.**\n"
+    triggers = [{
+        "session": "Session 120", "line": 2,
+        "text": "**Decision: Outcome C — ship docs only.** No exit-path tightening.",
+        "status": "MANUAL_CHECK_REQUIRED",
+    }]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    rec = updated["Session_120_L2"]
+    assert rec["reason"] == "not_a_watchlist_trigger"
+    assert rec["resolved_by"] == "S162-auto"
+    assert "manual_axis_ruled_out" not in rec  # noise stays reversible
+
+
+def test_noise_classifier_never_retires_open_triggers_on_real_log():
+    """Survival guard against the live CLAUDE-sessions.md: the resolver must never
+    retire a genuinely-open (future-dated / unfired-threshold) entry, must keep
+    known qualitative re-open triggers MANUAL, and must actually fire on noise."""
+    now = datetime(2026, 5, 22, 12, tzinfo=timezone.utc)
+    today = now.astimezone(glint.helpers.ET).date()
+    text = (REPO_ROOT / "CLAUDE-sessions.md").read_text()
+    triggers = [{**t, "status": "MANUAL_CHECK_REQUIRED"} for t in glint.extract_watchlist_triggers(text)]
+    resolved = glint._maybe_auto_resolve(triggers, {}, text, now)
+    s162 = {k for k, v in resolved.items() if v.get("resolved_by") == "S162-auto"}
+
+    # Core safety invariant: no genuinely-open entry is ever auto-retired.
+    for t in triggers:
+        if glint._is_genuinely_open(t["text"], today):
+            assert glint._resolved_key(t) not in s162, f"open trigger retired: {t['session']} L{t['line']}"
+
+    # Known qualitative re-open triggers (no numeric condition) must survive.
+    survivors = " || ".join(t["text"] for t in triggers if glint._resolved_key(t) not in s162)
+    assert "post_event_reversion" in survivors
+    assert "cross-platform settlement matching" in survivors
+
+    # The noise lever actually fires (guards against the classifier silently breaking).
+    noise = [k for k, v in resolved.items() if v.get("reason") == "not_a_watchlist_trigger"]
+    assert len(noise) >= 10
+
+
 def test_load_save_watchlist_resolved_round_trip(tmp_path: Path):
     paths = glint.paths_for(tmp_path)
     paths.state_dir.mkdir(parents=True, exist_ok=True)

@@ -894,6 +894,46 @@ def _is_genuinely_open(text: str, today) -> bool:
     return _has_future_date(text, today) or _has_unfired_threshold(text)
 
 
+def _classify_noise(text: str) -> Optional[str]:
+    """Return a rationale string if `text` is a provable non-trigger (an extractor
+    false-positive), else None.
+
+    `extract_watchlist_triggers` matches any line containing a watch keyword, so
+    ship summaries, "Watch-list trigger. None registered", operating-posture
+    commentary, dashboard notes and test descriptions all surface as
+    MANUAL_CHECK_REQUIRED. These are not pending operator checks. Conservative —
+    fires only on signals that cannot be a pending question, and the open-guard
+    runs first so anything future-dated / threshold-gated is already excluded.
+    Retired reversibly (no manual_axis_ruled_out).
+    """
+    if text.lstrip().startswith("#"):
+        return "markdown heading line, not a trigger body"
+    low = text.lower()
+    head = low.lstrip("-*# ")  # strip leading bullet / bold / heading markers
+    if head.startswith((
+        "outcome a", "outcome b", "outcome c", "decision", "verdict",
+        "what shipped", "cross-reference", "out of scope",
+    )):
+        return "ship-summary prose, not a pending trigger"
+    if "operating posture observation" in head:
+        return "operating-posture commentary, not a pending trigger"
+    if re.search(r"bot/state/.{0,30}session \d+ entry", low):
+        return "state-file changelog note, not a pending trigger"
+    if (
+        "none registered" in low
+        or re.search(r"watch-?list trigger\.?\**\s*none\b", low)
+        or re.search(r"\bnone\s*[—-]\s", text)
+    ):
+        return "explicitly no trigger registered"
+    if "dashboard update:" in low:
+        return "dashboard-update note, not a pending trigger"
+    if re.search(r"tests?/test_\w+", low) and re.search(r"\b(asserts?|exercises?|regression)\b", low):
+        return "test description, not a pending trigger"
+    if "re-evaluate on next session" in low:
+        return "pointer to other triggers, no own condition"
+    return None
+
+
 def _maybe_auto_resolve(
     triggers: list[dict],
     resolved: dict,
@@ -929,6 +969,18 @@ def _maybe_auto_resolve(
         text = str(t.get("text") or "")
         if _is_genuinely_open(text, today):
             continue  # open-guard — never retire a pending question
+        # Provable non-trigger (extractor false-positive) → reversible noise retirement.
+        noise = _classify_noise(text)
+        if noise is not None:
+            updated[key] = {
+                "resolved_at": now.isoformat(),
+                "reason": "not_a_watchlist_trigger",
+                "resolved_by": "S162-auto",
+                "rationale": noise,
+                "trigger_text_snippet": text[:120],
+                "unresolved_count_24h": 0,
+            }
+            continue
         # Guarded hard-stale: ≥ RESOLVE_WINDOW_DAYS old AND open-guard already clear.
         sess_date = session_dates.get(str(t.get("session") or "").strip())
         if sess_date is not None and sess_date <= cutoff:
