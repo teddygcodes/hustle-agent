@@ -7935,8 +7935,24 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 
 **Honest notes.** (1) **Deploy timeline:** cycles 13:43–18:06 logged `dead_marked=0` (an earlier iteration that didn't clear the junk); the effective dead-marking landed at the ~18:27 redeploy. The committed code (`38c4edd`) is the working-tree final version (`test_clv.py` 78 green on it). (2) **The coder's "cycle 1 ✅ 939 synthetic" framing undersold it** — the 939 were pre-existing production pollution from a test-isolation leak, not a clean win; surfaced + documented here.
 
-**Open follow-up (the root cause).** S157 cleans the *symptom* (marks the ~930 synthetic rows + adds a paper-only defensive sweep), but a **test-isolation leak** wrote those synthetic CFs into the REAL `bot/state/clv.json` (~2026-05-08). The leaking test must be found and isolated to a tmp/fixture (same class as the `worktree tools/ symlink` memory). Until then `_is_synthetic_ticker` is a crutch, not a safety net. Filed in Open Loops; leak-hunt in progress.
+**Open follow-up (the root cause).** S157 cleans the *symptom* (marks the ~930 synthetic rows + adds a paper-only defensive sweep), but a **test-isolation leak** wrote those synthetic CFs into the REAL `bot/state/clv.json` (~2026-05-08). The leaking test must be found and isolated to a tmp/fixture (same class as the `worktree tools/ symlink` memory). Until then `_is_synthetic_ticker` is a crutch, not a safety net. Filed in Open Loops; **RESOLVED by S158** (autouse `_isolate_clv_log` fixture — full suite leaves clv.json byte-identical).
 
 **Cross-refs.** S151 (200/call FIFO cap — the band-aid this finally drains past). S155 (bounded-cycle drain fix this builds on — extend, not replace). S86 (CF dedup). Battle Scar #3/#14 + the worktree-symlink-gotcha memory (test-isolation class). The +$931 vig_stack workhorse untouched — check_clv is CLV/calibration settlement only.
+
+---
+
+### ☑ Session 158 — isolate clv.json in tests: close the synthetic-CF leak into production state (May 21, 2026, Outcome A)
+
+**Premise.** S157 found ~930 synthetic live_momentum CF rows (`CF-LM-{today}-KXNBAGAME-*ALPHA-A`/`IDL-IDL`, debug tokens TEST/ALPHA/IDL) in the REAL `bot/state/clv.json`, recorded 4-27→5-21 — recurring every test-suite run. Root cause (planner-traced): `tests/conftest.py` autouse-isolated `decisions.jsonl` + `predictions.jsonl` but NOT `clv.json`. The clv.py CF recorders write through `clv._CLV_FILE` (lazily cached from `bot.config.CLV_FILE` in `_get_file()`, clv.py:257), which no fixture patched. Primary leaker: `test_live_watcher.py`'s `*_records_skip_reason` tests drive the watcher skip path → `_record_lm_cf` → `record_live_momentum_counterfactual_skip` → `_save()` → real clv.json (the `{today}` in the fixture ticker explains the per-day recurrence).
+
+**What shipped (`tests/conftest.py` + `tests/test_clv.py`, +72, commit `aeb1314`).** Added an autouse `_isolate_clv_log` fixture mirroring `_isolate_predictions_log`: `monkeypatch.setattr(bot.clv, "_CLV_FILE", <tmp sandbox>)`. **Patches the CACHED module global directly** (not `bot.config.CLV_FILE`) — patching config alone would no-op since `_get_file()` caches on first use. Global → closes both the indirect leaker (test_live_watcher via the watcher) and any direct recorder caller at once. Regression `TestSession158ClvAutoIsolation`: a UUID-unique ticker (dedup/race-proof vs the live writer) asserts the recorder row lands in the sandbox AND the real prod file never contains it.
+
+**Tests.** Full suite **1891 passed** (1889 + 2 S158 regressions), 0 skips/xfails.
+
+**Verification (planner-independent, 2026-05-21).** Snapshotted real `clv.json` (total 11,128 / synthetic-shape 939 / sha256 `298e6a902d3e`), ran the FULL suite (1891 passed), re-snapshotted: **byte-identical** (11,128 / 939 / `298e6a902d3e` — total, synthetic-count, AND sha all unchanged). The synthetic-count check is immune to the live bot's concurrent real-record writes; the byte-identical result confirms no test touched the real file at all. Leak closed.
+
+**Existing pollution.** The ~930 synthetic rows S157 terminal-marked `settlement_failed` are left in place — benign (excluded from CF analyses; deleting from a live file risks racing the writer for no gain). S157's `_is_synthetic_ticker` sweep is now a true belt-and-suspenders net (no new leaks reach it).
+
+**Cross-refs.** S157 (found the leak + symptom-cleaned; this closes the root). S155/S86 (CF recorders + dedup). The `worktree tools/ symlink` memory + Battle Scar #3/#14 (test-isolation / shared-state class). `_isolate_decisions_log` (S6) + `_isolate_predictions_log` (S11) — the templates this mirrors. Test-only change, no bot restart; production + the +$931 workhorse untouched.
 
 ---
