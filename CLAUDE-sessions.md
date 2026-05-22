@@ -7956,3 +7956,27 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Cross-refs.** S157 (found the leak + symptom-cleaned; this closes the root). S155/S86 (CF recorders + dedup). The `worktree tools/ symlink` memory + Battle Scar #3/#14 (test-isolation / shared-state class). `_isolate_decisions_log` (S6) + `_isolate_predictions_log` (S11) — the templates this mirrors. Test-only change, no bot restart; production + the +$931 workhorse untouched.
 
 ---
+
+### ☑ Session 159 — per-game NBA/NHL vig_stack simulation: the structural vig is a spread artifact (May 21, 2026, Outcome C — closes the S134 loop)
+
+**Hypothesis (S134 deferred Open Loop).** `universe_report` (2026-05-21) flagged KXNBAGAME (~5.57M vol) + KXNHLTOTAL/SPREAD/MLBTOTAL as ignored (we scan 2.2% of the universe); S133/S134 found per-game winner markets run ~95-97% YES-sum>100¢ — apparent structural vig like the +$931 weather/index workhorse. Question: real capturable vig_stack arb, or spread artifact? Simulation-only replay (no scanner/config/runtime change).
+
+**What shipped.** `tools/sim_pergame_vig_stack.py` (read-only offline replay — stdlib only, imports no bot modules, no live Kalshi API, writes only the report) + `bot/state/reports/session_159_pergame_vig_stack_sim_2026-05-21.md`. Commit `14d44b7` (force-added — both gitignored).
+
+**Verdict: Outcome C — the per-game vig is illusory, two mechanisms (6,675 pairs → ruled out, NOT N-thin).**
+- **2-outcome winners (KXNBAGAME/KXNHLGAME): SPREAD ARTIFACT.** The ~97% headline was measured at `yes_ask`; **at MID the median YES-sum is exactly 100¢** — no vig at fair value. The capturable `NO_ask_A+NO_ask_B<100` gate fires on only **3.7% (NBA) / 2.0% (NHL)** of pairs at a median 101¢ cost (guaranteed −1¢), and every thin qualifier nets ≤0 after Kalshi fees → **NBA Σ −59¢ / 24 games, NHL Σ −28¢ / 12 games**, median AND ex-top-winner both negative.
+- **Outcome-D ladders are NOT vig_stack shape (corrects the brief's premise).** TOTALs (KXNHLTOTAL/KXMLBTOTAL) are nested `total≥N` thresholds (Σyes_mid 407¢/621¢ — not a single-winner partition). KXNHLSPREAD's per-team by-1/by-2+ rungs OVERLAP — 34.6% of gate-passing sets price >1 simultaneous winner, so buy-all-NOs doesn't pay (K−1)×100; a spurious **+$14.23** on liquid spread sets was a formula-misapplication artifact (Σyes ≈ 200¢ at the gate-passers — same fake-vig). The coder hardened the classifier with an evidence-based overlap test. Multi-rung ladders are FURTHER from vig_stack shape, not closer.
+
+**Why structural, not N-thin.** A 2-outcome market prices to 100¢ at mid by construction (A + not-A — no overround); the only "vig" is the bid-ask spread, which you PAY, not capture, buying both NOs. The weather/index workhorse works because those are many-rung ladders with real mid-overround across mutually-exclusive buckets — per-game winners have no such structure. 6,675 pairs confirm it empirically.
+
+**Tests.** pytest **1891 passed** (additive tools/ script, no runtime change).
+
+**Verification (planner-independent).** Confirmed the commit is read-only — sim script imports stdlib only (no bot modules, no Kalshi API, no state writes beyond the report); `git show` = 2 files, no `bot/` runtime touched, ahead 1. The mid-sum=100¢ finding is the clean fundamental tell; verdict is structurally inevitable for 2-outcome markets, so I did not re-run the 6,675-pair sim.
+
+**Closes the S134 Open Loop** ("simulation-only NBA/NHL per-game vig_stack replay") ruled-out. Battle Scar #9 (vig_stack_futures auto-exit exemption) flagged moot — no scanner expansion shipped.
+
+**Cross-refs.** S133/S134 (the lean-in that deferred this; KXMLBGAME's +$264 was game-outcome + auto-exit timing, NOT structural arb — consistent). S12/S13 (universe log + back-tester that made this cheap). Operating Posture: "unexpected profit is a LEAD, not a fact" — the per-game YES-sum>100 was a lead; verified, ruled out. The +$931 weather/index vig_stack (real multi-rung overround) untouched.
+
+**Frontier note.** Prospecting the ignored 97.8% surfaced this lead and ruled it out cleanly — the per-game-winner slice is NOT a vig target. The remaining unexplored families are different shapes (commodity ladders KXWTI/KXSILVERD; the parked `post_event_reversion` class auto-fires 2026-06-11). A fresh prospecting pass is the next frontier move, not more per-game work.
+
+---
