@@ -1624,6 +1624,7 @@ def render_anomalies_watchlist(
     anomalies: list[Flag],
     watch: list[dict],
     daily: DailyReport | None = None,
+    auto_retired: int = 0,
 ) -> str:
     """Section 7. Session 91 sub-feature 6: absorbs the auto-injected flags
     that used to live in the now-deleted §9 (daily_report_stale,
@@ -1654,7 +1655,40 @@ def render_anomalies_watchlist(
     else:
         for item in watch:
             out.append(f"- {item['status']}: {item['session']} L{item['line']} - {item['detail']}")
+    if auto_retired:
+        out.append("")
+        out.append(f"_{auto_retired} watch-list entries auto-retired (S162-auto); see retirement manifest (stderr)._")
     return "\n".join(out)
+
+
+def render_retirement_manifest(resolved: dict) -> str:
+    """S162: human-readable manifest of auto-retired watch-list entries (those
+    stamped ``resolved_by == "S162-auto"``), grouped by reason, for operator
+    spot-check before the retirements are trusted. Emitted to stderr on a real
+    run; ``watchlist_resolved.json`` is the durable record.
+    """
+    auto = {
+        k: v for k, v in resolved.items()
+        if isinstance(v, dict) and v.get("resolved_by") == "S162-auto"
+    }
+    lines = [f"=== S162 watch-list retirement manifest: {len(auto)} entries ==="]
+    if not auto:
+        lines.append("(none)")
+        return "\n".join(lines)
+    by_reason: dict[str, list] = defaultdict(list)
+    for key, rec in auto.items():
+        by_reason[str(rec.get("reason", "?"))].append((key, rec))
+    for reason in sorted(by_reason):
+        entries = sorted(by_reason[reason])
+        bypass = any(r.get("manual_axis_ruled_out") for _, r in entries)
+        tag = " (bypasses reversibility — SPOT-CHECK)" if bypass else " (reversible)"
+        lines.append(f"\n[{reason}] {len(entries)}{tag}:")
+        for key, rec in entries:
+            lines.append(f"  - {key}: {rec.get('rationale', '')}")
+            snippet = str(rec.get("trigger_text_snippet", "")).strip()
+            if snippet:
+                lines.append(f"      “{snippet}”")
+    return "\n".join(lines)
 
 
 def render_calendar_section(entries: list[dict]) -> str:
@@ -1924,8 +1958,13 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
     resolved = _load_watchlist_resolved(paths)
     resolved = _maybe_auto_resolve(watch, resolved, claude_text, now_utc)
     watch, resolved = _apply_watchlist_resolution(watch, resolved, now_utc)
+    auto_retired = sum(
+        1 for v in resolved.values()
+        if isinstance(v, dict) and v.get("resolved_by") == "S162-auto"
+    )
     if persist:
         _save_watchlist_resolved(paths, resolved)
+        sys.stderr.write(render_retirement_manifest(resolved) + "\n")
 
     flags_for_baseline = list(anomalies)
     if daily.stale_note:
@@ -1968,7 +2007,7 @@ def build_snapshot(repo_root: Path = _REPO_ROOT, now_utc: datetime | None = None
         render_pnl_section(metrics, daily, now_utc),
         render_positions_section(metrics, now_utc),
         render_discovery_section(discovery),
-        render_anomalies_watchlist(anomalies, watch, daily),
+        render_anomalies_watchlist(anomalies, watch, daily, auto_retired),
         render_calendar_section(calendar_entries),
         render_strategy_candidates_section(now_utc),
         render_active_observations(observations, now_utc),

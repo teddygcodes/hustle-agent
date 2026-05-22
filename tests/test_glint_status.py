@@ -579,6 +579,45 @@ def test_section_7_includes_watchlist_summary_flags(tmp_path: Path):
     assert "TRIGGERED: S40 L100" in md
 
 
+def test_section_7_shows_auto_retired_count():
+    md = glint.render_anomalies_watchlist([], [], None, auto_retired=18)
+    assert "18 watch-list entries auto-retired (S162-auto)" in md
+
+
+def test_section_7_omits_auto_retired_line_when_zero():
+    md = glint.render_anomalies_watchlist([], [], None, auto_retired=0)
+    assert "auto-retired" not in md
+
+
+def test_render_retirement_manifest_groups_and_filters():
+    resolved = {
+        "Session_46_L2791": {
+            "reason": "parent_axis_closed", "resolved_by": "S162-auto",
+            "rationale": "axis closed: wta disabled", "trigger_text_snippet": "removes wta",
+            "manual_axis_ruled_out": True,
+        },
+        "Session_114_L6008": {
+            "reason": "not_a_watchlist_trigger", "resolved_by": "S162-auto",
+            "rationale": "explicitly no trigger registered", "trigger_text_snippet": "None registered",
+        },
+        # S147 manual record — must NOT appear in the S162-auto manifest.
+        "Session_41_L2381": {"reason": "axis_ruled_out", "resolved_by": "S147"},
+        # thrash marker — ignored.
+        "Session_9_L9_RECENT": {"unresolved_count_24h": 5, "reason": "fresh_trigger_fired"},
+    }
+    md = glint.render_retirement_manifest(resolved)
+    assert "2 entries" in md
+    assert "[parent_axis_closed] 1 (bypasses reversibility — SPOT-CHECK)" in md
+    assert "[not_a_watchlist_trigger] 1 (reversible)" in md
+    assert "Session_46_L2791" in md and "Session_114_L6008" in md
+    assert "Session_41_L2381" not in md  # S147, not S162-auto
+    assert "Session_9_L9_RECENT" not in md
+
+
+def test_render_retirement_manifest_empty():
+    assert "(none)" in glint.render_retirement_manifest({"x": {"resolved_by": "S147"}})
+
+
 def test_render_flags_section_no_longer_exists():
     # Session 91 sub-feature 6: render_flags_section was deleted; confirm the
     # symbol is gone so future regressions can't accidentally reintroduce it.
