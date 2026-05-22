@@ -34,5 +34,151 @@
     "trigger_text_snippet": "S41's watch-list trigger fired (post-Apr-23 live_momentum n=66). Queued as Session 103+ candidate; closed by S129 Pattern C re-run.",
     "unresolved_count_24h": 0,
     "manual_axis_ruled_out": true
+  },
+  "Session_40_L2268": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "ship-summary prose, not a pending trigger",
+    "trigger_text_snippet": "**Decision: Outcome C \u2014 ship docs only.** No exit-path tightening; the data does not support it. Per the user's AskUserQ",
+    "unresolved_count_24h": 0
+  },
+  "Session_46_L2791": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "parent_axis_closed",
+    "resolved_by": "S162-auto",
+    "rationale": "axis closed: atp_challenger, wta disabled (MOMENTUM_DISABLED_SPORTS / VIG_STACK_DISABLED_FAMILIES, bot/config.py); re-open gated on deliberate re-enable",
+    "trigger_text_snippet": "**Watch-list trigger (re-investigate when ALL of):** - A future session removes wta and/or atp_challenger from `MOMENTUM",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  },
+  "Session_46_L2792": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "parent_axis_closed",
+    "resolved_by": "S162-auto",
+    "rationale": "axis closed: atp_challenger, wta disabled (MOMENTUM_DISABLED_SPORTS / VIG_STACK_DISABLED_FAMILIES, bot/config.py); re-open gated on deliberate re-enable",
+    "trigger_text_snippet": "- A future session removes wta and/or atp_challenger from `MOMENTUM_DISABLED_SPORTS` (e.g., Session 38a-2 watch-list tri",
+    "unresolved_count_24h": 0,
+    "manual_axis_ruled_out": true
+  },
+  "Session_59_L3389": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "operating-posture commentary, not a pending trigger",
+    "trigger_text_snippet": "**Operating Posture observation.** This is the first tool aimed at the planner's workflow rather than the bot's behavior",
+    "unresolved_count_24h": 0
+  },
+  "Session_82_L4342": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "operating-posture commentary, not a pending trigger",
+    "trigger_text_snippet": "**Operating Posture observation.** Phase 0 caught it again. Sessions 79 / 80 / 81 / 82 all verified premise before locki",
+    "unresolved_count_24h": 0
+  },
+  "Session_83_L4389": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "ship-summary prose, not a pending trigger",
+    "trigger_text_snippet": "**Out of scope.** `live_momentum` kill decision (separate session). Heartbeat threshold (locked). Battle Scar #13 / Sess",
+    "unresolved_count_24h": 0
+  },
+  "Session_85_L4446": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "markdown heading line, not a trigger body",
+    "trigger_text_snippet": "### \u2611 Session 85 \u2014 `no_vol_growth_first_seen/nhl_game` cycle-delay unblock investigation: Outcome C HOLD with extended w",
+    "unresolved_count_24h": 0
+  },
+  "Session_86_L4571": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "operating-posture commentary, not a pending trigger",
+    "trigger_text_snippet": "**Operating Posture observation.** Phase 0 caught it again \u2014 three measurements ran in parallel verified the premise (33",
+    "unresolved_count_24h": 0
+  },
+  "Session_86_L4573": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "ship-summary prose, not a pending trigger",
+    "trigger_text_snippet": "**Cross-references.** Session 73 \u2611 block ([CLAUDE.md:4441](CLAUDE.md:4441)) \u2014 different layer, similar shape (stateful r",
+    "unresolved_count_24h": 0
+  },
+  "Session_89_L4732": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "test description, not a pending trigger",
+    "trigger_text_snippet": "- \u2611 4 MANUAL_CHECK_REQUIRED entries dropped from output: 3 from CLAUDE.md operator-protocol prose (the post-Session-88 \"",
+    "unresolved_count_24h": 0
+  },
+  "Session_89_L4767": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "explicitly no trigger registered",
+    "trigger_text_snippet": "**Watch-list trigger.** None \u2014 clean structural ship. The only future \"re-investigate\" trigger this session creates is i",
+    "unresolved_count_24h": 0
+  },
+  "Session_93_L4994": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "ship-summary prose, not a pending trigger",
+    "trigger_text_snippet": "**Decision.** Outcome A per Session 93 plan: disable both families at the executor entry boundary with a new reject reas",
+    "unresolved_count_24h": 0
+  },
+  "Session_101_L5389": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "ship-summary prose, not a pending trigger",
+    "trigger_text_snippet": "**Outcome A (re-scoped, Layer 1 only).** User-confirmed via AskUserQuestion. Bound `_kalshi_get` with a daemon-thread to",
+    "unresolved_count_24h": 0
+  },
+  "Session_101_L5415": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "state-file changelog note, not a pending trigger",
+    "trigger_text_snippet": "- `bot/state/active_observations.json` \u2014 Session 101 entry with 4 metrics: longest SCAN CYCLE gap in last 24h (expect <6",
+    "unresolved_count_24h": 0
+  },
+  "Session_114_L6008": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "explicitly no trigger registered",
+    "trigger_text_snippet": "**Watch-list trigger.** None registered. Outcome C closes the historical loop; the breadcrumb in this \u2611 block is the dur",
+    "unresolved_count_24h": 0
+  },
+  "Session_115_L6073": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "explicitly no trigger registered",
+    "trigger_text_snippet": "**Watch-list trigger.** None registered as new. The 7 measured observations carry their existing triggers (auto-fire at ",
+    "unresolved_count_24h": 0
+  },
+  "Session_129_L6589": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "dashboard-update note, not a pending trigger",
+    "trigger_text_snippet": "- Dashboard update: only the S102 metric `post-Apr-23 settled live_momentum cohort size (S41 watch-list trigger)` change",
+    "unresolved_count_24h": 0
+  },
+  "Session_149_L7700": {
+    "resolved_at": "2026-05-22T19:47:14.700088+00:00",
+    "reason": "not_a_watchlist_trigger",
+    "resolved_by": "S162-auto",
+    "rationale": "pointer to other triggers, no own condition",
+    "trigger_text_snippet": "**Verify (live, post-session).** None \u2014 no behavior change shipped. Re-evaluate on next session per the watch-list trigg",
+    "unresolved_count_24h": 0
   }
 }
