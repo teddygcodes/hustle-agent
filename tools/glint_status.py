@@ -858,21 +858,65 @@ def _apply_watchlist_resolution(
     return filtered, updated
 
 
+# S162 open-guard: an entry is "genuinely open" — and must NEVER be auto-retired
+# by any criterion — when it names a future re-evaluation date or an unfired
+# numeric/threshold condition. Phase 0 found that fixing the date-parse alone
+# would let the bare-30d rule retire pending future/threshold triggers the moment
+# their session header crossed 30d; this guard makes age necessary-not-sufficient
+# and stops a live axis being retired just because its prose mentions a disabled
+# sport (the disabled-axis criterion runs after this guard).
+_FUTURE_DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+_UNFIRED_THRESHOLD_RE = re.compile(
+    r"n\s*>=\s*\d|n\s*≥\s*\d|≥\s*\d|>=\s*\d|reach(?:es)?\s+\d|grows?\s+to|crosses|"
+    r"drops?\s+below|rises?\s+above|sustained\s+for|\bN\s*[≥>]|\bn\s*=\s*\d",
+    re.IGNORECASE,
+)
+
+
+def _has_future_date(text: str, today) -> bool:
+    """True if `text` names any YYYY-MM-DD date on or after `today`."""
+    for y, m, d in _FUTURE_DATE_RE.findall(text):
+        try:
+            if datetime(int(y), int(m), int(d)).date() >= today:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _has_unfired_threshold(text: str) -> bool:
+    """True if `text` names a numeric/threshold re-fire condition (n>=N, reaches N,
+    crosses, sustained for …) we cannot auto-verify — so the entry stays MANUAL."""
+    return bool(_UNFIRED_THRESHOLD_RE.search(text))
+
+
+def _is_genuinely_open(text: str, today) -> bool:
+    return _has_future_date(text, today) or _has_unfired_threshold(text)
+
+
 def _maybe_auto_resolve(
     triggers: list[dict],
     resolved: dict,
     claude_text: str,
     now: datetime,
 ) -> dict:
-    """Time-based auto-resolution pass.
+    """Auto-resolution pass — S162 multi-criterion, safety-ordered.
 
-    A MANUAL_CHECK_REQUIRED entry whose session header date is ≥30 days old
-    AND whose key isn't already resolved or thrash-marked gets a new
-    `auto_time_based_30d` resolved record.
+    For each MANUAL_CHECK_REQUIRED trigger not already resolved or thrash-marked:
+      0. open-guard — a future-dated or unfired-threshold entry is genuinely open
+         and is NEVER auto-retired (skip all criteria).
+      (noise + disabled-axis criteria are layered in by later S162 commits)
+      *. guarded hard-stale — session header date ≥ RESOLVE_WINDOW_DAYS old. Age
+         is necessary, not sufficient: the open-guard above already excluded
+         pending entries.
+
+    Reversibility (S91) is preserved by _apply_watchlist_resolution; only
+    axis-closed records set ``manual_axis_ruled_out`` to bypass it (S147).
     """
     updated = dict(resolved)
     session_dates = _extract_session_dates(claude_text, current_year=now.year)
     cutoff = now - timedelta(days=RESOLVE_WINDOW_DAYS)
+    today = now.astimezone(helpers.ET).date()
     for t in triggers:
         if t.get("status") != "MANUAL_CHECK_REQUIRED":
             continue
@@ -882,17 +926,20 @@ def _maybe_auto_resolve(
         recent = updated.get(f"{key}_RECENT")
         if recent and int(recent.get("unresolved_count_24h", 0) or 0) > THRASH_THRESHOLD_24H:
             continue  # thrash protection — stay visible until manual review
-        sess_label = str(t.get("session") or "").strip()
-        sess_date = session_dates.get(sess_label)
-        if sess_date is None or sess_date > cutoff:
-            continue
-        updated[key] = {
-            "resolved_at": now.isoformat(),
-            "reason": "auto_time_based_30d",
-            "session_date": sess_date.isoformat(),
-            "trigger_text_snippet": (str(t.get("text") or ""))[:120],
-            "unresolved_count_24h": 0,
-        }
+        text = str(t.get("text") or "")
+        if _is_genuinely_open(text, today):
+            continue  # open-guard — never retire a pending question
+        # Guarded hard-stale: ≥ RESOLVE_WINDOW_DAYS old AND open-guard already clear.
+        sess_date = session_dates.get(str(t.get("session") or "").strip())
+        if sess_date is not None and sess_date <= cutoff:
+            updated[key] = {
+                "resolved_at": now.isoformat(),
+                "reason": "auto_time_based_30d",
+                "resolved_by": "S162-auto",
+                "session_date": sess_date.isoformat(),
+                "trigger_text_snippet": text[:120],
+                "unresolved_count_24h": 0,
+            }
     return updated
 
 

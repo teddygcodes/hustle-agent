@@ -805,6 +805,49 @@ def test_maybe_auto_resolve_skips_thrashed_keys(tmp_path: Path):
     assert "Session_1_L2_RECENT" in updated  # thrash record preserved
 
 
+def test_maybe_auto_resolve_open_guard_skips_future_dated_entry():
+    """S162: a ≥30d-old session whose trigger names a future re-eval date is
+    genuinely open and must NOT be auto-retired by the age criterion."""
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 1 — old (Apr 1)\nWatch-list trigger: re-evaluate 2026-06-08.\n"
+    triggers = [{
+        "session": "Session 1", "line": 2,
+        "text": "Watch-list trigger: re-evaluate after 2026-06-08.",
+        "status": "MANUAL_CHECK_REQUIRED",
+    }]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    assert "Session_1_L2" not in updated  # future date → stays MANUAL despite 38d age
+
+
+def test_maybe_auto_resolve_open_guard_skips_unfired_threshold():
+    """S162: a ≥30d-old session whose trigger names an unfired N-threshold stays
+    MANUAL — age is necessary, not sufficient."""
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 1 — old (Apr 1)\nWatch-list trigger: re-run when N >= 80.\n"
+    triggers = [{
+        "session": "Session 1", "line": 2,
+        "text": "Watch-list trigger: re-run when cohort N >= 80 settled.",
+        "status": "MANUAL_CHECK_REQUIRED",
+    }]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    assert "Session_1_L2" not in updated  # unfired threshold → stays MANUAL
+
+
+def test_maybe_auto_resolve_clean_stale_entry_still_resolves_s162_auto():
+    """S162: a ≥30d-old entry with no future date and no threshold is still
+    retired by the guarded age path, now stamped resolved_by=S162-auto."""
+    now = datetime(2026, 5, 9, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 1 — old (Apr 1)\nWatch-list trigger: when X happens.\n"
+    triggers = [{
+        "session": "Session 1", "line": 2,
+        "text": "Watch-list trigger: when X happens.",
+        "status": "MANUAL_CHECK_REQUIRED",
+    }]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    assert updated["Session_1_L2"]["reason"] == "auto_time_based_30d"
+    assert updated["Session_1_L2"]["resolved_by"] == "S162-auto"
+
+
 def test_load_save_watchlist_resolved_round_trip(tmp_path: Path):
     paths = glint.paths_for(tmp_path)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
