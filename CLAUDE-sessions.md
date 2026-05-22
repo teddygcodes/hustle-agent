@@ -7980,3 +7980,27 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Frontier note.** Prospecting the ignored 97.8% surfaced this lead and ruled it out cleanly — the per-game-winner slice is NOT a vig target. The remaining unexplored families are different shapes (commodity ladders KXWTI/KXSILVERD; the parked `post_event_reversion` class auto-fires 2026-06-11). A fresh prospecting pass is the next frontier move, not more per-game work.
 
 ---
+
+### ☑ Session 160 — commodity-ladder vig_stack simulation: ruled out (cumulative thresholds, not a partition) (May 21, 2026, Outcome C)
+
+**Hypothesis.** After S159 ruled out per-game winners (2-outcome, no mid-overround), the next prospect: commodity price-ladder families (KXWTI/KXSILVERD/KXAAAGASD/KXAAAGASW) are the multi-rung shape — do they carry capturable vig like KXINX (the working index-range vig_stack member)? Simulation-only (no scanner/config/runtime change).
+
+**What shipped.** `tools/sim_commodity_vig_stack.py` (read-only, stdlib, no bot imports/API) + `tests/test_sim_commodity_vig_stack.py` (11 tests on the load-bearing math) + `bot/state/reports/session_160_commodity_vig_stack_sim_2026-05-21.md`. Commit `774f25e`.
+
+**Verdict: Outcome C — ruled out, two settlement-free deciding numbers.**
+- **Not a single-winner partition.** Commodities are cumulative *above-$X* threshold ladders — a settled price makes every lower threshold YES at once. Discriminator = median ITM rungs (yes_mid>50¢ ≈ simultaneous winners): **KXINX-B ≈ 0** (true 1-winner partition, the genuine vig_stack shape) vs **KXWTI 8 / KXAAAGASD 9 / KXGOLDD 20 / KXSILVERD 22**. (RAW Σyes_mid is NOT the discriminator — it's spread-inflated by phantom mids on illiquid wings, which is why KXINX initially mis-classified; the ITM-rung count is the robust tell.)
+- **The synthetic partition has no overround, by construction.** Differencing the thresholds into an exclusive partition telescopes to **Σmid = 100¢** for every commodity family (a differenced monotone CDF IS a probability distribution — sums to 1). Buy-all-synthetic-NOs margin = **−Σspread** exactly (verified per ladder), negative and worse after fees. The Σ-YES≥105¢ gate fires **0% at mid / 100% at ask** — the spread artifact, made provable.
+
+**Generalizes S159's per-game lesson to the threshold class.** KXGOLDD/KXBRENTD/KXNATGASD (Outcome-D families) share the structure, ruled out identically. KXAAAGASW = insufficient data (no full captures).
+
+**Honest caveat (Outcome B on the P&L sub-analysis).** Offline price-convergence settlement coverage is near-zero (0-6% per family — settled markets leave the `status=open` universe, so snapshots lack collapsed curves). The realized-P&L floor sweep is therefore data-blocked → Outcome B for that sub-analysis; the ruling-out rests on the settlement-FREE structural + margin evidence, which is stronger than a coverage-thin P&L cohort. (Saved to the offline-sim-settlement-gap memory — `post_event_reversion` and any offline realized-P&L sim hit the same wall.)
+
+**Tests.** 11 new + full suite **1902 passed** (additive, zero bot/ runtime change). Report byte-identical across re-runs (deterministic).
+
+**Verification (planner).** Read-only confirmed (stdlib only, no bot imports/API; `git show` = 3 files, ahead 1, no runtime touched). The verdict is sound on first principles independent of the data: threshold contracts are cumulative by design (clearing $76 ⇒ cleared $74, $72…), so they cannot be a single-winner partition, and a differenced monotone CDF cannot carry overround. KXINX works precisely because it's mutually-exclusive *range* buckets. (My own quick discriminator check came up empty — a data-slice methodology error on my part, not a contradiction.)
+
+**The bigger finding (S159 + S160 together).** vig_stack's edge does NOT generalize to adjacent Kalshi families — per-game (no overround) and commodities (no partition) both ruled out for the same root reason: no real *mid*-overround on a single-winner partition; the apparent vig is a bid-ask-spread artifact. **The edge is structural to weather/index** (real mid-overround on mutually-exclusive buckets). Stop hunting vig_stack-shaped expansions; the remaining frontier is genuinely-different strategy CLASSES (`post_event_reversion`, auto-fires 2026-06-11) — and those hit the offline-settlement data wall, so validating a NEW edge needs shadow-mode (Future Direction, 0% built) or live data, not offline sim.
+
+**Cross-refs.** S159 (per-game ruled out — same spread-artifact lesson). KXINX (the working partition benchmark). S127 (named the commodity ladders). offline-sim-settlement-gap memory. Operating Posture: prospecting → rigorous rule-out is the search narrowing, not failing.
+
+---
