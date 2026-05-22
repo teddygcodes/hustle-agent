@@ -4,7 +4,7 @@ This file is the historical session log for the Glint trading bot. Each entry be
 
 - Operator manual lives in [CLAUDE.md](CLAUDE.md). Read that first for project scope, strategies, safety architecture, battle scars, schema reference, operating posture, and the "When Tyler Asks..." playbooks.
 - This file is append-only-but-curated. New session entries land here, NOT in CLAUDE.md.
-- Most recent ship: Session 105 (2026-05-11).
+- Most recent ship: see the most recent ☑ entry at the bottom of this file (non-numeric on purpose so this pointer can't go stale — Session 161; was a hardcoded "Session 105" that had drifted).
 
 ---
 

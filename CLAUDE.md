@@ -567,7 +567,7 @@ The Apr 18 numbers (43 vig_stack / 16 live_momentum) were "honest" given the the
 
 ## Session-by-Session Changelog
 
-The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: Session 106 (2026-05-11).
+The full session-by-session changelog has moved to [CLAUDE-sessions.md](CLAUDE-sessions.md). Most recent ship: see the latest ☑ entry in [CLAUDE-sessions.md](CLAUDE-sessions.md) (the bottom-most ☑ block) — non-numeric on purpose so this pointer can't go stale (Session 161; was a hardcoded "Session 106" that had drifted).
 
 **Future session entries append to `CLAUDE-sessions.md`, not this file.** CLAUDE.md is the operator manual; CLAUDE-sessions.md is the historical log. When you ship a new session, the ☑ block goes there.
 
@@ -785,6 +785,8 @@ If a third instance happens, the next decision could ride on falsified evidence.
   "recheck_open_edges_outer_timeout_count_24h": int,          # reset with scans_today; forward-only since Session 150
   "scan_related_markets_outer_timeout_count_24h": int,        # reset with scans_today; forward-only since Session 150
 
+  "shadow_settlement_outer_timeout_count_24h": int,           # reset with scans_today; forward-only since Session 161
+
   "outcome_tracker_degraded": bool,             # forward-only since Session 153; True when module-load OutcomeTracker() init failed AND auto-recovery did not succeed (NullOutcomeTracker active)
   "outcome_tracker_degraded_since": str | None, # ISO 8601 UTC; forward-only since Session 153; set at the start() that detected degraded mode
 }
@@ -795,6 +797,8 @@ Forward-only rule: older `bot_state.json` files may be missing any `telegram_*` 
 Session 98 forward-only rule: pre-Session-98 `bot_state.json` files may be missing `snapshot_outer_timeout_count_24h`; readers must treat missing as `0`. Counter resets daily alongside `scans_today` at midnight UTC roll. Non-zero values confirm the `_main_loop` outer `asyncio.wait_for` guard at [bot/main.py:1290](hustle-agent/bot/main.py:1290) fired; see Battle Scar #13's Session 98 addendum.
 
 Session 150 forward-only rule: pre-Session-150 `bot_state.json` files may be missing `scan_cycle_outer_timeout_count_24h`, `check_clv_settlements_outer_timeout_count_24h`, `recheck_open_edges_outer_timeout_count_24h`, and `scan_related_markets_outer_timeout_count_24h`; readers must treat missing as `0`. All four counters reset daily alongside `scans_today` at midnight UTC roll. Non-zero values confirm one of the four `_main_loop` outer `asyncio.wait_for` guards (constant `_EXECUTOR_OUTER_TIMEOUT_SEC = 900`) at the S148 boundaries fired; see Battle Scar #13's Session 150 addendum. Per-function counters give forensic attribution — `scan_cycle_*` points at the WEATHER / kalshi_series / sports_arb tree, the other three at their respective scan paths.
+
+Session 161 forward-only rule: pre-Session-161 `bot_state.json` files may be missing `shadow_settlement_outer_timeout_count_24h`; readers must treat missing as `0`. Resets daily alongside `scans_today`. Non-zero confirms the Session 161 shadow-settlement runtime hook's outer `asyncio.wait_for` guard (Step 4c in `_main_loop`, after `check_clv_settlements`) fired. Session 161 also added the 4 Session 150 counters above to the day-roll reset block (they were incremented but never reset pre-S161 — see the resolved S155 follow-up in Open Loops), so all five now read true 24h.
 
 Session 153 forward-only rule: pre-Session-153 `bot_state.json` files may be missing `outcome_tracker_degraded` and `outcome_tracker_degraded_since`; readers must treat missing `outcome_tracker_degraded` as `False` and `outcome_tracker_degraded_since` as `None`. These flag a failed module-load `OutcomeTracker()` init where the one-shot auto-recovery in `start()` also failed (NullOutcomeTracker active → alert calibration disabled; bot trades normally). The degradation *reason* is NOT persisted here — it's in `bot.log` (the DEGRADED ERROR line) and surfaced as a glint_status §7 WARN. `outcomes.db` is calibration-only; cross-ref Battle Scar #3/#14 (duplicate-runtime is the upstream cause of the stale-journal failure this resilience layer absorbs). Recovery runs only after `_acquire_lock()` so the journal-clear cannot race a live duplicate.
 
@@ -986,10 +990,10 @@ session.
   "family": str | None,
   "sport": str | None,
   "close_ts": str | None,
-  "status": "open",
-  "settled_at": None,
-  "market_result": None,
-  "would_pnl": None,
+  "status": "open" | "settled" | "settlement_failed",  # Session 161: terminal states added
+  "settled_at": str | None,            # ISO 8601 UTC; set when status leaves "open"
+  "market_result": "yes" | "no" | None,  # which side actually won; None until settled
+  "would_pnl": float | None,           # dollars, signed; available-sizing rows only
   "source": "executor" | "live_watcher",
   "source_decision_reason": str,
   "extra": dict,
@@ -1004,6 +1008,19 @@ live-watcher path lacks computable contracts, keep
 `would_contracts`/`would_notional` null, use `sizing_status="unavailable"`, and
 include explicit `extra.missing_sizing_fields` / `extra.sizing_unavailable_reason`
 metadata. Do not write zeros or invented contract counts.
+
+Settlement rule (Session 161, `bot/shadow_settlement.py`): the resolver settles
+open rows forward-only — `status` goes `open → settled` (or `settlement_failed`
+for void/404/malformed tickers, S157 shape) and is never reverted. On `settled`
+it sets `settled_at`, `market_result`, and — for `sizing_status=="available"`
+rows only — `would_pnl` (won → `contracts*(1 - entry)`; lost → `-contracts*entry`,
+mirroring `bot/tracker.py:374`; dollars, 4-dp). Unavailable rows get
+`extra.would_outcome` ("won"|"lost") with `would_pnl` left null (never invent a
+contract count). `extra.settlement_source` records provenance
+(`clv_local` | `event_fetch` | `ticker_probe`); dead-marked rows carry
+`extra.settlement_note`. Forward-only: pre-Session-161 rows are all `status="open"`.
+Resolution reads `clv.json` RAW (NOT `clv._load()`, which filters to active
+strategies and would drop disabled-sport CF records).
 
 ### `bot/state/paper_trades.json` records
 
@@ -1294,7 +1311,7 @@ Items observed during operation but not prioritized for a session. No calendar t
 
 - **S152 — duplicate bot runtime contamination cleaned up before code changes (2026-05-19).** Phase 0 on the post-S151 check_clv/snapshot counters found the evidence contaminated by duplicate runtime: launchd owned canonical wrapper PID 65565 with child 65568, while an extra `./run_bot.sh` wrapper PID 76345 plus duplicate bot children 43842 and 52047 were also alive. That means two bot instances were competing for the same S146 global Kalshi rate limiter budget and writing shared state files. Cleanup terminated only the non-canonical wrapper/children with SIGTERM; post-cleanup verification showed exactly one wrapper and one `python -m bot.main`, `bot_state.running=true`, heartbeat fresh, and CLOSE_WAIT under the <10 target. **No code fix shipped:** do not reduce `_CHECK_CLV_BATCH_SIZE`, split Kalshi rate limits, or add CLV instrumentation until the next 24 runtime hours are observed under a single bot. **Watch:** by 2026-05-20 ~22:00 ET, evaluate runtime-hour-normalized `check_clv_settlements_outer_timeout_count_24h`, `snapshot_outer_timeout_count_24h`, `scan_cycle_outer_timeout_count_24h`, CLOSE_WAIT, and backlog-drain logs. If counters still rise under single-bot conditions, ship instrumentation-only timing in `check_clv_settlements` before changing behavior. **Resolved by S155 (2026-05-21) — wedge/cadence half.** Condition MET (counter rising under verified single-bot conditions). S155 shipped batching + dead-marking (4 commits) then, after the first live cycle FAILED (200 event-groups × ~6.3s under the contended S146 limiter ≈ 1,260s > the 900s guard; persist-at-cycle-end discarded everything), shipped a 3-commit drain fix: dead-mark + persist FIRST (re-load-merge — `clv._save` is a bespoke tmp+rename, NOT `state_io`), a 600s soft wall-clock budget, and incremental persist every 25 groups. **Confirmed across 2 live cycles** (621s/603s < 900s, no wedge, counter frozen 32→32, OPEN monotonic-down 2,378→2,369, +11 dead-marks persisted mid-cycle; planner-verified independently). check_clv no longer wedges or leaks threads per cycle. See the S155 ☑ block. **Remaining (new lead — next CLV session):** drain is correct but SLOW (~2-3/cycle) — ~1,026 stale malformed/404/`scalar` records the GROUP path can't terminal-mark clog the oldest-first head and starve settleable groups past the 600s budget; emptying OPEN toward its ~1,125 futures-floor needs group-path terminal-marking + `scalar`-result handling (overlaps the malformed-emitter lead below). Two further follow-ups still open (below).
 
-- **S155 follow-up — 4 S150 `*_outer_timeout_count_24h` counters not reset on day-roll (2026-05-21).** [bot/main.py:1450-1454](bot/main.py:1450) zeroes only `scans_today` + `snapshot_outer_timeout_count_24h` on the `current_date` roll; the 4 S150 counters (`scan_cycle_outer_timeout_count_24h`, `check_clv_settlements_outer_timeout_count_24h`, `recheck_open_edges_outer_timeout_count_24h`, `scan_related_markets_outer_timeout_count_24h`) are incremented but never reset, so they read **cumulative-since-deploy, not 24h** despite the `_24h` suffix. Consequence: the "≥3/day" auto-fire triggers in Battle Scar #13's S150 addendum and the §12 escalation triggers cannot be read off the counter value — count timestamped wedge lines in `bot.log` instead (S155's status read did exactly this: counter 29 but ~21 actual wedges on 2026-05-20). **Fix (4 lines):** add the 4 counters to the reset block at [bot/main.py:1450-1454](bot/main.py:1450) alongside `snapshot_outer_timeout_count_24h`. Forward-only note: this is a semantics correction, not a field rename — the Canonical Data Schema Reference already documents these as resetting daily (the doc was aspirational; the code lags). Ship with a regression test asserting all 5 counters zero on a simulated `current_date` change. Not restart-urgent; bundle with the next `bot/main.py` session or ship standalone.
+- **(Resolved by S161, 2026-05-22)** — S155 follow-up: the 4 S150 `*_outer_timeout_count_24h` counters are now added to the day-roll reset block alongside the new `shadow_settlement_outer_timeout_count_24h`, so all five read true 24h. Regression test in `tests/test_main.py`. Original entry: [bot/main.py:1450-1454](bot/main.py:1450) zeroes only `scans_today` + `snapshot_outer_timeout_count_24h` on the `current_date` roll; the 4 S150 counters (`scan_cycle_outer_timeout_count_24h`, `check_clv_settlements_outer_timeout_count_24h`, `recheck_open_edges_outer_timeout_count_24h`, `scan_related_markets_outer_timeout_count_24h`) are incremented but never reset, so they read **cumulative-since-deploy, not 24h** despite the `_24h` suffix. Consequence: the "≥3/day" auto-fire triggers in Battle Scar #13's S150 addendum and the §12 escalation triggers cannot be read off the counter value — count timestamped wedge lines in `bot.log` instead (S155's status read did exactly this: counter 29 but ~21 actual wedges on 2026-05-20). **Fix (4 lines):** add the 4 counters to the reset block at [bot/main.py:1450-1454](bot/main.py:1450) alongside `snapshot_outer_timeout_count_24h`. Forward-only note: this is a semantics correction, not a field rename — the Canonical Data Schema Reference already documents these as resetting daily (the doc was aspirational; the code lags). Ship with a regression test asserting all 5 counters zero on a simulated `current_date` change. Not restart-urgent; bundle with the next `bot/main.py` session or ship standalone.
 
 - **S157+S158 resolved the CLV group-path drain AND the test-isolation leak (2026-05-21); only the malformed-emitter remains open.** S155 fixed the wedge but the group path couldn't terminal-mark groupable dead records; **S157 (`38c4edd`) shipped group-path terminal-marking** (`settled_without_market` / `event_no_markets_stale` / `settlement_skipped_scalar`, gated on `not _is_protected_open` + 7d grace) + a paper-only `_is_synthetic_ticker` sweep; verified live (junk cleared, 0 futures wrongly marked, 0 stale >7d, fast cycles ~240s). **Test-isolation leak — RESOLVED by S158 (`aeb1314`):** `tests/conftest.py` autouse-isolated decisions/predictions but not clv.json, so the CF recorders wrote ~930 synthetic rows to the real `bot/state/clv.json` every suite run (primary leaker: `test_live_watcher.py` skip-reason tests via the watcher). Fix = autouse `_isolate_clv_log` fixture patching `bot.clv._CLV_FILE` (the cached layer) to a tmp sandbox; planner-verified the full suite (1891) leaves clv.json byte-identical. The ~930 existing rows stay terminal-marked (benign). **STILL OPEN — malformed-emitter:** why CF emission produced 1,025 `KXHIGHNY-26APR*` 404-forever rows — does `bot/clv.py` CF emission validate ticker shape / event liveness before recording? Extend the "Check the Data §2 pollution check" to flag malformed event tickers. **Why it matters:** if it keeps producing junk, `settlement_failed` accumulates and CF-data-quality degrades for any `counterfactual_*` analysis. **No auto-trigger;** investigate when an operator has bandwidth.
 
