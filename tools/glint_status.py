@@ -1070,6 +1070,41 @@ def evaluate_watchlist_triggers(triggers: list[dict], data: dict) -> list[dict]:
     return evaluated
 
 
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+
+
+def _cadence_next_fire(cadence: str, now_et: datetime) -> Optional[datetime]:
+    """Session 161: derive the next fire time of a recurring routine from its
+    Cadence column ('Daily 3:00 AM ET', 'Sundays 6:00 AM ET') instead of trusting
+    the Next-Run cell, which carries a literal '(after first fire)' placeholder
+    that never parses (so §8 wrongly reported 'no future routines'). Cron routines
+    fire on their own schedule; this only fixes the dashboard's derived view.
+    Returns None for cadences we can't parse (non-daily/weekly), so they're
+    skipped rather than crashing the section."""
+    m = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", cadence, re.IGNORECASE)
+    if not m:
+        return None
+    hour = int(m.group(1)) % 12
+    if m.group(3).upper() == "PM":
+        hour += 12
+    minute = int(m.group(2))
+    anchor = now_et.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    low = cadence.lower()
+
+    weekday = next((idx for name, idx in _WEEKDAYS.items() if name in low), None)
+    if weekday is not None:
+        candidate = anchor + timedelta(days=(weekday - now_et.weekday()) % 7)
+        if candidate <= now_et:
+            candidate += timedelta(days=7)
+        return candidate
+    if "daily" in low or "every day" in low:
+        return anchor if anchor > now_et else anchor + timedelta(days=1)
+    return None
+
+
 def next_calendar_entries(paths: Paths, now_utc: datetime, limit: int = 5) -> list[dict]:
     if not paths.report_calendar.exists():
         return []
@@ -1086,13 +1121,24 @@ def next_calendar_entries(paths: Paths, now_utc: datetime, limit: int = 5) -> li
         if len(cells) < 5:
             continue
         routine = cells[0]
-        fires = cells[1] if re.match(r"\d{4}-\d{2}-\d{2}", cells[1]) else cells[2]
-        try:
-            dt = datetime.strptime(fires, "%Y-%m-%d %I:%M %p ET").replace(tzinfo=helpers.ET)
-        except ValueError:
-            continue
+        # One-off rows carry a literal date in the Fires column (cells[1]);
+        # recurring rows carry a human Cadence there with the Next-Run
+        # placeholder in cells[2] (Session 161 — derive from Cadence instead).
+        if re.match(r"\d{4}-\d{2}-\d{2}", cells[1]):
+            try:
+                dt = datetime.strptime(
+                    cells[1], "%Y-%m-%d %I:%M %p ET"
+                ).replace(tzinfo=helpers.ET)
+            except ValueError:
+                continue
+            output = cells[3] if len(cells) > 3 else ""
+        else:
+            dt = _cadence_next_fire(cells[1], now_et)
+            if dt is None:
+                continue
+            output = cells[4] if len(cells) > 4 else ""  # recurring Output col
         if dt >= now_et:
-            entries.append({"routine": routine, "fires": dt, "output": cells[3] if len(cells) > 3 else ""})
+            entries.append({"routine": routine, "fires": dt, "output": output})
     entries.sort(key=lambda e: e["fires"])
     return entries[:limit]
 

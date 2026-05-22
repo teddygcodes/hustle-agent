@@ -1002,3 +1002,66 @@ def test_compute_active_observations_counts_disabled_family_entries(tmp_path: Pa
     )
 
     assert computed[0]["metrics"][0]["current_value"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Session 161 — §8 calendar next-fire derivation
+# ---------------------------------------------------------------------------
+
+def test_cadence_next_fire_daily_rolls_to_tomorrow_when_time_passed():
+    now_et = datetime(2026, 5, 22, 12, 0, tzinfo=glint.helpers.ET)  # noon, past 3 AM
+    fire = glint._cadence_next_fire("Daily 3:00 AM ET", now_et)
+    assert (fire.hour, fire.minute) == (3, 0)
+    assert fire.date() == (now_et + timedelta(days=1)).date()
+
+
+def test_cadence_next_fire_daily_today_when_time_ahead():
+    now_et = datetime(2026, 5, 22, 2, 0, tzinfo=glint.helpers.ET)  # before 6 AM
+    fire = glint._cadence_next_fire("Daily 6:00 AM ET", now_et)
+    assert (fire.hour, fire.minute) == (6, 0)
+    assert fire.date() == now_et.date()
+
+
+def test_cadence_next_fire_weekly_lands_on_named_weekday():
+    now_et = datetime(2026, 5, 20, 12, 0, tzinfo=glint.helpers.ET)  # Wednesday
+    fire = glint._cadence_next_fire("Sundays 6:00 AM ET", now_et)
+    assert fire.weekday() == 6                      # Sunday
+    assert (fire.hour, fire.minute) == (6, 0)
+    assert now_et < fire <= now_et + timedelta(days=7)
+
+
+def test_cadence_next_fire_unparseable_returns_none():
+    now_et = datetime(2026, 5, 20, 12, 0, tzinfo=glint.helpers.ET)
+    assert glint._cadence_next_fire("Every 6h", now_et) is None
+
+
+def test_next_calendar_entries_derives_recurring_from_cadence(tmp_path: Path):
+    """Regression: recurring rows carry Next Run = '(after first fire)', which
+    used to fail strptime and get silently skipped -> '§8 no future routines'."""
+    (tmp_path / "REPORT_CALENDAR.md").write_text(
+        "# Report Calendar\n\n"
+        "## Recurring routines\n\n"
+        "| Routine | Cadence | Next Run | Last Run | Output | Why | Notes |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| Daily report | Daily 3:00 AM ET | (after first fire) | "
+        "2026-05-22T07:00:05+00:00 | path/daily.md | verify | notes |\n"
+        "| Weekly report | Sundays 6:00 AM ET | (after first fire) | "
+        "2026-05-03T17:39Z | path/weekly.md | synth | notes |\n\n"
+        "## One-off routines\n\n"
+        "| Routine | Fires | Status | Output | Why |\n"
+        "|---|---|---|---|---|\n"
+        "| Past one-off | 2026-05-01 9:00 AM ET | scheduled | inline | z |\n"
+    )
+    paths = glint.paths_for(tmp_path)
+    now_utc = datetime(2026, 5, 22, 16, 0, tzinfo=timezone.utc)
+
+    entries = glint.next_calendar_entries(paths, now_utc)
+    names = {e["routine"] for e in entries}
+
+    assert "Daily report" in names          # the bug: was silently skipped
+    assert "Weekly report" in names
+    assert "Past one-off" not in names       # past one-off correctly excluded
+    now_et = now_utc.astimezone(glint.helpers.ET)
+    assert all(e["fires"] >= now_et for e in entries)
+    daily = next(e for e in entries if e["routine"] == "Daily report")
+    assert "daily.md" in daily["output"]     # recurring Output is cells[4], not cells[3]
