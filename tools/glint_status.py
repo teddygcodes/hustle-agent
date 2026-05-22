@@ -934,6 +934,63 @@ def _classify_noise(text: str) -> Optional[str]:
     return None
 
 
+# S162 disabled-axis: a watch whose subject sport/family is currently disabled and
+# whose only re-open path is a deliberate re-enable is moot until that re-enable
+# (the S147 wta precedent). The re-open must be gated on the disabled-set config
+# constant by NAME — bare "re-enable" in prose is too loose (S110's IPL ship-note
+# mentions "ATP/WTA re-enable" in passing but is not a watch on that axis).
+# Combined with a no-enabled-subject check and the open-guard, this keeps S74/
+# S93/S97/S110 MANUAL and catches only the genuinely re-enable-gated watches.
+_REENABLE_GATE_RE = re.compile(
+    r"MOMENTUM_DISABLED_SPORTS|VIG_STACK_DISABLED_FAMILIES",
+)
+_ENABLED_SUBJECT_RE = re.compile(
+    r"\bufc\b|\bipl\b|\bnhl_game\b|\bnhl\b|\bmlb\b|\bnba\b|\bkxhighny\b|"
+    r"\bkxhighmia\b|\bkxhighaus\b|\bkxhighden\b|\bkxhighnsh\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_disabled_axis(text: str) -> Optional[tuple[str, str]]:
+    """Return (reason, rationale) if `text` is a watch on a currently-disabled
+    sport/family whose re-open is gated on a deliberate re-enable, else None.
+
+    Highest-risk bucket: retired with ``manual_axis_ruled_out`` (bypasses S91
+    reversibility, per S147), so the manifest MUST be operator-spot-checked. The
+    open-guard runs first, so anything with a pending date/threshold is already
+    excluded.
+    """
+    try:
+        from bot.config import (  # noqa: PLC0415
+            MOMENTUM_DISABLED_SPORTS,
+            VIG_STACK_DISABLED_FAMILIES,
+        )
+    except Exception:  # pragma: no cover - defensive
+        MOMENTUM_DISABLED_SPORTS = {"atp", "atp_challenger", "nba_game", "wta", "wta_challenger"}
+        VIG_STACK_DISABLED_FAMILIES = {"KXHIGHCHI", "KXINX"}
+
+    low = text.lower()
+    sports = sorted(s for s in MOMENTUM_DISABLED_SPORTS if re.search(r"\b" + s.replace("_", r"[ _]") + r"\b", low))
+    fams = sorted(f for f in VIG_STACK_DISABLED_FAMILIES if f.lower() in low)
+    if not (sports or fams):
+        return None
+    if not _REENABLE_GATE_RE.search(text):
+        return None
+    # If a currently-enabled subject is named (outside the disabled tokens), the
+    # primary axis is live → leave MANUAL.
+    cleaned = low
+    for tok in sports + [f.lower() for f in fams]:
+        cleaned = cleaned.replace(tok, " ")
+    if _ENABLED_SUBJECT_RE.search(cleaned):
+        return None
+    axis = ", ".join(sports + fams)
+    rationale = (
+        f"axis closed: {axis} disabled (MOMENTUM_DISABLED_SPORTS / "
+        f"VIG_STACK_DISABLED_FAMILIES, bot/config.py); re-open gated on deliberate re-enable"
+    )
+    return "parent_axis_closed", rationale
+
+
 def _maybe_auto_resolve(
     triggers: list[dict],
     resolved: dict,
@@ -979,6 +1036,20 @@ def _maybe_auto_resolve(
                 "rationale": noise,
                 "trigger_text_snippet": text[:120],
                 "unresolved_count_24h": 0,
+            }
+            continue
+        # Disabled-axis closed → bypass reversibility (S147), re-open on re-enable.
+        axis = _classify_disabled_axis(text)
+        if axis is not None:
+            reason, rationale = axis
+            updated[key] = {
+                "resolved_at": now.isoformat(),
+                "reason": reason,
+                "resolved_by": "S162-auto",
+                "rationale": rationale,
+                "trigger_text_snippet": text[:120],
+                "unresolved_count_24h": 0,
+                "manual_axis_ruled_out": True,
             }
             continue
         # Guarded hard-stale: ≥ RESOLVE_WINDOW_DAYS old AND open-guard already clear.

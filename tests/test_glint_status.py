@@ -908,6 +908,71 @@ def test_noise_classifier_never_retires_open_triggers_on_real_log():
     assert len(noise) >= 10
 
 
+def test_classify_disabled_axis_retires_reenable_gated_watch():
+    text = (
+        "**Watch-list trigger (re-investigate when ALL of):** "
+        "- A future session removes wta and/or atp_challenger from `MOMENTUM_DISABLED_SPORTS`."
+    )
+    out = glint._classify_disabled_axis(text)
+    assert out is not None
+    reason, rationale = out
+    assert reason == "parent_axis_closed"
+    assert "wta" in rationale and "atp_challenger" in rationale
+
+
+def test_classify_disabled_axis_ignores_prose_mentioning_reenable():
+    """S110-shaped: an IPL ship-note mentioning 'ATP/WTA re-enable' in passing is
+    NOT a watch on the disabled axis (no config-constant gate) — must stay MANUAL."""
+    text = (
+        "Phase 0 produced concrete evidence the integration is feasible. "
+        "Tennis remains deferred behind ATP/WTA re-enable and per-match drill-down."
+    )
+    assert glint._classify_disabled_axis(text) is None
+
+
+def test_classify_disabled_axis_ignores_live_subject():
+    """A trigger naming a currently-enabled subject (UFC) is live even if it cites
+    the disabled-sports constant — stay MANUAL."""
+    text = (
+        "**Watch-list trigger.** UFC re-evaluation: if shadow rows show atp + nba_game "
+        "should leave `MOMENTUM_DISABLED_SPORTS`, re-enable."
+    )
+    assert glint._classify_disabled_axis(text) is None
+
+
+def test_maybe_auto_resolve_disabled_axis_sets_manual_axis_ruled_out():
+    now = datetime(2026, 5, 22, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 46 — x (May 2)\nbody\n"
+    triggers = [{
+        "session": "Session 46", "line": 2791,
+        "text": "**Watch-list trigger (re-investigate when ALL of):** A future session removes "
+                "wta and/or atp_challenger from `MOMENTUM_DISABLED_SPORTS`.",
+        "status": "MANUAL_CHECK_REQUIRED",
+    }]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    rec = updated["Session_46_L2791"]
+    assert rec["reason"] == "parent_axis_closed"
+    assert rec["resolved_by"] == "S162-auto"
+    assert rec["manual_axis_ruled_out"] is True  # bypasses reversibility (S147)
+
+
+def test_maybe_auto_resolve_never_retires_non_manual_entry():
+    """Spec safety bar: a currently-TRIGGERED (or NOT_YET) entry is never
+    auto-retired, even if its text would otherwise classify as noise/axis-closed."""
+    now = datetime(2026, 5, 22, 12, tzinfo=timezone.utc)
+    claude_text = "### ☑ Session 46 — x (May 2)\nbody\n"
+    triggers = [
+        {"session": "Session 46", "line": 2791,
+         "text": "**Watch-list trigger.** removes wta from `MOMENTUM_DISABLED_SPORTS`.",
+         "status": "TRIGGERED"},
+        {"session": "Session 9", "line": 10,
+         "text": "**Outcome A.** shipped docs.", "status": "NOT_YET_TRIGGERED"},
+    ]
+    updated = glint._maybe_auto_resolve(triggers, {}, claude_text, now)
+    assert "Session_46_L2791" not in updated
+    assert "Session_9_L10" not in updated
+
+
 def test_load_save_watchlist_resolved_round_trip(tmp_path: Path):
     paths = glint.paths_for(tmp_path)
     paths.state_dir.mkdir(parents=True, exist_ok=True)
