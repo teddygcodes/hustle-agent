@@ -310,6 +310,25 @@ def _isolate_clv_log(tmp_path_factory, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Auto-isolate the shadow-trades ledger. Session 161: bot/shadow_settlement
+# (the resolver) and bot/shadow_trades (the writer) both read/write
+# shadow_trades.SHADOW_TRADES_FILE. Without isolation, any test exercising the
+# resolver or the blocked-trade recorder would mutate the live
+# bot/state/shadow_trades.jsonl (the S158 lesson). Patch the module attribute
+# both modules resolve at call time.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_shadow_trades_log(tmp_path_factory, monkeypatch):
+    try:
+        from bot import shadow_trades as _shadow
+    except Exception:
+        return
+    sandbox = tmp_path_factory.mktemp("shadow_isolation") / "shadow_trades.jsonl"
+    monkeypatch.setattr(_shadow, "SHADOW_TRADES_FILE", sandbox)
+
+
+# ---------------------------------------------------------------------------
 # Auto-isolate logger output. Session 15.5 (Apr 25): bot/main.py imports
 # call bot/logger.py:setup_file_logging() at module load, which attaches a
 # RotatingFileHandler pointing at bot/logs/bot.log. Without this fixture,
