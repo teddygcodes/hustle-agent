@@ -486,6 +486,7 @@ def _stub_s148_main_loop_environment(monkeypatch, bot, botmain):
     monkeypatch.setattr(botmain, "update_daily_log", lambda: None)
     monkeypatch.setattr(botmain, "resolve_trades", lambda: [])
     monkeypatch.setattr(botmain, "check_clv_settlements", lambda: [])
+    monkeypatch.setattr(botmain, "resolve_shadow_trades_runtime", lambda: {})
     monkeypatch.setattr(botmain, "check_fills", lambda: [])
     monkeypatch.setattr(botmain, "update_positions", lambda **_kw: [])
     monkeypatch.setattr(botmain, "recheck_open_edges", lambda: [])
@@ -645,6 +646,107 @@ def test_main_loop_continues_when_check_clv_settlements_raises_in_executor(monke
         "out of _main_loop — the try/except or executor wrap may have "
         "regressed."
     )
+
+
+def test_main_loop_runs_resolve_shadow_trades_via_executor(monkeypatch):
+    """Session 161: _main_loop must dispatch resolve_shadow_trades_runtime through
+    loop.run_in_executor — the resolver does sync file + bounded Kalshi I/O, so
+    leaving it on the event loop would re-introduce the Battle Scar #13 wedge."""
+    import threading
+
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    threads_seen: list[str] = []
+
+    def fake_resolve():
+        threads_seen.append(threading.current_thread().name)
+        return {}
+
+    monkeypatch.setattr(botmain, "resolve_shadow_trades_runtime", fake_resolve)
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    assert threads_seen, "resolve_shadow_trades_runtime was not called"
+    assert all(t != "MainThread" for t in threads_seen), (
+        f"resolve_shadow_trades_runtime ran on {threads_seen!r} — expected an "
+        f"executor worker thread (Battle Scar #13)."
+    )
+
+
+def test_main_loop_continues_when_resolve_shadow_trades_raises_in_executor(monkeypatch):
+    """Session 161: if the shadow resolver raises in the executor, the try/except
+    must catch it and let _main_loop continue to the fill check."""
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    def boom():
+        raise RuntimeError("test stub: shadow resolver blows up")
+
+    monkeypatch.setattr(botmain, "resolve_shadow_trades_runtime", boom)
+
+    raised_exit = False
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        raised_exit = True
+
+    assert raised_exit, (
+        "shadow resolver RuntimeError should be caught and _main_loop should "
+        "continue; _S148ExitSignal not raised means it propagated out."
+    )
+
+
+def test_main_loop_aborts_wedged_resolve_shadow_trades_after_outer_timeout(monkeypatch):
+    """Session 161: a wedged shadow resolver must abort via asyncio.wait_for and
+    increment shadow_settlement_outer_timeout_count_24h (S150 pattern)."""
+    saved_states = _run_s150_wedge_test(
+        monkeypatch,
+        target_attr="resolve_shadow_trades_runtime",
+        counter_key="shadow_settlement_outer_timeout_count_24h",
+    )
+    counter_values = [
+        s.get("shadow_settlement_outer_timeout_count_24h") for s in saved_states
+    ]
+    incremented = [v for v in counter_values if isinstance(v, int) and v >= 1]
+    assert incremented, (
+        "shadow_settlement_outer_timeout_count_24h was not incremented after the "
+        f"outer asyncio.wait_for fired; saved counter values: {counter_values}"
+    )
+
+
+def test_main_loop_day_roll_resets_all_outer_timeout_counters(monkeypatch):
+    """Session 161 (S155 follow-up): the current_date roll must zero ALL the
+    outer-timeout counters — the 4 S150 per-function counters were incremented
+    but never reset pre-S161, so `_24h` lied. New shadow counter included."""
+    bot, botmain = _build_s148_bot()
+    _stub_s148_main_loop_environment(monkeypatch, bot, botmain)
+
+    counters = [
+        "scan_cycle_outer_timeout_count_24h",
+        "check_clv_settlements_outer_timeout_count_24h",
+        "recheck_open_edges_outer_timeout_count_24h",
+        "scan_related_markets_outer_timeout_count_24h",
+        "shadow_settlement_outer_timeout_count_24h",
+    ]
+    stale = {"current_date": "2000-01-01", **{k: 5 for k in counters}}
+    monkeypatch.setattr(botmain, "_load_bot_state", lambda: dict(stale))
+    saved: list[dict] = []
+    monkeypatch.setattr(botmain, "_save_bot_state", lambda s: saved.append(dict(s)))
+
+    try:
+        asyncio.run(bot._main_loop())
+    except _S148ExitSignal:
+        pass
+
+    reset_saves = [s for s in saved if s.get("current_date") != "2000-01-01"]
+    assert reset_saves, "day-roll reset block never saved a fresh-date state"
+    reset = reset_saves[0]
+    for k in counters:
+        assert reset.get(k) == 0, f"{k} not reset on day-roll: {reset.get(k)}"
 
 
 def test_main_loop_runs_recheck_open_edges_via_executor(monkeypatch):

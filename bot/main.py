@@ -38,6 +38,7 @@ from bot.config import (
 )
 from bot.state_io import load_json as _load_json_state
 from bot.clv import check_clv_settlements, format_clv_report
+from bot.shadow_settlement import resolve_shadow_trades_runtime
 from bot.scanner import scan_cycle
 from bot import universe as _universe
 from bot.daily_log import update_daily_log
@@ -1451,6 +1452,15 @@ class GlintBot:
                 state["crypto_trades_today"] = 0
                 state["telegram_throttled_count_24h"] = 0
                 state["snapshot_outer_timeout_count_24h"] = 0  # Session 98
+                # Session 161: the 4 S150 per-function counters were incremented
+                # but never reset on the day-roll (S155 follow-up), so `_24h` was
+                # cumulative-since-deploy. Reset them here alongside the new
+                # shadow-settlement counter so all read true 24h.
+                state["scan_cycle_outer_timeout_count_24h"] = 0
+                state["check_clv_settlements_outer_timeout_count_24h"] = 0
+                state["recheck_open_edges_outer_timeout_count_24h"] = 0
+                state["scan_related_markets_outer_timeout_count_24h"] = 0
+                state["shadow_settlement_outer_timeout_count_24h"] = 0
                 state["current_date"] = today
             state["scans_today"] = state.get("scans_today", 0) + 1
             _save_bot_state(state)
@@ -1654,6 +1664,43 @@ class GlintBot:
                     pass
             except Exception as e:
                 logger.error(f"CLV settlement check error: {e}")
+
+            # ----------------------------------------------------------
+            # Step 4c: Resolve shadow-trade settlements (Session 161)
+            # ----------------------------------------------------------
+            try:
+                # Session 161: settle bot/state/shadow_trades.jsonl right after
+                # check_clv_settlements — the CLV counterfactuals it just settled
+                # are the zero-API local-join source the resolver reads back.
+                # Wrapped in run_in_executor (Battle Scar #13: the resolver does
+                # sync file + bounded Kalshi I/O) + outer asyncio.wait_for
+                # (S150 pattern). Per-cycle caps keep steady-state near-zero.
+                loop = asyncio.get_event_loop()
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(None, resolve_shadow_trades_runtime),
+                        timeout=_EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "resolve_shadow_trades wedged > %ds — aborting; will "
+                        "retry next loop iteration.",
+                        _EXECUTOR_OUTER_TIMEOUT_SEC,
+                    )
+                    try:
+                        state = _load_bot_state()
+                        state["shadow_settlement_outer_timeout_count_24h"] = (
+                            state.get(
+                                "shadow_settlement_outer_timeout_count_24h", 0
+                            ) + 1
+                        )
+                        _save_bot_state(state)
+                    except Exception:
+                        logger.exception(
+                            "shadow_settlement_outer_timeout counter update failed"
+                        )
+            except Exception as e:
+                logger.error(f"Shadow settlement error: {e}")
 
             # ----------------------------------------------------------
             # Step 5: Check fills on resting orders
