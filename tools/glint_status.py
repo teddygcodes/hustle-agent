@@ -751,11 +751,17 @@ def detect_anomalies(paths: Paths, metrics: dict, now_utc: datetime) -> list[Fla
 WATCHLIST_RESOLVED_FILENAME = "watchlist_resolved.json"
 RESOLVE_WINDOW_DAYS = 30
 THRASH_THRESHOLD_24H = 2
-# Match the date suffix on a session header like
-# "### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)" or
-# "### ☑ Session 38a — re-enable atp main tour (Apr 29, shipped)".
+# Match the date suffix on a session header. Two forms are in the wild
+# (the project switched to ISO around Session 100, then back to MMM DD):
+#   "### ☑ Session 1 — Settlement + pattern pipeline (Apr 20)"        -> MMM DD
+#   "### ☑ Session 38a — re-enable atp main tour (Apr 29, shipped)"   -> MMM DD
+#   "### ☑ Session 100 — vig_stack ladder context (2026-05-11)"       -> ISO
+# S162: accept BOTH so the ~28 ISO-format sessions get a parsed date (without
+# them, _maybe_auto_resolve's session-date lookup returned None and silently
+# skipped every age-based criterion).
 _SESSION_HEADER_DATE_RE = re.compile(
-    r"^#{2,4}\s+[☑☐]?\s*(Session\s+[^—\n]+)—.*?\(([A-Z][a-z]{2})\s+(\d{1,2})",
+    r"^#{2,4}\s+[☑☐]?\s*(Session\s+[^—\n]+)—.*?\("
+    r"(?:([A-Z][a-z]{2})\s+(\d{1,2})|(\d{4})-(\d{2})-(\d{2}))",
     re.MULTILINE,
 )
 
@@ -763,21 +769,22 @@ _SESSION_HEADER_DATE_RE = re.compile(
 def _extract_session_dates(claude_text: str, current_year: int) -> dict[str, datetime]:
     """Map session label -> header date as UTC datetime at 00:00 ET on that day.
 
-    `current_year` anchors the year for `MMM DD` headers; if the resulting date
-    lies in the future relative to header context, treat as previous year. The
-    bot project started 2026-04, so 2026 is the default anchor — adjust when
-    sessions cross year boundaries.
+    Accepts both `(MMM DD)` and `(YYYY-MM-DD)` header date forms. `current_year`
+    anchors the year for `MMM DD` headers (the bot project started 2026-04, so
+    2026 is the default anchor); ISO headers carry their own year.
     """
     out: dict[str, datetime] = {}
     for m in _SESSION_HEADER_DATE_RE.finditer(claude_text):
         label = m.group(1).strip()
-        mmm = m.group(2)
-        dd = int(m.group(3))
-        month = _MONTH_ABBR_UP.get(mmm.upper())
-        if month is None:
-            continue
+        if m.group(2) is not None:  # (MMM DD) form
+            month = _MONTH_ABBR_UP.get(m.group(2).upper())
+            if month is None:
+                continue
+            year, day = current_year, int(m.group(3))
+        else:  # (YYYY-MM-DD) form — explicit year
+            year, month, day = int(m.group(4)), int(m.group(5)), int(m.group(6))
         try:
-            dt = datetime(current_year, month, dd, 0, 0, 0, tzinfo=helpers.ET).astimezone(timezone.utc)
+            dt = datetime(year, month, day, 0, 0, 0, tzinfo=helpers.ET).astimezone(timezone.utc)
         except ValueError:
             continue
         out[label] = dt

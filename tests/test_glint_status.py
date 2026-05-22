@@ -665,6 +665,24 @@ def test_extract_session_dates_parses_header_format():
     assert out["Session 38a"].month == 4 and out["Session 38a"].day == 29
 
 
+def test_extract_session_dates_parses_iso_header_format():
+    """S162: Sessions ~100+ switched to (YYYY-MM-DD); the parser must read both
+    forms or the age-based criterion silently skips every ISO-dated session."""
+    text = (
+        "### ☑ Session 100 — vig_stack ladder context instrumentation (2026-05-11)\n"
+        "body...\n"
+        "### ☑ Session 161 — shadow-settlement resolver (May 22)\n"
+        "more body...\n"
+    )
+    out = glint._extract_session_dates(text, current_year=2026)
+    assert "Session 100" in out
+    assert out["Session 100"].year == 2026
+    assert out["Session 100"].month == 5 and out["Session 100"].day == 11
+    # MMM DD still works alongside ISO.
+    assert "Session 161" in out
+    assert out["Session 161"].month == 5 and out["Session 161"].day == 22
+
+
 def test_resolved_key_stable_under_text_changes():
     a = {"session": "Session 19", "line": 909, "text": "trigger A"}
     b = {"session": "Session 19", "line": 909, "text": "trigger A (whitespace edit)"}
