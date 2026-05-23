@@ -559,3 +559,51 @@ def test_init_handles_malformed_timestamp_gracefully(monkeypatch, tmp_path, capl
 
     assert n._flood_until == 0.0
     assert "Failed to restore Telegram cooldown" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Security: only the configured owner chat may drive the bot. The inbound
+# command surface includes GO / SELL / EXITALL / RESTART / STOP, so any other
+# chat must be dropped before reaching a handler body.
+# ---------------------------------------------------------------------------
+
+
+def _fake_update(chat_id, text=None):
+    """Minimal Update stand-in carrying effective_chat (+ optional message)."""
+    message = SimpleNamespace(text=text) if text is not None else None
+    return SimpleNamespace(
+        effective_chat=SimpleNamespace(id=chat_id),
+        message=message,
+        callback_query=None,
+    )
+
+
+def test_authorized_owner_chat_allowed(monkeypatch, tmp_path):
+    """The configured chat passes, regardless of int/str representation."""
+    n, _ = _notifier_with_fake_app(monkeypatch, tmp_path, object())  # sets CHAT_ID="12345"
+    assert n._is_authorized(_fake_update(12345)) is True
+    assert n._is_authorized(_fake_update("12345")) is True
+
+
+def test_foreign_chat_blocked(monkeypatch, tmp_path):
+    """A different chat id — or a missing chat — is rejected."""
+    n, _ = _notifier_with_fake_app(monkeypatch, tmp_path, object())
+    assert n._is_authorized(_fake_update(99999)) is False
+    assert n._is_authorized(SimpleNamespace(effective_chat=None)) is False
+
+
+def test_unconfigured_chat_id_fails_open(monkeypatch, tmp_path):
+    """No chat_id configured -> allow (preserve prior local/unconfigured behavior)."""
+    from bot import notifier
+
+    n, _ = _notifier_with_fake_app(monkeypatch, tmp_path, object())
+    monkeypatch.setattr(notifier, "TELEGRAM_CHAT_ID", "")
+    assert n._is_authorized(_fake_update(99999)) is True
+
+
+def test_handle_text_drops_command_from_foreign_chat(monkeypatch, tmp_path):
+    """A foreign chat sending PAUSE must not mutate state — guard returns first."""
+    n, _ = _notifier_with_fake_app(monkeypatch, tmp_path, object())
+    n._paused = False
+    asyncio.run(n._handle_text(_fake_update(99999, text="PAUSE"), None))
+    assert n._paused is False

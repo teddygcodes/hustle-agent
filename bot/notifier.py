@@ -1086,8 +1086,23 @@ class TelegramNotifier:
 
     # -- Command handlers --
 
+    def _is_authorized(self, update: Update) -> bool:
+        """Only the configured owner chat may drive the bot.
+
+        The command surface includes GO / SELL / EXITALL / RESTART / STOP, so an
+        unauthenticated sender must never reach a handler. Fails CLOSED when a
+        chat_id is configured (production); fails OPEN only when TELEGRAM_CHAT_ID
+        is unset (local / unconfigured), preserving prior behavior there.
+        """
+        if not TELEGRAM_CHAT_ID:
+            return True
+        chat = update.effective_chat
+        return chat is not None and str(chat.id) == str(TELEGRAM_CHAT_ID)
+
     async def _handle_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline keyboard button presses (GO / SKIP)."""
+        if not self._is_authorized(update):
+            return
         query = update.callback_query
         await query.answer()  # dismiss the loading spinner immediately
 
@@ -1123,9 +1138,13 @@ class TelegramNotifier:
         self._message_ids.pop(opp_id, None)
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         await update.message.reply_text(_COMMANDS_HELP)
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         cb = self._command_callbacks.get("STATUS")
         if cb:
             result = await cb() if asyncio.iscoroutinefunction(cb) else cb()
@@ -1134,15 +1153,21 @@ class TelegramNotifier:
             await update.message.reply_text("Status callback not registered")
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         self._paused = True
         await update.message.reply_text("⏸️ Scanning paused. Send /resume to continue.")
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
         self._paused = False
         await update.message.reply_text("▶️ Scanning resumed.")
 
     async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages as commands with optional arguments."""
+        if not self._is_authorized(update):
+            return
         raw = update.message.text.strip()
         parts = raw.split(maxsplit=1)
         command = parts[0].upper()
