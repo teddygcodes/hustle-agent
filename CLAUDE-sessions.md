@@ -8069,3 +8069,30 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Cross-refs.** S159/S160 (per-family rule-outs this generalizes — same spread-artifact mechanism). KXINX (benchmark, reproduced). S161 (the shadow-settlement substrate that feeds Tier 2D). Tier 2D / Data Collection Backlog Priority 6 (paper fill-realism — now the binding gate). Planner Investigation Discipline → cross-AI review (cross-validation caught the single-agent over-flag). The offline-sim-settlement-gap memory (extended: also two-sided-liquidity-blocked).
 
 ---
+
+### ☑ Session 164 — Tier 2D execution-friction stress-test: vig_stack survives fees but is slippage-fragile, and the headline is inflated by ruled-out per-game noise (May 22, 2026, Outcome B)
+
+**Context.** Gates the go-live/scale/shutdown decision: does the +$762 vig_stack paper P&L survive realistic execution, or is it a fill-quality mirage? S163 established +EV can't be confirmed offline (KXINX itself fails two-sided-liquidity), so this is the conservative offline BOUND. Analysis-only (read-only, no PAPER_MODE flip, no runtime change). `tools/sim_vig_stack_friction.py` + report (commit `db140dc`).
+
+**Friction trajectory (ladder-core = genuine KXHIGH\*/KXINX, the honest base).**
+| cohort | L0 paper | +fees | +1c slip | +2c slip |
+|---|---|---|---|---|
+| Full 267 | +$762.20 | +$502.17 | +$213.46 | −$74.60 |
+| Ladder-core 255 | +$514.33 | +$316.97 | +$58.86 | −$198.66 |
+Fees alone: ladder-core SURVIVES (+$317). But the sign **flips between +1c and +2c entry slippage** (+$59 → −$199), and on fill quality (depth-gated fill-only +$103 vs assume-full-fill −$33 on the joinable subset). ~30k contracts ⇒ **per-contract slippage is the dominant lever**; offline has no ground-truth fills (order_microstructure.jsonl empty in PAPER). → **Outcome B: offline bounds it, can't confirm it.**
+
+**Two structural findings the +$762 headline hides (planner-verified independently).**
+1. **The recorded paper entry == observed no_ask** (175/180 at/above ask; 3/3 exact spot-check). The +$762 ALREADY bakes in paying the ask — the *unresolved* frictions are slippage + fill-rate, NOT the ask.
+2. **The headline is inflated by ruled-out per-game noise.** Split of the 267 (planner-reproduced): **ladder-core (KXHIGH\*/KXINX) = +$514.33 / n=255** (the genuine edge); **KXMLBGAME per-game = +$247.87 / n=12** — and that +$248 is **3 lucky exited-early wins (+$296.92, +$204.30, +$172.52 = +$674) masking −$426 of losses on the other 9.** KXMLBGAME is the per-game "vig_stack" S159 ruled out as a spread artifact. So the real engine is the +$514 ladder-core (~+$317 after fees, slippage-fragile); ~$248 of the headline was variance on a disqualified shape.
+
+**Honest bottom line.** The genuine vig_stack edge is **~+$317 after fees on the ladder-core, slippage-fragile (negative at +2c)** — small, within slippage-distance of zero. Real-executability hinges entirely on real per-contract slippage + fill-rate, which only live data can settle.
+
+**Next step (operator-gated, NOT run).** The report specs a **minimal live-fill probe**: smallest orders on KXHIGHAUS / KXINX-B, measure realized slippage + fill-rate, hard $-cap — the only way to resolve B. Flipping PAPER_MODE is the operator's call; this session is the pre-check that justifies considering it.
+
+**Action item (separate follow-up).** The bot still opens KXMLBGAME per-game positions as vig_stack (S133/S134 misclassification, S159-ruled-out, S161-flagged). S164 quantifies the cost: net-lossy on 9/12, headline propped by 3 lucky wins. Recommend a small session to block the per-game path from vig_stack entry — it's variance, not edge.
+
+**Verification (planner).** Reproduced the split independently (255/+$514.33 + 12/+$247.87 = 267/+$762.20, reconciles exactly; the 3 KXMLBGAME EE winners = +$673.74). L0 reconciles to +$762.20. Full suite 1951. git ahead 1 (`db140dc`, the sim tool), read-only, REPORT_CALENDAR untouched.
+
+**Cross-refs.** S159 (per-game ruled out — now quantified: +$248 of the headline is its variance). S160/S163 (the offline-can't-confirm wall — this is the conservative bound; live probe is the resolver). S134 (KXMLBGAME concentration, EE-winner-dominated — confirmed). Tier 2D / Data Collection Backlog P6 + the empty order_microstructure.jsonl (the live probe fills it). The vig_stack-execution-friction memory.
+
+---
