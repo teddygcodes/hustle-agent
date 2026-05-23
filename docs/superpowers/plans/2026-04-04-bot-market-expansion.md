@@ -50,7 +50,7 @@ def test_nhl_has_series_ticker():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent
+cd ~/Desktop/hustle-agent/hustle-agent
 python3 -m pytest tests/test_bot_scanners.py::test_nhl_in_active_sports -v
 ```
 
@@ -1003,7 +1003,7 @@ Expected: all pre-existing tests still pass
 - [ ] **Live smoke test — run one scan cycle and confirm all four scanners appear in output**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent
+cd ~/Desktop/hustle-agent/hustle-agent
 python3 -c "
 from bot.scanner import scan_cycle
 result = scan_cycle()

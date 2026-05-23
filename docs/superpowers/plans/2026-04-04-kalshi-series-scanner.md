@@ -119,7 +119,7 @@ def _fetch_series_markets(series_ticker: str, limit: int = 200) -> list[dict]:
 - [ ] **Step 2: Verify import and series constants work**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.kalshi_series import SPORTS_GAME_SERIES, BITCOIN_SERIES, _fetch_series_markets
 print('SPORTS_GAME_SERIES:', list(SPORTS_GAME_SERIES.keys()))
 print('BITCOIN_SERIES:', BITCOIN_SERIES)
@@ -324,7 +324,7 @@ def scan_sports_series(
 - [ ] **Step 3: Test sports series scanner against live odds**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.odds_scraper import fetch_consensus_odds
 from bot.kalshi_series import scan_sports_series
 
@@ -515,7 +515,7 @@ def scan_bitcoin_series(min_relative_edge: float = 0.15) -> list[dict]:
 - [ ] **Step 3: Test Bitcoin scanner**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.kalshi_series import scan_bitcoin_series
 opps = scan_bitcoin_series()
 print(f'BTC opportunities: {len(opps)}')
@@ -608,7 +608,7 @@ def scan_series_markets(odds_by_sport: dict[str, dict], min_relative_edge: float
 - [ ] **Step 2: Test full orchestrator**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.odds_scraper import fetch_consensus_odds
 from bot.kalshi_series import scan_series_markets
 
@@ -679,7 +679,7 @@ In `scan_cycle()`, the function currently iterates sports one at a time. We need
 - [ ] **Step 4: Verify scan_cycle imports and runs**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.scanner import scan_cycle
 " 2>&1 | grep -v NotOpenSSLWarning | grep -v warnings.warn
 ```
@@ -693,7 +693,7 @@ Expected: no import errors.
 - [ ] **Step 1: Run full scan cycle and verify series markets appear**
 
 ```bash
-cd /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent && python3 -c "
+cd ~/Desktop/hustle-agent/hustle-agent && python3 -c "
 from bot.scanner import scan_cycle
 result = scan_cycle(['nba', 'mlb'])
 print(f'Opportunities: {len(result[\"opportunities\"])}')

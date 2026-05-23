@@ -19,7 +19,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator
 
-DEFAULT_REPO = Path("/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent")
+# Repo root, derived portably: context.py lives at tools/discovery_agent/, so
+# parents[2] is the repository root regardless of where it's checked out.
+DEFAULT_REPO = Path(__file__).resolve().parents[2]
 
 
 def _read_json(path: Path, default, warnings: list[str]):

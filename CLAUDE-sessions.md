@@ -239,7 +239,7 @@ Secondary finding: launchd service was in the user-domain *disabled* database (i
 **Maintenance note.** When upgrading past Python 3.14, edit `PYTHON_BIN` in `run_bot.sh`. That's the single point of change.
 
 **Verify.**
-1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — exactly **one** Glint bash wrapper line. The `Python -m bot.main` child does NOT appear in this output (cmdline has no repo path; CWD doesn't appear in `ps aux`); wrapper-presence is sufficient signal because launchd KeepAlive auto-respawns the child. Path-rooted filter is critical (per Battle Scar #14): bare `bot.main` grep matches Bob and any other fleet bot. Wrapper's parent should be launchd. To see the actual python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
+1. `ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep` — exactly **one** Glint bash wrapper line. The `Python -m bot.main` child does NOT appear in this output (cmdline has no repo path; CWD doesn't appear in `ps aux`); wrapper-presence is sufficient signal because launchd KeepAlive auto-respawns the child. Path-rooted filter is critical (per Battle Scar #14): bare `bot.main` grep matches Sidekick and any other fleet bot. Wrapper's parent should be launchd. To see the actual python child PID: `pgrep -P $(pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh")`.
 2. `tail bot/logs/watchdog.log` — no new `Bot exited (code 0), restarting in 5s...` lines after the fix (the crash loop fingerprint was a consecutive run of those with <10s deltas).
 3. `tail bot/logs/bot.log` — shows normal startup sequence: `Telegram connected — bot is live`, `SCAN CYCLE — …`, scanner loops firing. Observed on first launchd-supervised boot post-fix.
 4. Telegram `STOP` now cleanly unloads launchd + kills the bot; `START` (or reboot / `launchctl load`) brings it back under supervision.
@@ -3073,7 +3073,7 @@ Should manifest within ~14d as: NBA absolute loss magnitude roughly halved relat
 
 **Tests.** 1387 passed (1375 pre-Session-53 baseline + 12 new). live_momentum and vig_stack_series strategy tests untouched and green; test_sizing.py grows from 8 to 20 cases.
 
-**Bot restart status: GATED on Telegram cool-down per Battle Scar #15.** Same operational rule as Session 52: do NOT restart while `bot.log` is still showing sendMessage 429s. Check `grep "sendMessage.*200 OK" bot/logs/bot.log | tail -3` first. If no successful sendMessage since the Session 52 outage (last verified 04:07:57 ET May 3), DEFER restart. When cool-down clears, manual `launchctl kickstart -k gui/$(id -u)/com.tylergilstrap.hustle-agent`, verify single PID + lockfile match, then watch first KXINX vig_stack trade for size compliance.
+**Bot restart status: GATED on Telegram cool-down per Battle Scar #15.** Same operational rule as Session 52: do NOT restart while `bot.log` is still showing sendMessage 429s. Check `grep "sendMessage.*200 OK" bot/logs/bot.log | tail -3` first. If no successful sendMessage since the Session 52 outage (last verified 04:07:57 ET May 3), DEFER restart. When cool-down clears, manual `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`, verify single PID + lockfile match, then watch first KXINX vig_stack trade for size compliance.
 
 **Verification gate.** Next 3 KXINX vig_stack trades after restart should size at qty ≤ ~100 (was 235 pre-fix at $200 cap / ~$0.85 mean fill). Day-14 re-check 2026-05-18: KXINX P&L slope should trend toward break-even instead of −$22.94/trade slope. If qty > 100 on the first post-restart KXINX trade, the family-extraction or call-site change is broken — revert and investigate.
 
@@ -3282,7 +3282,7 @@ Until all three fire, the 10th heuristic + "Tyler asks, I synthesize" remains th
 - 234 `HTTPXRequest is not initialized` errors AND 105 successful `editMessageText 200 OK` calls — **interleaved, indefinite**, NOT separated by a startup window. 5-min bucket distribution (23:40 = 34/42, 23:45 = 134/70, 23:50 = 132/100) confirmed errors persist concurrent with successes.
 - Two specific failing tickers (`KXATPMATCH-26MAY06FUCPRI-PRI`, `KXATPMATCH-26MAY06POPBER-BER`) failed every tick; 4-5 OTHER watchers (KXATPMATCH-CINBLO, KXNBAGAME-LALOKC, KXNHLGAME-ANAVGK, KXWTAMATCH-STAWAL) succeeded concurrently through the same notifier.
 - Verified by grep: bot has exactly ONE `Application.builder().token().build()` (at [bot/notifier.py:672](hustle-agent/bot/notifier.py:672)). No second `Bot(` constructor anywhere in `bot/`. No second event loop. No `run_in_executor` wrapping notifier calls.
-- Initially suspected Battle Scar #14 (cross-bot orphan) — found PID 33057 lurking but it was Bob's process (writing to `/Users/tylergilstrap/Desktop/bob/bot/logs/bot.log`), not Glint's. False alarm.
+- Initially suspected Battle Scar #14 (cross-bot orphan) — found PID 33057 lurking but it was Sidekick's process (writing to `~/Desktop/sidekick/bot/logs/bot.log`), not Glint's. False alarm.
 
 **Diagnosis D5 — locked.** Reading the log around the 23:43:45 transition revealed the actual mechanism:
 
@@ -4347,7 +4347,7 @@ Mirrors Pattern C precedents: Sessions 18.5, 38a-2, 40, 41, 42, 67-investigate, 
 
 ---
 
-### ☑ Session 83 — stale-data hygiene ship: vestigial `bot_state.total_pnl` removed + §3 always-shows-timestamp + Bob ride-along (May 8, Outcome A, three-fix bundle)
+### ☑ Session 83 — stale-data hygiene ship: vestigial `bot_state.total_pnl` removed + §3 always-shows-timestamp + Sidekick ride-along (May 8, Outcome A, three-fix bundle)
 
 **Trigger.** Two false-alarm cycles in one morning, both same shape: stale data presented as current.
 
@@ -4362,7 +4362,7 @@ Both came from the same root: bot_state.json and §3 surface point-in-time data 
 
 2. **§3 stale-cache mechanism.** Located at [tools/glint_status.py:953](tools/glint_status.py:953) (`render_health_section`). The function reads from `latest_daily_report()` which sets `stale_note = f"[stale: {age_h:.1f}h ago]"` only when `age_h > 12` ([line 230](tools/glint_status.py:230)). At 5.6h old (this morning's case), `stale_note` is empty and the §3 header showed only `Source: state/reports/daily/daily_report_2026-05-07.md` with no age cue. The 12h threshold is appropriate for the structural `daily_report_stale` flag at line 1098 ("is the report machinery broken?") but too loose for the operational question "is this snapshot suitable to read as current?".
 
-3. **Bob ride-along.** PIDs 56325 / 44781 in `ps aux` were `~/Desktop/bob/` (cwd verified via `lsof -p <PID> | grep cwd`), not `~/Desktop/hustle-agent/` orphans. Battle Scar #3 docs at [CLAUDE.md:436](CLAUDE.md:436) already mention the bob bot's launchctl label, but no operator reminder existed to verify cwd before flagging. Session 81's spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
+3. **Sidekick ride-along.** PIDs 56325 / 44781 in `ps aux` were `~/Desktop/sidekick/` (cwd verified via `lsof -p <PID> | grep cwd`), not `~/Desktop/hustle-agent/` orphans. Battle Scar #3 docs at [CLAUDE.md:436](CLAUDE.md:436) already mention the bob bot's launchctl label, but no operator reminder existed to verify cwd before flagging. Session 81's spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
 
 **Decision: Outcome A — three small, scoped fixes, all in one ship.**
 
@@ -4370,7 +4370,7 @@ Both came from the same root: bot_state.json and §3 surface point-in-time data 
 
 2. **[tools/glint_status.py:953](tools/glint_status.py:953)** — `render_health_section(daily, now_utc)` (signature change; caller at [line 1178](tools/glint_status.py:1178) updated). Always emit `Generated: <ET timestamp> (<age>h ago) — values below reflect bot state at generation time, not now.` regardless of `stale_note` threshold. The 12h threshold remains for the structural `daily_report_stale` WARN flag at line 1098 (different concern, untouched).
 
-3. **[CLAUDE.md:437](CLAUDE.md:437)** Battle Scar #3 area — operator note that two `python -m bot.main` processes is NOT automatically Battle Scar #3; verify cwd via `lsof -p <PID> | grep cwd` before flagging an orphan. Bob bot at `~/Desktop/bob/` is launchd-managed independently with the same `python -m bot.main` invocation.
+3. **[CLAUDE.md:437](CLAUDE.md:437)** Battle Scar #3 area — operator note that two `python -m bot.main` processes is NOT automatically Battle Scar #3; verify cwd via `lsof -p <PID> | grep cwd` before flagging an orphan. Sidekick bot at `~/Desktop/sidekick/` is launchd-managed independently with the same `python -m bot.main` invocation.
 
 **Tests.**
 - `tests/test_glint_status.py::test_render_health_section_always_shows_generated_timestamp_and_age` — new, locks the always-show contract for snapshots under the 12h threshold (fails without the §3 fix).
@@ -4546,7 +4546,7 @@ Only 2 tickers (BOSBUF, MINCOL) emit across multiple UTC days — both span midn
 4. ☑ `tests/test_clv.py` — 46/46 pass (43 baseline + 3 new). Existing `test_idempotent_on_repeat_call` continues to pass: identical `_lm_kwargs()` repeated 3× collapses correctly under the new (ticker, sport, skip_reason, day) check.
 5. ☑ Full repo: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1524 passed in 31.95s** (Session 83/84/85 baseline 1521 + 3 new). 0 failures, 0 skips per Session 70 discipline.
 6. ☑ Battle Scar #15 retired post-Session-71 ([CLAUDE.md:448](CLAUDE.md:448)) — restart safe regardless of cooldown state.
-7. ☑ Bot restart at 2026-05-08T23:18:15Z via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Old PID 11215 → new 3072 (wrapper 11210 → 3069), cwd verified `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (Battle Scar #3 cwd-check passed; bob bot at PID 51691 with cwd `~/Desktop/bob/` correctly excluded). Bot startup log: `Restored Telegram cooldown from bot_state.json: 2026-05-09T03:25:21.796690+00:00 (14826s remaining)` — Session 71 cooldown-restore working as designed; restart did not trigger fresh 429. Pending opportunities reloaded (20), Kalshi positions reconciled (321), Telegram polling active.
+7. ☑ Bot restart at 2026-05-08T23:18:15Z via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Old PID 11215 → new 3072 (wrapper 11210 → 3069), cwd verified `~/Desktop/hustle-agent/hustle-agent` (Battle Scar #3 cwd-check passed; bob bot at PID 51691 with cwd `~/Desktop/sidekick/` correctly excluded). Bot startup log: `Restored Telegram cooldown from bot_state.json: 2026-05-09T03:25:21.796690+00:00 (14826s remaining)` — Session 71 cooldown-restore working as designed; restart did not trigger fresh 429. Pending opportunities reloaded (20), Kalshi positions reconciled (321), Telegram polling active.
 8. ☑ Post-restart spot-check (2 scan cycles at 23:18:42Z + 23:20:52Z): 1 new live_momentum CF row written, trade_id `CF-LM-20260508-KXNHLGAME-26MAY08MTLBUF-MTL` (day-precision format confirmed, no `T...Z` suffix). Zero duplicates by `(ticker, sport, skip_reason, day)`. Scan 2 saw only 1 `no_vol_growth_first_seen` drop (vs 9 in scan 1) — `_prev_scan_volumes` correctly suppressing first-sight re-trips within the cache-refresh window, exactly as Session 74 documented. Pre-fix this same scan pair would have written ≥2 rows for MTLBUF if cache reset occurred between scans; the new dedup catches that case unconditionally.
 
 **Watch-list trigger (Session 86 — extends Session 85 trigger #2).** When the NHL candidate is next reconsidered (~ 2026-06-08 after historical rows age out), measure raw N over the most recent 30d on `bot/state/clv.json`. If raw N ≥ 30 with deduped emissions, the bar passes legitimately; if <30, the candidate fails the bar honestly. Either way, do NOT bundle "re-tune bar threshold" with "ship dedup" in the same session. Three follow-up options for the bar interpretation: (a) re-tune `counterfactual_hotspots` N threshold (e.g., from N≥30 to N≥15); (b) add read-time dedup at [tools/discovery_agent/heuristics/counterfactual_hotspots.py:163-168](tools/discovery_agent/heuristics/counterfactual_hotspots.py:163); (c) wait for natural convergence over 30 days. Pick one per ship.
@@ -4817,7 +4817,7 @@ TDD discipline: 2 of 4 new tests confirmed failing pre-implementation (block-aft
 - ☑ Bot restart: `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot` at 00:23:13. Old PID 3072 (5h 4min uptime) terminated cleanly via Session 58 cancel-then-stop ordering. New wrapper PID 53835, new python child PID 53838.
 - ☑ Post-restart `bot.lock`: contains `53838`, mtime advanced via 30s heartbeat (Battle Scar #6 alive signal).
 - ☑ Post-restart `bot.log`: clean — only the OLD bot's expected `Telegram Conflict` during shutdown handoff (00:23:13). NEW bot logs `Live scan: new day 2026-05-09 — cleared volume cache and recently_watched` at 00:23:25, then `LIVE_SCAN_TELEMETRY: seen=84 spawned=0 capacity=5 drops={'disabled_sport': 1, 'no_markets': 2, 'low_volume': 11, 'not_today': 25, 'no_leader': 25, 'settled': 3, 'no_vol_growth_first_seen': 20}` at 00:23:39 — the new code is in the hot path with no AttributeError on `_entry_losses`. spawned=0 is normal for the time of day; the breaker hot path will exercise on the next live 1v1 match.
-- ☑ `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"` returns single wrapper PID 53835. Path-rooted check (Battle Scar #14 discipline) — no Bob collision risk.
+- ☑ `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"` returns single wrapper PID 53835. Path-rooted check (Battle Scar #14 discipline) — no Sidekick collision risk.
 
 **What did NOT change.**
 - Exit-side logic: `_check_exit` paths (TP / near-settle / trailing-stop / score-flip / hard-SL / dollar-SL) untouched. The breaker is purely on the entry side.
@@ -4966,7 +4966,7 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
 - ☑ Consistency/tracker focused repair check: `pytest tests/test_positions_paper_trades_consistency.py tests/test_tracker.py::TestRestingOrderPaperLedger::test_terminal_paper_trade_reconciles_stale_active_position` → **5 passed**.
 - ☑ Full pytest: **1560 passed / 0 failed** (Session 91 baseline 1557 + 2 executor cap tests + 1 tracker reconciliation test).
-- ☑ Bot restart: `launchctl kickstart -k gui/501/com.hustle-agent.bot` at 2026-05-09 23:04 ET. Wrapper PID 53835 → 41934; bot lock PID 53838 → 41996. `lsof -p 41996` confirms cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (not Bob).
+- ☑ Bot restart: `launchctl kickstart -k gui/501/com.hustle-agent.bot` at 2026-05-09 23:04 ET. Wrapper PID 53835 → 41934; bot lock PID 53838 → 41996. `lsof -p 41996` confirms cwd `~/Desktop/hustle-agent/hustle-agent` (not Sidekick).
 - ☑ Post-restart `python3 tools/glint_status.py`: §1 shows `Bot: PID 41996`; §5 shows remaining KXMLBGAME exposure at `$49.98` vs `$50`; §7 has **no active `position_over_family_cap` anomaly**; §10 Session 92 active observation reports `new position_over_family_cap flags after this ship: 0`.
 - ☑ `rg -n "cap_exceeded_reject" bot/state/decisions.jsonl` has no matches yet, expected because the normal scanner path should size down before the executor guard unless stale/manual/malformed sizing appears.
 
@@ -5012,7 +5012,7 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - ☑ Targeted suite: `pytest tests/test_bot_executor.py::TestSession93FamilyDisableExecutor tests/test_bot_executor.py::TestSession62FamilyCapExecutor -v` → **10 passed** (3 disable + 7 cap).
 - ☑ Full pytest: **1561 passed / 0 failed**. Net delta from Session 92's 1560 baseline is +1 (3 new disable tests minus 2 removed cap parametrize entries that no longer apply to disabled families). The "+1, not +3" delta is intentional and the right shape — disable tests replace cap tests for the two disabled families.
 - ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json` succeeded; Session 93 record appended cleanly.
-- Bot restart pending (next step): `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`; verify wrapper-PID via `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"`, child-PID via `pgrep -P $WRAPPER`, `lsof -p $CHILD | grep cwd` confirms cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cross-bot guard).
+- Bot restart pending (next step): `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`; verify wrapper-PID via `pgrep -f "Desktop/hustle-agent/hustle-agent/run_bot.sh"`, child-PID via `pgrep -P $WRAPPER`, `lsof -p $CHILD | grep cwd` confirms cwd `~/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cross-bot guard).
 - Post-restart verification (next step): `python3 tools/glint_status.py` §5 should show no NEW KXHIGHCHI or KXINX positions opening; `tail -f bot/logs/bot.log | grep family_disabled_reject` and `rg "family_disabled_reject" bot/state/decisions.jsonl` should accumulate ≥1 event per scan cycle that surfaces a vig_stack opp on either family.
 
 **What did NOT change.**
@@ -5099,7 +5099,7 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - ☑ Full pytest: `python3 -m pytest tests/ -v --tb=short` → **1567 passed** (Session 93 baseline 1561 + 6 net tests).
 - ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
 - ☑ `python3 tools/glint_status.py` pre-restart rendered §10 computed values correctly.
-- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: launchd wrapper PID `8217`, bot.lock child PID `8252`, `lsof -p 8252` cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: launchd wrapper PID `8217`, bot.lock child PID `8252`, `lsof -p 8252` cwd `~/Desktop/hustle-agent/hustle-agent`.
 - ☑ Restart left old child PID `79311` orphaned under launchd; confirmed cwd was the same Glint repo, killed only that orphan, and verified `lsof -p 79311` no longer returns open files.
 - ☑ Post-restart `python3 tools/glint_status.py`: bot PID `8252`, uptime 1m, heartbeat 22s, last scan 59s ago, §10 still reports `reentry_blocked=4`, `family_disabled_reject=5`, disabled-family post-ship entries `1`.
 
@@ -5139,7 +5139,7 @@ If `reentry_blocked` rejection count from Session 90 reaches ≥1 in `decisions.
 - ☑ Full suite: `python3 -m pytest tests/ --timeout=15 --tb=no -q` → **1574 passed** (Session 95 baseline 1567 + 7 net tests).
 - ☑ `python3 tools/journal_analysis.py` rendered the new section. After restart, forward-only coverage had already begun at **0.4% (333/79118)** from fresh scan rows; the table is capped to the top 30 reason buckets.
 - ☑ `python3 tools/glint_status.py` post-restart: bot PID `32944`, uptime seconds, heartbeat fresh, no new criticals.
-- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: wrapper PID `32917`, child PID `32944`, `lsof -p 32944` cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- ☑ Restarted via `launchctl kickstart -k gui/501/com.hustle-agent.bot`. Battle Scar #14 checks: wrapper PID `32917`, child PID `32944`, `lsof -p 32944` cwd `~/Desktop/hustle-agent/hustle-agent`.
 - ☑ Reviewed diff: no `bot/config.py` changes; no active strategy list, disabled sports/families, thresholds, sizing, entry logic, exit logic, or vig_stack behavior changed.
 
 **What did NOT change.**
@@ -5348,7 +5348,7 @@ This ship reverses Session 38a's atp re-enable. Session 38a was based on CF data
 - ☑ Targeted suites: `python3 -m pytest tests/test_vig_stack_ladder_context.py tests/test_vig_stack_series_strategy.py tests/test_bot_executor.py -v --tb=short` → **87 passed in 0.98s**. Includes all 16 new Session 100 tests.
 - ☑ Full suite: `python3 -m pytest tests/ --tb=short` → **1621 passed in 34.73s** (baseline 1605 + 16 net). No new failures, no skips.
 - ☑ `python3 -c "from tools.calibration_report import report_vig_stack_ladder_shapes; print(report_vig_stack_ladder_shapes(days=7))"` renders the `## vig_stack ladder shapes (n=0 resolved)` header with the forward-only caveat as expected pre-restart.
-- ☑ Bot restart via Battle Scar #14 path-rooted `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Pre-restart: wrapper PID 64407, child PID 64411, cwd verified at `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (NOT Bob's `~/Desktop/bob/`). Post-restart: wrapper PID 46038, child PID 46042. No `ImportError`/`AttributeError` in `bot.log` related to `vig_stack_ladder_context`. Telegram SSL retry pattern (Session 52) seen and recovered on retry — unrelated to Session 100.
+- ☑ Bot restart via Battle Scar #14 path-rooted `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Pre-restart: wrapper PID 64407, child PID 64411, cwd verified at `~/Desktop/hustle-agent/hustle-agent` (NOT Sidekick's `~/Desktop/sidekick/`). Post-restart: wrapper PID 46038, child PID 46042. No `ImportError`/`AttributeError` in `bot.log` related to `vig_stack_ladder_context`. Telegram SSL retry pattern (Session 52) seen and recovered on retry — unrelated to Session 100.
 
 **What did NOT change.**
 - No behavior changes anywhere. Forward-only instrumentation.
@@ -5398,7 +5398,7 @@ This ship reverses Session 38a's atp re-enable. Session 38a was based on CF data
 **Verification.**
 - ☑ Targeted suite: `python3 -m pytest tests/test_kalshi.py::TestKalshiGetTotalTimeout -v` → **4 passed in 1.04s**.
 - ☑ Full suite: `python3 -m pytest tests/ --tb=short` → **1625 passed in 38.08s** (baseline 1621 + 4 net). No new failures, no skips. Python 3.14.3.
-- ☑ Bot restart via Battle Scar #14 path-rooted `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Pre-restart: wrapper PID 46038, child PID 46042, cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (verified via `lsof -p 46042 | grep cwd`; NOT Bob's `~/Desktop/bob/`). Post-restart: wrapper PID 90243, child PID 90247.
+- ☑ Bot restart via Battle Scar #14 path-rooted `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Pre-restart: wrapper PID 46038, child PID 46042, cwd `~/Desktop/hustle-agent/hustle-agent` (verified via `lsof -p 46042 | grep cwd`; NOT Sidekick's `~/Desktop/sidekick/`). Post-restart: wrapper PID 90243, child PID 90247.
 - ☑ Bot startup clean — no `ImportError` / `AttributeError` related to `kalshi_client` or `threading`. 354 positions reconciled, Telegram connected, live_watcher tasks spawned within 30s.
 
 **What did NOT change.**
@@ -5498,7 +5498,7 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - No re-enable of ATP, nba_game, or any other disabled sport. S97 just shipped today; ≥14d shadow ledger data minimum before reconsidering (per S97 watch-list).
 
 **Verification.**
-- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1625 passed** (baseline unchanged from S101's 1625; no code changes). Run from `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cwd discipline).
+- ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1625 passed** (baseline unchanged from S101's 1625; no code changes). Run from `~/Desktop/hustle-agent/hustle-agent` (Battle Scar #14 cwd discipline).
 - ☑ Bot left running (PID 90247 from S101 restart). No functional changes to verify in-process.
 - ☑ Operating Posture compliance (CLAUDE.md "Always Search for New Possibilities"): §0.3 cohort slicing was framed to find tightening opportunities, not to "lock in" current behavior — N too thin, queued re-investigation rather than codifying. Agent 1's "post-S97 ATP" finding initially looked like a S97 enforcement bug; inline verification surfaced it as a misleading cohort label, not a bug.
 
@@ -5677,7 +5677,7 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - ☑ Targeted: `python3 -m pytest tests/test_live_watcher.py tests/test_bot_executor.py -q -k "live_momentum_context_helper or ScanLiveMatchesSkipReason or Session107LiveMomentumDecisionContext or Session99 or session_99"` → **28 passed**.
 - ☑ Broader touched files: `python3 -m pytest tests/test_live_watcher.py tests/test_bot_executor.py -q` → **124 passed**.
 - ☑ Full suite: `python3 -m pytest tests/ --tb=short -q` → **1630 passed in 38.55s**.
-- ☑ Restart: verified cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`, path-rooted wrapper PID **90243** pre-restart, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID **22181**, child PID **22200** from `bot.lock`; `bot_state.json` heartbeat/start at `2026-05-12T00:04:36Z`.
+- ☑ Restart: verified cwd `~/Desktop/hustle-agent/hustle-agent`, path-rooted wrapper PID **90243** pre-restart, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID **22181**, child PID **22200** from `bot.lock`; `bot_state.json` heartbeat/start at `2026-05-12T00:04:36Z`.
 - ☑ Immediate post-restart pulse: no fresh `live_momentum` decisions yet by `00:05Z`, but `live_journal.json` scan context improved immediately: **118/118** fresh `scan_found` rows had `context_available=true`, including the formerly empty gates `not_today=30/30` and `settled=1/1`.
 
 **What did NOT change.**
@@ -5745,7 +5745,7 @@ Outcome B (design doc) is overkill — nothing structurally new surfaced. The su
 - ☑ JSON validation: `python3 -m json.tool bot/state/active_observations.json`.
 - ☑ `git diff --check` passed.
 - ☑ Production-code touch check: `git diff --stat -- bot/` shows only `bot/config.py` (1 line) and `bot/scanner.py` (1 label line) under code; `bot/state/active_observations.json` is the only state-file change.
-- ☑ Restart: verified cwd `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID and child PID captured from `bot.lock`; `bot_state.json` heartbeat fresh post-restart.
+- ☑ Restart: verified cwd `~/Desktop/hustle-agent/hustle-agent`, then `launchctl kickstart -k gui/501/com.hustle-agent.bot`. New wrapper PID and child PID captured from `bot.lock`; `bot_state.json` heartbeat fresh post-restart.
 - ☑ Post-restart pulse: tailed `bot.log` for a `next scan` log line in an idle window and confirmed the new label `IDLE (15 min)` / interval ~900s, not 1800s.
 
 **What did NOT change.**
@@ -5884,7 +5884,7 @@ Phase 0 produced concrete evidence that the integration is feasible and the sche
 
 **Verification (post-restart).**
 - ✅ Pre-restart pytest baseline 1654/0.
-- ✅ Battle Scar #14 cwd verification passed (path-rooted: `Desktop/hustle-agent/hustle-agent`, not Bob).
+- ✅ Battle Scar #14 cwd verification passed (path-rooted: `Desktop/hustle-agent/hustle-agent`, not Sidekick).
 - ✅ Bot restart via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`.
 - ⏳ Post-restart bot.log tailed for ESPN cricket calls during the next IPL match window — at session ship time, an IPL match was scheduled within the day; if no live IPL window during initial observation, the watch-list trigger at 14 days catches it.
 - ⏳ Post-restart decisions.jsonl monitored for IPL rows carrying `over_count` (live windows) and for spillover prevention on NBA/MLB/NHL rows (always absent — assertion is "0 spillover").
@@ -5934,7 +5934,7 @@ Phase 0 produced concrete evidence that the integration is feasible and the sche
 
 **Verification (post-restart).**
 - ✅ Pre-restart pytest baseline 1658/0.
-- ✅ Battle Scar #14 cwd verification passed before restart (`lsof -p 63214 | grep cwd` → `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`).
+- ✅ Battle Scar #14 cwd verification passed before restart (`lsof -p 63214 | grep cwd` → `~/Desktop/hustle-agent/hustle-agent`).
 - ✅ Restart via `launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot`. Old PID 63214 → new PID 85470. New PID's cwd re-verified.
 - ✅ `python3 tools/glint_status.py` post-restart: PID 85470 / uptime 11s / heartbeat 11s / scans_today 25 / Degraded with 11 positions / +$882.23 net.
 - ✅ 3 minutes post-restart: 3 new `LiveGameWatcher MOMENTUM` instances spawned at 23:09:37 (oklahoma city, minnesota, casper ruud). Per-tick logic ran normally — `LiveGameWatcher momentum tick: KXNBAGAME-26MAY11OKCLAL-OKC price=77c leader=True dip=0c opp=24c opp_leader=False opp_dip=0c entries=0/3 cooldown=0 holding=0 [16-19 Q1 2:32] wp=62% mom=+0.0` — trade logic intact, ESPN fetches firing, tick log writing.
@@ -7310,7 +7310,7 @@ Total actual EE **+$461.45** vs held CF **+$213.00**, delta **+$248.45**. This i
 - `CLAUDE.md`: Battle Scar #16 updated from stale line `1686` to the current active helper path; Open Loops references the kill rule.
 
 **Restart.**
-- Confirmed cwd: `/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent`.
+- Confirmed cwd: `~/Desktop/hustle-agent/hustle-agent`.
 - Glint wrapper PID `85464` / bot child PID `65590` before restart.
 - `launchctl kickstart -k gui/501/com.hustle-agent.bot`.
 - Glint wrapper PID `9553` / bot child PID `9580` after restart.
@@ -7671,7 +7671,7 @@ launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot
 
 - **S98 outer guard confirmed irrelevant to this failure mode.** `snapshot_outer_timeout_count_24h` = 0 across all wedge windows; the 600s `asyncio.wait_for` at [bot/main.py:1290](bot/main.py:1290) bounds in-scan stalls, not shutdown-cleanup stalls.
 
-- **BS#14 cwd-safety held throughout the week.** Every wedge resolution operated on PIDs whose `lsof -p $PID | grep cwd` showed `Desktop/hustle-agent/hustle-agent` — no cross-bot collision (Bob untouched). The launchd-driven new-wrapper retry pattern (rather than operator-issued `pkill -f bot.main`) made cross-bot collision structurally impossible during these restarts.
+- **BS#14 cwd-safety held throughout the week.** Every wedge resolution operated on PIDs whose `lsof -p $PID | grep cwd` showed `Desktop/hustle-agent/hustle-agent` — no cross-bot collision (Sidekick untouched). The launchd-driven new-wrapper retry pattern (rather than operator-issued `pkill -f bot.main`) made cross-bot collision structurally impossible during these restarts.
 
 **Outcome C: HOLD on the doc addendum.** Three reasons:
 
@@ -7775,7 +7775,7 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 2. **CLV file I/O is not the secondary wedge.** `clv.json` measured 7.7MB / 10,373 records / 3,617 open; read+parse+dump-to-string took about 0.05s. The hot path remains per-record `get_market(ticker)` through the S146 limiter.
 3. **The S151 cap fired but still timed out at 900s.** Batch logs at 22:30:25, 23:12:43, and 23:55:25 each hit the outer guard exactly 15 minutes later, proving the call was still active when S150 cut it off.
 4. **Snapshot timeouts pre-dated visible CLV batches.** Snapshot outer guards fired at 2026-05-18 21:51:49 and 22:24:51 ET, so snapshot pressure was not purely downstream of the capped CLV batches.
-5. **Dominant unexpected mechanism: duplicate bot runtime.** Process inspection found launchd's canonical wrapper (`/Users/tylergilstrap/Desktop/hustle-agent/hustle-agent/run_bot.sh`, PID 65565, child 65568) plus an extra `./run_bot.sh` wrapper (PID 76345) and duplicate `python -m bot.main` children (PIDs 43842 and 52047). That contaminates all Kalshi-rate and shared-state observations.
+5. **Dominant unexpected mechanism: duplicate bot runtime.** Process inspection found launchd's canonical wrapper (`~/Desktop/hustle-agent/hustle-agent/run_bot.sh`, PID 65565, child 65568) plus an extra `./run_bot.sh` wrapper (PID 76345) and duplicate `python -m bot.main` children (PIDs 43842 and 52047). That contaminates all Kalshi-rate and shared-state observations.
 
 **Decision.** Outcome D / HOLD on code changes. Clean the runtime first, then watch single-bot behavior. Reducing `_CHECK_CLV_BATCH_SIZE`, splitting the Kalshi limiter, or adding CLV instrumentation before removing the duplicate process would risk fixing the wrong layer.
 
@@ -7788,7 +7788,7 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Verification.**
 
 - `ps -axo pid,ppid,command | grep -E 'run_bot.sh|python -m bot.main|Python -m bot.main'` now shows exactly:
-  - `65565 1 /bin/bash /Users/tylergilstrap/Desktop/hustle-agent/hustle-agent/run_bot.sh`
+  - `65565 1 /bin/bash ~/Desktop/hustle-agent/hustle-agent/run_bot.sh`
   - `65568 65565 ... Python -m bot.main`
 - `launchctl print gui/$(id -u)/com.hustle-agent.bot` reports launchd state `running`, pid `65565`.
 - `bot/state/bot_state.json`: `running=true`, fresh heartbeat at `2026-05-19T04:43:28Z`.
@@ -7833,7 +7833,7 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 - Live deploy (restart on healthy DB): `running=True, outcome_tracker_degraded=False, since=None`, no §7 WARN — happy path writes the flags correctly.
 - **Live acceptance test (degraded round-trip).** `chmod 000` is NOT a valid break on this macOS (it landed as `0400`, and `CREATE TABLE IF NOT EXISTS` is a no-op when the table exists, so init succeeded — and a read-only DB would have failed the bot's `store_alert` writes, so it was restored immediately). The reliable break is replacing the path with a **directory** (`sqlite3.connect` then `execute` → `OperationalError: unable to open database file`). With the real DB backed up and the path a directory, the watchdog-respawned child logged exactly three S153 ERRORs in `bot.log`: (1) `DEGRADED: OutcomeTracker init failed (OperationalError: unable to open database file)`, (2) `OutcomeTracker auto-recovery FAILED (IsADirectoryError ...) — staying in DEGRADED mode`, (3) `DEGRADED: ... auto-recovery did not succeed ... Bot trading normally`. `bot_state` showed `running=True, outcome_tracker_degraded=True, outcome_tracker_degraded_since=<iso>` with a fresh heartbeat (alive + trading); glint_status §7 rendered the WARN. Restoring the real DB + respawn returned the bot to `degraded=False`, WARN cleared, single runtime. The recovery-**success** swap is proven by the deterministic `test_recovery_success_clears_journal_and_returns_tracker` unit test (a recoverable hot-journal is too flaky to reproduce live).
 
-**Operational note (restart mechanics).** `launchctl kickstart -k com.hustle-agent.bot` kills the launchd **wrapper** (`run_bot.sh`) but the **python child** survived and reparented to PID 1 — a transient duplicate runtime (BS#3/#14). Plain SIGTERM to a Glint child wedges it mid-graceful-shutdown (consistent with gotcha #3); `kill -9` is required, after which the `run_bot.sh` watchdog loop respawns a fresh child with no orphan. Verified single runtime after each transition via path-rooted checks; Bob (`~/Desktop/bob/`) was confirmed-untouched throughout (cwd-checked per BS#14 before every kill).
+**Operational note (restart mechanics).** `launchctl kickstart -k com.hustle-agent.bot` kills the launchd **wrapper** (`run_bot.sh`) but the **python child** survived and reparented to PID 1 — a transient duplicate runtime (BS#3/#14). Plain SIGTERM to a Glint child wedges it mid-graceful-shutdown (consistent with gotcha #3); `kill -9` is required, after which the `run_bot.sh` watchdog loop respawns a fresh child with no orphan. Verified single runtime after each transition via path-rooted checks; Sidekick (`~/Desktop/sidekick/`) was confirmed-untouched throughout (cwd-checked per BS#14 before every kill).
 
 **Watch-list.** If `outcome_tracker_degraded` ever flips True in production, the operator gets the glint_status §7 WARN — investigate `outcomes.db`, but the bot keeps trading (the whole point). The one-shot auto-recovery (backup + journal-clear + retry, post-lock) would have *fully* auto-healed the 2026-05-20 stale-journal outage; when it can't, the degraded flag + WARN make the otherwise-silent degradation visible.
 
@@ -7864,7 +7864,7 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 **Verification (live, 2026-05-20).**
 - Full suite **1860 passed**.
 - Deploy: `kill -9` the old-code child + clear pycache → `run_bot.sh` respawned the watchdog-equipped child (signalled the **python child** directly, never the wrapper — `kickstart -k` orphans the child per the S153 note).
-- **3 consecutive fully-started restarts**, each plain SIGTERM: self-terminated in ~10-11s with "Bot stopped" logged AND the `S154: graceful shutdown exceeded 10s` ERROR (watchdog fired), **zero kill -9**; single Glint runtime + correct lockfile after each (Bob at `~/Desktop/bob/` cwd-checked untouched throughout).
+- **3 consecutive fully-started restarts**, each plain SIGTERM: self-terminated in ~10-11s with "Bot stopped" logged AND the `S154: graceful shutdown exceeded 10s` ERROR (watchdog fired), **zero kill -9**; single Glint runtime + correct lockfile after each (Sidekick at `~/Desktop/sidekick/` cwd-checked untouched throughout).
 - (Two rushed restarts on <1s-old newborns exited cleanly via default SIGTERM before the handler registered — not watchdog tests, but confirm no regression on early-startup SIGTERM.)
 
 **Operating note.** The watchdog fires on **essentially every restart** — EXPECTED, not "cleanup too slow": a running bot almost always has an uncancellable rate-limited Kalshi/NWS executor call in-flight at SIGTERM, so the join genuinely can't complete. 10s bounded beats an infinite hang. `stop()` itself completes in ~1s; the remaining ~9s is the watchdog window (kept generous so in-flight WRITE executor calls can finish before force-exit).
@@ -7887,7 +7887,7 @@ None are dominant compared to the check_clv 176-min blow-up, but they're real wr
 
 **Tests.** Full repo suite **1877 passed, 0 skips/xfails** (1873 + 4 new S155 regressions: dead-mark-first persists independently, per-cycle budget stops before 900s, incremental persist survives a simulated mid-cycle abort, re-load-merge preserves concurrent appends). Planner independently re-ran the clv/settlement subset: **164 passed**.
 
-**Verification (live, 2026-05-21) — Part-1 batching FAILED, Part-2 drain fix CONFIRMED across 2 cycles.** *The failure:* the first batching cycle (`274 event-groups; draining oldest 200`, 01:46:28) hit the S150 900s guard at 02:01:28 and persisted nothing (`clv.json` unchanged at OPEN=4,087 / `settlement_failed`=0 at 02:16). The planner caught this by holding the push for live confirmation rather than trusting the tested-green claim. *Premise corrections from Phase 0:* (a) the old code was NOT literally zero-drain — its uncancellable leaked executor threads (BS#13) grind past the 900s abort and eventually `_save`, so over hours OPEN had drifted 4,087→2,378 / `settlement_failed` 0→1,104 by deploy time (noisy, thread-leaking drain, not none); (b) `clv` does NOT use `state_io` — `_save` is a bespoke tmp+rename with no shared lock (drove the re-load-merge design); (c) measured cost 98 groups → 621s ≈ **6.3s/group** (S146 limiter contended above the 3s/token floor); (d) Outcome D (bulk `get_markets(status="settled")`) rejected with evidence — no event filter → returns all settled markets (hundreds of pages) = MORE calls. *The fix, CONFIRMED:* deploy clean per BS#14 (SIGTERM python child 59343 → S154 watchdog force-exit → respawn **67496**; single Glint runtime, lock matches, Bob untouched — planner-verified via lsof cwd). Two post-deploy cycles — 09:55 (`dead_marked=11 groups_fetched=98 settled=3 budget_hit=True total=621.2s`) and 10:31 (`groups_fetched=105 settled=2 budget_hit=True total=603.0s`): **(1)** zero new `check_clv wedged > 900s` (counter frozen 32→32); **(2)** both cycles < 900s (621/603s, the 600s budget binding); **(3)** OPEN monotonically 2,378→2,371→2,369 and `settlement_failed` 1,104→1,115 (the +11 dead-marks PERSISTED mid-cycle — old code would have discarded them); **(4)** re-load-merge proven (+7 concurrent CFs survived all persists). Planner re-verified clv.json + bot.log + git independently at 10:36 before finalizing this entry.
+**Verification (live, 2026-05-21) — Part-1 batching FAILED, Part-2 drain fix CONFIRMED across 2 cycles.** *The failure:* the first batching cycle (`274 event-groups; draining oldest 200`, 01:46:28) hit the S150 900s guard at 02:01:28 and persisted nothing (`clv.json` unchanged at OPEN=4,087 / `settlement_failed`=0 at 02:16). The planner caught this by holding the push for live confirmation rather than trusting the tested-green claim. *Premise corrections from Phase 0:* (a) the old code was NOT literally zero-drain — its uncancellable leaked executor threads (BS#13) grind past the 900s abort and eventually `_save`, so over hours OPEN had drifted 4,087→2,378 / `settlement_failed` 0→1,104 by deploy time (noisy, thread-leaking drain, not none); (b) `clv` does NOT use `state_io` — `_save` is a bespoke tmp+rename with no shared lock (drove the re-load-merge design); (c) measured cost 98 groups → 621s ≈ **6.3s/group** (S146 limiter contended above the 3s/token floor); (d) Outcome D (bulk `get_markets(status="settled")`) rejected with evidence — no event filter → returns all settled markets (hundreds of pages) = MORE calls. *The fix, CONFIRMED:* deploy clean per BS#14 (SIGTERM python child 59343 → S154 watchdog force-exit → respawn **67496**; single Glint runtime, lock matches, Sidekick untouched — planner-verified via lsof cwd). Two post-deploy cycles — 09:55 (`dead_marked=11 groups_fetched=98 settled=3 budget_hit=True total=621.2s`) and 10:31 (`groups_fetched=105 settled=2 budget_hit=True total=603.0s`): **(1)** zero new `check_clv wedged > 900s` (counter frozen 32→32); **(2)** both cycles < 900s (621/603s, the 600s budget binding); **(3)** OPEN monotonically 2,378→2,371→2,369 and `settlement_failed` 1,104→1,115 (the +11 dead-marks PERSISTED mid-cycle — old code would have discarded them); **(4)** re-load-merge proven (+7 concurrent CFs survived all persists). Planner re-verified clv.json + bot.log + git independently at 10:36 before finalizing this entry.
 
 **Resolves the S152 Open Loop's wedge/cadence half.** check_clv no longer trips the 900s guard, no longer leaks an executor thread per cycle, and the main scan loop is no longer dragged ~15 min/iteration. **Honest caveat — the drain is now correct + durable but SLOW** (~2-3 settlements/cycle): ~1,026 stale records (median age 9.5d) are malformed/404/`scalar`-result junk that the GROUP path structurally can't terminal-mark (only the per-record fallback 404-marks, and these are groupable so they skip it), so they clog the oldest-first queue head and starve the ~10 newest settleable groups past the 600s budget. Futures are NOT the clog (they collapse to 3 event-groups). Emptying the backlog toward its ~1,125 futures-floor is the next CLV session (group-path terminal-marking + scalar-result handling) — filed in Open Loops; NOT scope-crept here.
 

@@ -348,7 +348,7 @@ Exited positions have `status: "exited"` (not `filled/partial`), so they're excl
 ### 3. Multiple processes
 The watchdog (`run_bot.sh`) and launchd both try to keep the bot alive. If the Telegram `RESTART` command kills the process without cleaning up cleanly, a zombie can linger.
 
-**CRITICAL — DO NOT use `ps aux | grep bot.main` (cross-bot collision risk per Battle Scar #14).** Bob also runs `python3 -m bot.main` because each repo names its package `bot/`. Bare-module-name greps match EVERY fleet bot. Killing what looks like a Glint orphan can take Bob down (and vice versa — both directions happened May 3, 2026).
+**CRITICAL — DO NOT use `ps aux | grep bot.main` (cross-bot collision risk per Battle Scar #14).** Sidekick also runs `python3 -m bot.main` because each repo names its package `bot/`. Bare-module-name greps match EVERY fleet bot. Killing what looks like a Glint orphan can take Sidekick down (and vice versa — both directions happened May 3, 2026).
 
 Use the **path-rooted** pattern instead:
 
@@ -422,11 +422,11 @@ If you write a new async loop and it calls into `bot/universe.py`, `bot/scanner.
 
 ### 14. Cross-bot PID identification — bare `bot.main` grep matches OTHER bots in the fleet (May 3, 2026)
 
-Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/hustle-agent/`, Bob = `~/Desktop/bob/`, future bots TBD). Each bot's main entry is invoked as `python3 -m bot.main` because each repo names its package `bot/`. Result: **`ps aux | grep bot.main` matches EVERY bot's process, not just Glint's.** Same for `pgrep -f "bot.main"`, `pkill -f "bot.main"`, etc.
+Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/hustle-agent/`, Sidekick = `~/Desktop/sidekick/`, future bots TBD). Each bot's main entry is invoked as `python3 -m bot.main` because each repo names its package `bot/`. Result: **`ps aux | grep bot.main` matches EVERY bot's process, not just Glint's.** Same for `pgrep -f "bot.main"`, `pkill -f "bot.main"`, etc.
 
 **Real incident — both directions, same day (May 3, 2026):**
-- ~13:45 ET: Bob's coder during Bob Session 2.5 dry run saw two `python3 -m bot.main` PIDs in `ps aux`, identified one as a Bob multi-PID orphan, killed it. The killed PID was Glint's bot.main (PID 82747). Glint's launchd KeepAlive respawned ~5s later as PID 74112; no data loss (Sunday, market closed).
-- ~13:51 ET: Glint planner (this CLAUDE.md author) saw a separate PID 48988 in `ps aux`, identified it as a Glint orphan, killed it. PID 48988 was actually Bob's hung process from a Session 2.5 verify pass. Same root cause, opposite direction.
+- ~13:45 ET: Sidekick's coder during Sidekick Session 2.5 dry run saw two `python3 -m bot.main` PIDs in `ps aux`, identified one as a Sidekick multi-PID orphan, killed it. The killed PID was Glint's bot.main (PID 82747). Glint's launchd KeepAlive respawned ~5s later as PID 74112; no data loss (Sunday, market closed).
+- ~13:51 ET: Glint planner (this CLAUDE.md author) saw a separate PID 48988 in `ps aux`, identified it as a Glint orphan, killed it. PID 48988 was actually Sidekick's hung process from a Session 2.5 verify pass. Same root cause, opposite direction.
 
 **Same root cause both directions:** the operator-facing identification command can't distinguish bots when they share the module name. As the fleet grows (3rd, 4th bot), this gets WORSE.
 
@@ -435,7 +435,7 @@ Tyler runs multiple trading bots in the fleet (Glint = `~/Desktop/hustle-agent/h
 For status checks, use the path-rooted filter — note this catches the **bash wrapper** only, not the python child (the child's cmdline has no repo path; CWD doesn't appear in `ps aux`). Wrapper-presence is sufficient signal because launchd KeepAlive auto-respawns the child if it dies:
 ```bash
 ps aux | grep "Desktop/hustle-agent/hustle-agent" | grep -v grep    # Glint wrapper
-ps aux | grep "Desktop/bob" | grep -v grep                            # Bob wrapper
+ps aux | grep "Desktop/sidekick" | grep -v grep                            # Sidekick wrapper
 ```
 
 To **see both** the wrapper and the python child for a single bot, use the parent-chain (this also gives you the actual PIDs to operate on):
@@ -456,12 +456,12 @@ kill "$BOT_PID"
 The launchd service label is also bot-unique and a safe target for restart operations:
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.hustle-agent.bot   # Glint
-launchctl kickstart -k gui/$(id -u)/com.bob.bot            # Bob (when configured)
+launchctl kickstart -k gui/$(id -u)/com.sidekick.bot            # Sidekick (when configured)
 ```
 
 Battle Scar #3 (single-PID enforcement) was updated May 3 to use the path-rooted pattern; this entry is the structural reminder for future bots added to the fleet.
 
-**Operator note (Session 83):** seeing two `python -m bot.main` processes in `ps aux` is NOT automatically Battle Scar #3 — verify the working directory of each PID via `lsof -p <PID> | grep cwd` before flagging an orphan. The Bob bot at `~/Desktop/bob/` runs the same `python -m bot.main` invocation and is launchd-managed independently; only flag an orphan when two PIDs share the same working directory tree. The Session 81 spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
+**Operator note (Session 83):** seeing two `python -m bot.main` processes in `ps aux` is NOT automatically Battle Scar #3 — verify the working directory of each PID via `lsof -p <PID> | grep cwd` before flagging an orphan. The Sidekick bot at `~/Desktop/sidekick/` runs the same `python -m bot.main` invocation and is launchd-managed independently; only flag an orphan when two PIDs share the same working directory tree. The Session 81 spawn_task chip and my Session 83 morning panic both came from skipping this cwd check.
 
 ### 15. Telegram 429s are state, not noise (Session 52, May 3)
 
@@ -1447,7 +1447,7 @@ Run `python3 tools/glint_status.py` and scan top-down. Session 91 reshaped the r
 
 **Answer in plain English:** "Bot is alive (X uptime), Y exposure, Z settling in 24h, top concern is...". Don't invent performance numbers — pull from `trade_history.json` and `strategy_audit.json` if specific P&L claims are needed.
 
-**When the report itself looks wrong** (e.g. vitals show DEAD but you can see the bot in `ps aux`), check `lsof -p <PID> | grep cwd` to confirm the working directory matches Glint, not Bob (Battle Scar #14). If `python3 tools/glint_status.py` errors out, the upstream `paths.claude_md.read_text()` or `_load_json` calls usually surface the actual file issue.
+**When the report itself looks wrong** (e.g. vitals show DEAD but you can see the bot in `ps aux`), check `lsof -p <PID> | grep cwd` to confirm the working directory matches Glint, not Sidekick (Battle Scar #14). If `python3 tools/glint_status.py` errors out, the upstream `paths.claude_md.read_text()` or `_load_json` calls usually surface the actual file issue.
 
 ---
 
